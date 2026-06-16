@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import pytest
+
+from backend.mcp.antsword import build_antsword_mcp
+from backend.mcp.shared import build_browser_mcp, build_ghidra_mcp, build_zap_mcp
+from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
+from backend.tools.tool_registry import ToolRegistry
+
+
+@pytest.fixture
+def registry(tmp_path):
+    return ToolRegistry(cache_db=tmp_path / "tool_cache.db").load()
+
+
+def test_registry_loads_all_categories(registry):
+    cats = registry.categories()
+    for c in ("web", "reverse", "crypto", "pwn", "misc", "ai", "osint"):
+        assert c in cats
+    assert registry.get("sqlmap") is not None
+
+
+def test_exposed_for_category(registry):
+    web = registry.exposed_for("web")
+    names = {t.name for t in web}
+    assert "sqlmap" in names
+    assert "ghidra" not in names  # reverse-only
+
+
+def test_tool_search_finds_cross_category(registry):
+    results = registry.search("rsa lattice factoring")
+    names = {t.name for t in results}
+    assert "rsactftool" in names or "sage" in names
+
+
+def test_tool_search_cache(registry):
+    registry.search("memory forensics")
+    cached = registry.cached_search("memory forensics")
+    assert cached is not None
+    assert "volatility3" in cached
+
+
+def test_tool_search_mcp(registry):
+    mcp = build_tool_search_mcp(registry)
+    hits = mcp.call("tool_search", query="ssti flask template")
+    assert any(h["name"] == "fenjing" for h in hits)
+
+
+def test_category_tools_mcp(registry):
+    mcp = build_category_tools_mcp(registry, "pwn")
+    tools = mcp.call("list_tools")
+    assert any(t["name"] == "pwntools" for t in tools)
+    got = mcp.call("get_tool", name="gdb")
+    assert got["exec"] == "gdb"
+    assert mcp.call("get_tool", name="nope")["error"]
+
+
+def test_antsword_encoder():
+    mcp = build_antsword_mcp()
+    out = mcp.call("encoder", data="system('id')", scheme="base64")
+    import base64
+    assert base64.b64decode(out["encoded"]).decode() == "system('id')"
+
+
+def test_antsword_webshell_and_upload():
+    mcp = build_antsword_mcp()
+    shell = mcp.call("webshell_generator", kind="php", password="pw")
+    assert shell["safe_stub"] is True
+    assert "SAFE_TEMPLATE[php]" in shell["shell"]
+    assert shell["password"] == "pw"
+    up = mcp.call("upload", content=shell["shell"], filename="x.php")
+    assert "multipart/form-data" in up["headers"]["Content-Type"]
+    assert "x.php" in up["body"]
+
+
+def test_antsword_php_bypass_and_mutation():
+    mcp = build_antsword_mcp()
+    bp = mcp.call("php_bypass", technique="disable_functions_FFI")
+    assert "FFI" in bp["snippet"]
+    assert "omitted by the safe stub" in bp["snippet"]
+    mut = mcp.call("traffic_mutation", payload="whoami", method="comment_insert")
+    assert "/**/" in mut["mutated"] or mut["mutated"] == "whoami"
+
+
+def test_antsword_has_five_tools():
+    mcp = build_antsword_mcp()
+    names = {t["name"] for t in mcp.list_tools()}
+    assert names == {"encoder", "upload", "php_bypass", "traffic_mutation", "webshell_generator"}
+
+
+def test_shared_mcps():
+    b = build_browser_mcp()
+    assert b.call("navigate", url="http://x")["status"] == 200
+    g = build_ghidra_mcp()
+    assert "pseudocode" in g.call("decompile", binary="/bin/ls")
+    z = build_zap_mcp()
+    assert "alerts" in z.call("active_scan", url="http://x")

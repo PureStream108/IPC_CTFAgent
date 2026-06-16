@@ -1,0 +1,41 @@
+log_enabled: true
+diamond:
+  api_format: claudecode
+  api_key: 
+  base_url: 
+  model: claude-opus-4-6
+members:
+- api_format: openai
+  api_key: 
+  base_url: 
+  model: gpt-5.4
+  name: aventurine
+- api_format: openai
+  api_key: 
+  base_url: 
+  model: gpt-5.5
+  name: pearl
+- api_format: openai
+  api_key: 
+  base_url: 
+  model: gpt-5.4
+  name: jade
+- api_format: openai
+  api_key: sk-
+  base_url: 
+  model: gpt-5.4
+  name: topaz
+runtime:
+  eval_interval_steps: 7
+  interval: 2
+  intent_timeout: 30
+  reason_timeout: 30
+  max_members_per_report: 3
+  sandbox_backend: docker
+  max_member_steps: 60
+limits:
+  total_cpu: 4
+  total_memory_gb: 20
+  total_disk_gb: 25
+  per_agent_memory_gb: 5
+  network: true

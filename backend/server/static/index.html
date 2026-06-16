@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IPC · CTF Agents</title>
+  <link rel="icon" type="image/png" href="/static/Interastral_Peace_Corporation_2.png" />
+  <script src="/static/vendor/tailwindcss.js"></script>
+  <script src="/static/vendor/dagre.min.js"></script>
+  <script src="/static/vendor/cytoscape.min.js"></script>
+  <script src="/static/vendor/cytoscape-dagre.js"></script>
+  <script defer src="/static/vendor/alpine.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    #cy { width: 100%; height: 100%; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .overlay { background: rgba(15,23,42,0.25); backdrop-filter: blur(6px); }
+    .panel { background: rgba(255,255,255,0.96); border: 1px solid rgba(226,232,240,0.9); box-shadow: 0 12px 30px rgba(15,23,42,0.08); }
+    .chip { border: 1px solid #e2e8f0; background: #f8fafc; color: #64748b; }
+    .btn { border: 1px solid #c7d2fe; background: #eef2ff; color: #4f46e5; transition: all 160ms ease; }
+    .btn:hover { background: #e0e7ff; color: #4338ca; }
+    .btn-ghost { border: 1px solid #e2e8f0; background: rgba(255,255,255,0.9); color: #64748b; transition: all 160ms ease; }
+    .btn-ghost:hover { background: #f8fafc; color: #334155; border-color: #cbd5e1; }
+    .btn-danger { border-color: #fecdd3; color: #e11d48; }
+    .btn-danger:hover { background: #fff1f2; color: #be123c; border-color: #fda4af; }
+    input, select, textarea { background: #fff; border: 1px solid #e2e8f0; color: #334155; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
+    input[type="checkbox"] { accent-color: #6366f1; }
+    .graph-grid {
+      background:
+        radial-gradient(circle at 1px 1px, rgba(148,163,184,0.20) 1px, transparent 0) 0 0/26px 26px,
+        linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.72));
+    }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        fontFamily: { sans: ['-apple-system','BlinkMacSystemFont','Inter','Segoe UI','sans-serif'] },
+        extend: {
+          colors: {
+            brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden" x-data="ipcApp()" x-init="init()">
+  <header class="bg-white/80 backdrop-blur border-b border-slate-200/60 px-4 py-2.5 flex items-center gap-3 shrink-0">
+    <button type="button" @click="sidebarOpen=!sidebarOpen" class="h-8 w-8 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center justify-center" title="Toggle projects">
+      <svg x-show="sidebarOpen" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+      <svg x-show="!sidebarOpen" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+    <div class="flex items-center gap-2.5 min-w-0">
+      <div class="h-8 w-8 rounded-lg border border-slate-200 bg-white shadow-sm shadow-slate-200/40 flex items-center justify-center shrink-0 overflow-hidden">
+        <img src="/static/ipc.png" alt="IPC" class="w-7 h-7 object-contain">
+      </div>
+      <div class="min-w-0">
+        <div class="font-semibold text-slate-700 tracking-tight leading-tight">IPC</div>
+        <div class="text-[11px] text-slate-400 leading-tight truncate">Equal CTF Solver Agents</div>
+      </div>
+    </div>
+    <div class="flex-1"></div>
+    <div class="hidden sm:flex items-center gap-3 text-[11px] text-slate-400">
+      <span class="inline-flex items-center gap-1.5" title="All projects">
+        <span class="font-medium uppercase tracking-[0.12em] text-slate-400">All</span>
+        <span class="font-semibold text-slate-600 tabular-nums" x-text="projects.length"></span>
+      </span>
+      <span class="inline-flex items-center gap-1.5" title="Running projects">
+        <span class="h-1.5 w-1.5 rounded-full bg-teal-500"></span>
+        <span class="font-semibold text-teal-700 tabular-nums" x-text="countBy('running')"></span>
+      </span>
+      <span class="inline-flex items-center gap-1.5" title="Stopped projects">
+        <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+        <span class="font-semibold text-amber-700 tabular-nums" x-text="countBy('stopped')"></span>
+      </span>
+      <span class="inline-flex items-center gap-1.5" title="Completed projects">
+        <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+        <span class="font-semibold text-slate-600 tabular-nums" x-text="countBy('completed')"></span>
+      </span>
+    </div>
+    <label class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 transition inline-flex items-center gap-1.5">
+      <input type="checkbox" x-model="logEnabled" @change="toggleLog()" />
+      Logs
+    </label>
+    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">IPC</button>
+  </header>
+
+  <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
+    <button class="h-7 px-2.5 rounded-lg border border-amber-200 text-xs text-amber-700 hover:bg-amber-50 transition inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+      :disabled="!hasActive" @click="stopAll()" title="Stop all active projects">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+      Stop Active
+    </button>
+    <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs inline-flex items-center gap-1.5" @click="openMemory()">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 6.5c-2-1.5-4-2-6-1.5v13c2-.5 4 0 6 1.5 2-1.5 4-2 6-1.5v-13c-2-.5-4 0-6 1.5Z"/><path d="M12 6.5v13"/></svg>
+      Memory
+    </button>
+    <button class="btn h-7 px-2.5 rounded-lg text-xs inline-flex items-center gap-1.5" @click="showNewProject=true">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+      + New Project
+    </button>
+    <div class="flex-1"></div>
+    <template x-if="current">
+      <div class="hidden md:flex items-center gap-2 text-xs text-slate-400 min-w-0">
+        <span class="px-2 py-1 rounded-lg chip uppercase tracking-wide" x-text="current.project.category"></span>
+        <span class="truncate max-w-[320px]" x-text="current.project.title"></span>
+        <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.status"></span>
+      </div>
+    </template>
+  </div>
+
+  <div class="flex-1 flex overflow-hidden">
+    <aside class="border-r border-slate-200/60 bg-white/90 flex flex-col overflow-hidden transition-all shrink-0"
+      :class="sidebarOpen ? 'w-64' : 'w-0 border-r-0'">
+      <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Projects</div>
+        <button class="h-6 w-6 rounded-md border border-slate-200 text-slate-400 hover:bg-slate-50 inline-flex items-center justify-center" @click="sidebarOpen=false" title="Collapse">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-2">
+        <template x-for="p in projects" :key="p.id">
+          <button class="group w-full text-left rounded-xl border p-3 mb-2 transition"
+            :class="selectedId===p.id ? 'border-brand-200 bg-brand-50/80 shadow-sm' : 'border-transparent hover:border-slate-200 hover:bg-slate-50'"
+            @click="openProject(p.id)">
+            <div class="flex items-start justify-between gap-2">
+              <span class="text-[11px] font-mono text-slate-400" x-text="p.id"></span>
+              <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase tracking-[0.12em]" :class="projectStatusBadgeClass(p.status)" x-text="p.status"></span>
+            </div>
+            <div class="mt-2 text-sm font-semibold text-slate-700 break-words [overflow-wrap:anywhere] group-hover:text-brand-600" x-text="p.title"></div>
+            <div class="mt-2 flex items-center gap-3 text-[11px] text-slate-400">
+              <span class="uppercase" x-text="p.category"></span>
+              <span x-text="p.member_count + 'M'"></span>
+              <span x-text="p.fact_count + 'F'"></span>
+            </div>
+          </button>
+        </template>
+        <div x-show="projects.length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
+      </div>
+    </aside>
+
+    <main class="flex-1 flex overflow-hidden min-w-0">
+      <section class="flex-1 relative min-w-0 graph-grid">
+        <div class="absolute top-3 left-3 z-10 flex items-center gap-1.5" x-show="selectedId">
+          <button class="h-7 w-7 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-slate-200/60 text-slate-500 hover:text-slate-700 hover:bg-white transition inline-flex items-center justify-center" @click="fit()" title="Fit graph">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+          </button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='created'" @click="startSolve()">Start</button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='stopped'" @click="resumeSolve()">Resume</button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='completed'" @click="reopenProject()">Reopen</button>
+          <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='running'" @click="stopSolve()">Stop</button>
+          <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.wp_path" @click="openWP()">WP</button>
+          <button class="btn-ghost btn-danger h-7 px-2.5 rounded-lg text-xs" @click="deleteProject()">Delete</button>
+        </div>
+        <template x-if="current && current.project.reason">
+          <div class="absolute top-14 right-3 z-10 max-w-80">
+            <div class="relative overflow-hidden rounded-2xl border border-sky-200/80 bg-white/95 px-3.5 py-3 shadow-lg shadow-sky-100/60 backdrop-blur">
+              <div class="flex items-start gap-3">
+                <span class="relative mt-1 h-2.5 w-2.5 rounded-full bg-sky-500 shadow-[0_0_0_4px_rgba(14,165,233,0.16)] shrink-0"></span>
+                <div class="min-w-0">
+                  <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-500">Reason Running</div>
+                  <div class="mt-0.5 text-sm font-semibold text-slate-700 truncate" x-text="current.project.reason.worker"></div>
+                  <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                    <span x-show="current.project.reason.trigger" x-text="'Trigger ' + current.project.reason.trigger"></span>
+                    <span x-text="'Heartbeat ' + formatTime(current.project.reason.last_heartbeat_at)"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div id="cy" class="relative z-0"></div>
+        <div x-show="!selectedId" class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
+          Select or create a project to view its flow graph.
+        </div>
+      </section>
+
+      <aside class="w-[360px] max-w-[42vw] border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0" x-show="selectedId">
+        <div class="flex border-b border-slate-100 shrink-0">
+          <button @click="sideTab='detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+            :class="sideTab==='detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Detail</button>
+          <button @click="sideTab='hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+            :class="sideTab==='hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
+            Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="current ? current.hints.length : 0"></span>
+          </button>
+          <button @click="sideTab='log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+            :class="sideTab==='log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
+        </div>
+
+        <div x-show="sideTab==='detail'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/40">
+          <template x-if="!selectedNode">
+            <div class="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-5 py-10 text-center shadow-sm">
+              <p class="text-sm text-slate-400">Click a node or edge</p>
+              <p class="text-xs text-slate-300 mt-1">Node thoughts and process details appear here</p>
+            </div>
+          </template>
+
+          <template x-if="selectedNode && selectedNode.type==='fact' && selectedFactRecord()">
+            <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+              <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold" :class="factBadgeClass(selectedFactId())" x-text="selectedFactId()"></span>
+                  <span class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Fact</span>
+                </div>
+              </div>
+              <div class="p-4 space-y-4">
+                <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedFactRecord().description"></p>
+                <div class="pt-4 border-t border-slate-100 space-y-3 text-xs">
+                  <template x-if="selectedFactId()==='origin'">
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Role</span><span class="text-slate-600 text-right">Project starting point</span></div>
+                  </template>
+                  <template x-if="selectedFactId()==='goal'">
+                    <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Role</span><span class="text-slate-600 text-right">Project target fact</span></div>
+                  </template>
+                  <template x-if="selectedFactProducingIntent()">
+                    <div class="space-y-3">
+                      <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Intent</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedFactProducingIntent().id"></span></div>
+                      <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">From</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedFactProducingIntent().from.join(', ')"></span></div>
+                      <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Worker</span><span class="text-slate-600 text-right break-all" x-text="selectedFactProducingIntent().worker || '-'"></span></div>
+                      <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Concluded</span><span class="text-slate-600 text-right break-words" x-text="formatTime(selectedFactProducingIntent().concluded_at || selectedFactProducingIntent().created_at)"></span></div>
+                    </div>
+                  </template>
+                </div>
+                <template x-if="nodeThoughts().length">
+                  <div class="pt-4 border-t border-slate-100">
+                    <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-3">Thoughts</p>
+                    <div class="space-y-2">
+                      <template x-for="(entry,i) in nodeThoughts()" :key="i">
+                        <div class="rounded-xl border border-slate-100 bg-slate-50/80 p-3 text-xs">
+                          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-1">
+                            <span x-text="entry.member || entry.worker || entry.event"></span>
+                            <span x-text="formatTime(entry.ts)"></span>
+                          </div>
+                          <p class="text-slate-700 whitespace-pre-wrap break-words" x-text="entry.thought || entry.progress || logSummary(entry)"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </section>
+          </template>
+
+          <template x-if="selectedNode && selectedNode.type==='intent' && selectedIntentRecord()">
+            <section class="rounded-2xl border border-violet-200/80 bg-white shadow-sm overflow-hidden">
+              <div class="px-4 py-3 border-b border-violet-100 bg-violet-50/70">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded-md bg-violet-100 text-violet-700 text-[10px] font-mono font-bold" x-text="selectedIntentId()"></span>
+                  <span class="text-[11px] font-medium" :class="intentStatusClass(selectedIntentRecord())" x-text="intentStatusLabel(selectedIntentRecord())"></span>
+                </div>
+              </div>
+              <div class="p-4 space-y-4">
+                <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="selectedIntentRecord().description"></p>
+                <div class="pt-4 border-t border-slate-100 space-y-3 text-xs">
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">From</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedIntentRecord().from.join(', ')"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">To</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedIntentRecord().to || '-'"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Creator</span><span class="text-slate-600 text-right break-all" x-text="selectedIntentRecord().creator"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Worker</span><span class="text-slate-600 text-right break-all" x-text="selectedIntentRecord().worker || '-'"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Heartbeat</span><span class="text-slate-600 text-right break-words" x-text="selectedIntentRecord().last_heartbeat_at ? formatTime(selectedIntentRecord().last_heartbeat_at) : '-'"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Created</span><span class="text-slate-600 text-right break-words" x-text="formatTime(selectedIntentRecord().created_at)"></span></div>
+                </div>
+                <template x-if="nodeThoughts().length">
+                  <div class="pt-4 border-t border-slate-100">
+                    <p class="text-[10px] font-semibold text-violet-500 uppercase tracking-widest mb-3">Thoughts</p>
+                    <div class="space-y-2">
+                      <template x-for="(entry,i) in nodeThoughts()" :key="i">
+                        <div class="rounded-xl border border-violet-100 bg-violet-50/60 p-3 text-xs">
+                          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-1">
+                            <span x-text="[entry.member, entry.action || entry.event].filter(Boolean).join(' · ')"></span>
+                            <span x-text="formatTime(entry.ts)"></span>
+                          </div>
+                          <p class="text-slate-700 whitespace-pre-wrap break-words" x-text="entry.thought || entry.progress || logSummary(entry)"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </section>
+          </template>
+
+          <template x-if="selectedNode && selectedNode.type==='agent' && selectedAgentRecord()">
+            <section class="rounded-2xl border border-sky-200/80 bg-white shadow-sm overflow-hidden">
+              <div class="px-4 py-3 border-b border-sky-100 bg-sky-50/70">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded-md bg-sky-100 text-sky-700 text-[10px] font-mono font-bold" x-text="selectedAgentRecord().name"></span>
+                  <span class="text-[11px] font-medium text-sky-600 uppercase" x-text="selectedAgentRecord().role"></span>
+                </div>
+              </div>
+              <div class="p-4 space-y-4">
+                <div class="space-y-3 text-xs">
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">State</span><span class="text-slate-600 text-right" x-text="selectedAgentRecord().state"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Start Fact</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedAgentRecord().start_fact_id || '-'"></span></div>
+                </div>
+                <template x-if="agentReports(selectedAgentRecord().name).length">
+                  <div class="pt-4 border-t border-slate-100">
+                    <p class="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-3">Reports</p>
+                    <div class="space-y-2">
+                      <template x-for="r in agentReports(selectedAgentRecord().name)" :key="r.id">
+                        <div class="rounded-xl border border-slate-100 bg-slate-50/80 p-3 text-xs">
+                          <div class="flex justify-between gap-2 mb-1"><span class="font-medium text-slate-600" x-text="r.difficulty"></span><span class="text-slate-400" x-text="formatTime(r.created_at)"></span></div>
+                          <p class="text-slate-700 whitespace-pre-wrap break-words" x-text="r.progress"></p>
+                          <p class="mt-1 text-slate-400 break-words" x-show="r.directions.length" x-text="'Directions: ' + r.directions.join(', ')"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="nodeThoughts().length">
+                  <div class="pt-4 border-t border-slate-100">
+                    <p class="text-[10px] font-semibold text-sky-500 uppercase tracking-widest mb-3">Thoughts</p>
+                    <div class="space-y-2">
+                      <template x-for="(entry,i) in nodeThoughts()" :key="i">
+                        <div class="rounded-xl border border-sky-100 bg-sky-50/60 p-3 text-xs">
+                          <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-1">
+                            <span x-text="entry.action || entry.event"></span>
+                            <span x-text="formatTime(entry.ts)"></span>
+                          </div>
+                          <p class="text-slate-700 whitespace-pre-wrap break-words" x-text="entry.thought || entry.progress || logSummary(entry)"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </section>
+          </template>
+
+          <template x-if="selectedNode && selectedNode.type==='special'">
+            <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+              <div class="px-4 py-3 border-b border-slate-100 bg-slate-50/80">
+                <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400" x-text="selectedSpecialLabel()"></div>
+              </div>
+              <div class="p-4 space-y-3 text-sm text-slate-700">
+                <template x-if="selectedSpecialId()==='flag'">
+                  <p class="break-all"><span class="text-slate-400">FLAG:</span> <span class="text-emerald-600 font-semibold" x-text="current.project.flag || '-'"></span></p>
+                </template>
+                <template x-if="selectedSpecialId()==='wp'">
+                  <p>Writeup stage. Use the WP button above to read the generated markdown.</p>
+                </template>
+              </div>
+            </section>
+          </template>
+        </div>
+
+        <div x-show="sideTab==='hints'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-amber-50/25">
+          <template x-if="current && current.hints.length===0">
+            <div class="rounded-2xl border border-dashed border-amber-200 bg-white/80 px-5 py-10 text-center shadow-sm text-sm text-slate-300">No hints yet</div>
+          </template>
+          <template x-for="h in (current ? current.hints : [])" :key="h.id">
+            <article class="rounded-2xl border border-amber-200/80 bg-white shadow-sm overflow-hidden">
+              <div class="px-4 py-3 border-b border-amber-100 bg-amber-50/80">
+                <div class="flex items-center justify-between gap-3 text-[11px]">
+                  <div class="flex items-center gap-2 min-w-0"><span class="w-2 h-2 rounded-full bg-amber-400 shrink-0"></span><span class="font-medium text-amber-800 truncate" x-text="h.creator"></span></div>
+                  <span class="text-amber-600/80 shrink-0 tabular-nums" x-text="formatTime(h.created_at)"></span>
+                </div>
+              </div>
+              <div class="p-4"><p class="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap break-words" x-text="h.content"></p></div>
+            </article>
+          </template>
+        </div>
+
+        <div x-show="sideTab==='log'" class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Project Log</span>
+            <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="loadLog()">Refresh</button>
+          </div>
+          <template x-if="timelineEvents().length===0">
+            <p class="text-sm text-slate-300 text-center mt-12">No activity yet</p>
+          </template>
+          <template x-for="entry in timelineEvents()" :key="entry.id">
+            <div class="flex items-stretch gap-3">
+              <div class="flex flex-col items-center shrink-0">
+                <div class="w-2.5 h-2.5 rounded-full mt-1.5" :class="timelineEventDotClass(entry)"></div>
+                <div class="w-px flex-1 bg-slate-100 mt-2" x-show="!entry.isLast"></div>
+              </div>
+              <button type="button" @click="openTimelineEntry(entry)" class="min-w-0 flex-1 text-left rounded-xl px-0.5 py-0.5 transition hover:bg-slate-50/70">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-[11px] font-medium text-slate-400 tabular-nums" x-text="formatTime(entry.timestamp)"></span>
+                  <span class="px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" :class="timelineEventBadgeClass(entry)" x-text="timelineEventBadge(entry)"></span>
+                </div>
+                <p class="text-sm text-slate-700 leading-relaxed break-words mt-1" x-text="entry.title"></p>
+                <p class="text-[11px] text-slate-400 mt-1 break-words" x-text="[entry.actor, ...entry.meta].filter(Boolean).join(' · ')"></p>
+              </button>
+            </div>
+          </template>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <footer class="border-t border-slate-200/60 bg-white/80 px-4 py-1.5 overflow-hidden shrink-0">
+    <div class="flex items-center gap-2 text-xs">
+      <span class="text-brand-600 font-semibold shrink-0">BROADCAST</span>
+      <div class="flex-1 overflow-x-auto whitespace-nowrap">
+        <template x-if="broadcasts.length===0"><span class="text-slate-400">No completions yet.</span></template>
+        <template x-for="b in broadcasts" :key="b.id">
+          <span class="mr-6"><b x-text="b.title"></b> -> <span class="text-emerald-600" x-text="b.flag"></span></span>
+        </template>
+      </div>
+    </div>
+  </footer>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showNewProject" x-cloak>
+    <div class="panel rounded-2xl w-[520px] max-h-[90vh] overflow-y-auto p-5">
+      <div class="text-lg font-semibold text-slate-700 mb-4">New Project</div>
+      <label class="text-xs text-slate-400">Project title</label>
+      <input class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" x-model="np.title" />
+      <label class="text-xs text-slate-400">Category</label>
+      <select class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" x-model="np.category">
+        <template x-for="c in categories" :key="c"><option :value="c" x-text="c"></option></template>
+      </select>
+      <label class="text-xs text-slate-400">Origin</label>
+      <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="np.origin"></textarea>
+      <label class="text-xs text-slate-400">Goal</label>
+      <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="np.goal"></textarea>
+      <label class="text-xs text-slate-400">Hints (optional)</label>
+      <template x-for="(h,i) in np.hints" :key="i">
+        <div class="flex gap-1 mb-1 mt-1">
+          <input class="flex-1 rounded-lg px-2.5 py-1.5 text-sm" x-model="h.content" placeholder="hint" />
+          <button class="btn-ghost px-2 rounded-lg" @click="np.hints.splice(i,1)" x-show="np.hints.length>1">x</button>
+        </div>
+      </template>
+      <button class="text-xs text-brand-600 mb-3 hover:text-brand-700" @click="np.hints.push({content:''})">+ Add hint</button>
+      <div class="mb-4">
+        <label class="text-xs text-slate-400">ATTACHMENT (OPTIONAL)</label>
+        <input type="file" class="w-full rounded-lg px-2.5 py-1.5 mt-1 text-xs" x-ref="npfile" multiple />
+      </div>
+      <div class="flex justify-end gap-2">
+        <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showNewProject=false">Cancel</button>
+        <button class="btn px-3 py-1.5 rounded-lg text-sm disabled:opacity-40" :disabled="!np.title||!np.origin||!np.goal" @click="createProject()">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showIPC" x-cloak>
+    <div class="panel rounded-2xl w-[600px] max-h-[90vh] overflow-y-auto p-5">
+      <div class="flex items-center justify-between mb-4">
+        <div class="text-lg font-semibold text-slate-700">IPC - Agent Endpoints</div>
+        <button class="btn-ghost px-2.5 py-1 rounded-lg text-xs" @click="runHealth()">Health check</button>
+      </div>
+      <template x-if="cfg">
+        <div>
+          <div class="text-xs text-amber-600 mb-2" x-show="cfg.startup_errors.length">
+            <template x-for="e in cfg.startup_errors" :key="e"><div x-text="'! ' + e"></div></template>
+          </div>
+          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3">
+            <div class="text-sm font-semibold text-slate-700 mb-2">Diamond <span class="text-[10px]" :class="health.diamond?(health.diamond.ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health.diamond?(health.diamond.ok?'healthy':'unreachable'):''"></span></div>
+            <div x-html="llmFields('diamond', cfg.diamond)"></div>
+          </div>
+          <template x-for="m in cfg.members" :key="m.name">
+            <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
+              <div class="text-sm font-semibold text-slate-700 mb-2 capitalize" x-text="m.name"></div>
+              <div x-html="llmFields(m.name, m)"></div>
+            </div>
+          </template>
+          <div class="flex justify-end gap-2 mt-3">
+            <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showIPC=false">Close</button>
+            <button class="btn px-3 py-1.5 rounded-lg text-sm" @click="saveIPC()">Save</button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showMemory" x-cloak>
+    <div class="panel rounded-2xl w-[680px] max-h-[90vh] overflow-y-auto p-5">
+      <div class="flex items-center justify-between mb-4">
+        <div class="text-lg font-semibold text-slate-700">Memory</div>
+        <div class="flex gap-2">
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showAddMem=!showAddMem">+ Add</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveMemory()">+ Derive</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showMemory=false">Close</button>
+        </div>
+      </div>
+      <div class="rounded-2xl border border-slate-200 bg-slate-50/60 p-3 mb-3" x-show="showAddMem">
+        <select class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.category">
+          <option value="knowledge">knowledge</option><option value="tool_usage">tool_usage</option>
+          <option value="exploit">exploit</option><option value="lessons">lessons</option>
+        </select>
+        <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.title" placeholder="title" />
+        <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" rows="2" x-model="nm.content" placeholder="content"></textarea>
+        <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.tags" placeholder="tags (comma separated)" />
+        <button class="btn px-3 py-1.5 rounded-lg text-sm" @click="addMemory()">Save memory</button>
+      </div>
+      <template x-for="m in memories" :key="m.id">
+        <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
+          <div class="flex justify-between gap-3">
+            <span class="text-sm font-semibold text-slate-700" x-text="m.title"></span>
+            <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="m.category"></span>
+          </div>
+          <div class="text-[11px] text-slate-500 mt-1 whitespace-pre-wrap" x-text="m.content"></div>
+          <div class="text-[10px] text-slate-400 mt-1" x-text="(m.tags||[]).join(', ')"></div>
+        </div>
+      </template>
+      <div x-show="memories.length===0" class="text-xs text-slate-400">No memory yet.</div>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showWP" x-cloak>
+    <div class="panel rounded-2xl w-[760px] max-h-[90vh] overflow-y-auto p-5">
+      <div class="flex items-center justify-between mb-4">
+        <div class="text-lg font-semibold text-slate-700">Writeup</div>
+        <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showWP=false">Close</button>
+      </div>
+      <pre class="text-[11px] whitespace-pre-wrap text-slate-600" x-text="wpText"></pre>
+    </div>
+  </div>
+
+  <div class="fixed bottom-10 right-4 z-40" x-show="toast" x-cloak x-transition>
+    <div class="panel rounded-xl px-4 py-2 text-sm text-slate-700" x-text="toast"></div>
+  </div>
+
+  <script>
+  function ipcApp() {
+    return {
+      projects: [], selectedId: null, current: null, broadcasts: [],
+      categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
+      sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
+      showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
+      np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
+      nm: { category:"knowledge", title:"", content:"", tags:"" },
+      cfg: null, health: {}, memories: [], wpText: "", toast: "",
+      selectedNode: null, cy: null, _poll: null, _flowTimer: null,
+
+      async init() {
+        window._ipc = this;
+        await this.loadProjects();
+        await this.loadBroadcasts();
+        const st = await this.api("GET","/logs/status"); this.logEnabled = st.enabled;
+        if (this.projects.length) this.openProject(this.projects[0].id);
+        this._poll = setInterval(()=>this.tick(), 2500);
+      },
+      async tick() {
+        await this.loadProjects(); await this.loadBroadcasts();
+        if (this.selectedId) { await this.loadProject(this.selectedId); this.renderGraph(false); }
+      },
+      async api(method, path, body) {
+        const opt = { method, headers: {} };
+        if (body !== undefined) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+        const r = await fetch(path, opt);
+        if (r.status===204) return null;
+        const txt = await r.text();
+        let data; try { data = txt ? JSON.parse(txt) : null; } catch(e){ data = txt; }
+        if (!r.ok) { this.flash((data&&data.detail)||("error "+r.status)); throw new Error(txt); }
+        return data;
+      },
+      flash(m){ this.toast=m; setTimeout(()=>this.toast="",2500); },
+      countBy(s){ return this.projects.filter(p=>p.status===s).length; },
+      get hasActive(){ return this.projects.some(p=>!["completed","stopped"].includes(p.status)); },
+      statusColor(s){ return {running:"text-teal-600",created:"text-slate-500",flag_found:"text-emerald-600",
+        wp_writing:"text-sky-600",memory_writing:"text-violet-600",completed:"text-slate-500",
+        stopped:"text-amber-600",active:"text-teal-600",done:"text-slate-500",paused:"text-amber-600",idle:"text-slate-400"}[s]||"text-slate-500"; },
+      projectStatusBadgeClass(s){ return {running:"bg-teal-50 text-teal-700",created:"bg-slate-100 text-slate-600",
+        flag_found:"bg-emerald-50 text-emerald-700",wp_writing:"bg-sky-50 text-sky-700",memory_writing:"bg-violet-50 text-violet-700",
+        completed:"bg-slate-100 text-slate-600",stopped:"bg-amber-50 text-amber-700"}[s]||"bg-slate-100 text-slate-600"; },
+      factBadgeClass(id){ return id==="origin" ? "bg-teal-50 text-teal-700" : id==="goal" ? "bg-rose-50 text-rose-600" : "bg-brand-50 text-brand-700"; },
+      formatTime(ts){ if(!ts) return ""; return new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"}); },
+
+      async loadProjects(){ this.projects = await this.api("GET","/projects"); },
+      async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },
+      async loadProject(id){ this.current = await this.api("GET","/projects/"+id); },
+      async openProject(id){
+        this.selectedId=id; this.selectedNode=null; this.sideTab="detail";
+        if(this.cy){ this.cy.destroy(); this.cy=null; }
+        await this.loadProject(id); await this.loadLog();
+        this.$nextTick(()=>this.renderGraph(true));
+      },
+      async createProject(){
+        const body={title:this.np.title,category:this.np.category,origin:this.np.origin,goal:this.np.goal,
+          hints:this.np.hints.filter(h=>h.content.trim()).map(h=>({content:h.content,creator:"human"}))};
+        const d=await this.api("POST","/projects",body);
+        const files=this.$refs.npfile.files;
+        for(const f of files){ const fd=new FormData(); fd.append("file",f); await fetch("/projects/"+d.project.id+"/attachments",{method:"POST",body:fd}); }
+        this.showNewProject=false; this.np={title:"",category:"web",origin:"",goal:"",hints:[{content:""}]};
+        await this.loadProjects(); this.openProject(d.project.id);
+      },
+      async startSolve(){ await this.api("POST","/projects/"+this.selectedId+"/start"); this.flash("solving started"); await this.loadProject(this.selectedId); this.renderGraph(); },
+      async resumeSolve(){ await this.api("POST","/projects/"+this.selectedId+"/resume"); this.flash("resumed"); await this.loadProject(this.selectedId); this.renderGraph(); },
+      async reopenProject(){ await this.api("POST","/projects/"+this.selectedId+"/reopen"); this.flash("reopened"); await this.loadProject(this.selectedId); this.renderGraph(); },
+      async stopSolve(){ await this.api("POST","/projects/"+this.selectedId+"/stop"); await this.loadProject(this.selectedId); },
+      async stopAll(){ await this.api("POST","/projects/stop-all"); await this.loadProjects(); },
+      async deleteProject(){ if(!confirm("Delete project?"))return; await this.api("DELETE","/projects/"+this.selectedId);
+        this.selectedId=null; this.current=null; this.selectedNode=null; await this.loadProjects(); if(this.cy)this.cy.elements().remove(); },
+      async toggleLog(){ await this.api("PUT","/logs/status",{enabled:this.logEnabled}); },
+      async loadLog(){
+        if(!this.selectedId)return;
+        const p=await this.api("GET","/logs/"+this.selectedId+"?kind=project&limit=500");
+        const l=await this.api("GET","/logs/"+this.selectedId+"?kind=llm&limit=500");
+        this.logEntries=p.entries||[]; this.llmEntries=l.entries||[];
+      },
+      logSummary(e){ const k=Object.keys(e).filter(x=>!["ts","event","project_id"].includes(x)); return k.map(x=>x+"="+JSON.stringify(e[x])).join(" ").slice(0,160); },
+
+      buildElements(){
+        const d=this.current; if(!d) return {nodes:[],edges:[]};
+        const nodes=[], edges=[]; const have=new Set();
+        const add=(id,data)=>{
+          if(have.has(id))return;
+          have.add(id);
+          const size=this.nodeSize(data.label,data.ntype);
+          nodes.push({data:{id,...data,width:size.width,height:size.height}});
+        };
+        for(const a of d.agents){ add(a.name,{label:a.name.toUpperCase(),ntype:a.role,kind:"agent",agent:a.name,state:a.state}); }
+        for(const f of d.facts){
+          const t=f.id==="origin"?"origin":(f.id==="goal"?"goal":"fact");
+          const prefix=f.id==="origin"?"ORIGIN":f.id==="goal"?"GOAL":f.id;
+          add("fact:"+f.id,{label:prefix+": "+this.truncate(f.description,42),ntype:t,kind:"fact",factId:f.id,description:f.description});
+        }
+        for(const i of d.intents){
+          if(i.to){
+            for(const s of i.from){ edges.push({data:{id:i.id+"_"+s,source:"fact:"+s,target:"fact:"+i.to,etype:"concluded",intentId:i.id,label:this.truncate(i.description,34)}}); }
+          } else {
+            const ph="ph:"+i.id;
+            add(ph,{label:"?",ntype:i.worker?"in_progress":"unclaimed",kind:"intent",intentId:i.id,description:i.description});
+            for(const s of i.from){ edges.push({data:{id:i.id+"_"+s,source:"fact:"+s,target:ph,etype:i.worker?"in_progress":"unclaimed",intentId:i.id,label:this.truncate(i.description,34)}}); }
+          }
+        }
+        const resolve=(ref)=>{ if(ref.startsWith("fact:"))return ref; if(ref.startsWith("intent:")){const iid=ref.slice(7); const it=d.intents.find(x=>x.id===iid); return it&&it.to?("fact:"+it.to):("ph:"+iid);}
+          if(ref==="flag"){add("flag",{label:"FLAG",ntype:"flag",kind:"special",specialId:"flag"});return "flag";}
+          if(ref==="wp"){add("wp",{label:"WP",ntype:"wp",kind:"special",specialId:"wp"});return "wp";}
+          return ref; };
+        for(const l of d.agent_links){ const s=resolve(l.src),t=resolve(l.dst); if(!have.has(s)||!have.has(t)) continue;
+          edges.push({data:{id:"L"+l.id,source:s,target:t,etype:"orch",label:l.kind}}); }
+        return {nodes,edges};
+      },
+      truncate(text,n){ text=(text||"").trim(); return text.length>n ? text.slice(0,n-1)+"..." : text; },
+      graphStyles(){ const common={'text-valign':'center','text-halign':'center','font-family':'-apple-system,BlinkMacSystemFont,Inter,sans-serif'};
+        return [
+          {selector:'node',style:{...common,'label':'data(label)','color':'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere','width':'data(width)','height':'data(height)','shape':'round-rectangle','background-color':'#6366f1','border-width':0}},
+          {selector:'node[ntype="origin"]',style:{'background-color':'#14b8a6','font-size':'11px','text-max-width':'92px'}},
+          {selector:'node[ntype="goal"]',style:{'background-color':'#f43f5e','font-size':'11px','text-max-width':'92px'}},
+          {selector:'node[ntype="ipc"]',style:{'background-color':'#312e81','shape':'round-rectangle','text-max-width':'88px'}},
+          {selector:'node[ntype="diamond"]',style:{'background-color':'#f59e0b','text-max-width':'88px'}},
+          {selector:'node[ntype="member"]',style:{'background-color':'#0ea5e9','shape':'ellipse','text-max-width':'88px'}},
+          {selector:'node[ntype="flag"]',style:{'background-color':'#10b981','shape':'diamond','width':52,'height':52}},
+          {selector:'node[ntype="wp"]',style:{'background-color':'#38bdf8'}},
+          {selector:'node[ntype="in_progress"]',style:{'background-color':'#f59e0b','background-opacity':0.85,'shape':'ellipse','label':'?','width':22,'height':22,'border-width':2,'border-color':'#d97706','font-size':'11px'}},
+          {selector:'node[ntype="unclaimed"]',style:{'background-color':'#cbd5e1','background-opacity':0.55,'shape':'ellipse','label':'?','color':'#94a3b8','width':20,'height':20,'border-width':1.5,'border-color':'#94a3b8','border-style':'dashed','font-size':'11px'}},
+          {selector:'edge',style:{'width':1.6,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier','font-size':'7px','color':'#94a3b8','label':'data(label)','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'86px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.88,'text-background-padding':'2px','arrow-scale':0.85}},
+          {selector:'edge[etype="concluded"]',style:{'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','width':2}},
+          {selector:'edge[etype="in_progress"]',style:{'line-color':'#fbbf24','target-arrow-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'color':'#b45309','text-background-color':'#fffbeb'}},
+          {selector:'edge[etype="unclaimed"]',style:{'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','line-style':'dashed','line-dash-pattern':[5,5]}},
+          {selector:'edge[etype="orch"]',style:{'line-color':'#818cf8','target-arrow-color':'#818cf8','line-style':'dotted','line-dash-pattern':[2,5],'width':2,'color':'#6366f1'}},
+          {selector:'node.focus',style:{'border-width':3,'border-color':'#312e81','border-opacity':0.95,'z-index':1000}},
+          {selector:'edge.focus',style:{'z-index':1000,'overlay-color':'#93c5fd','overlay-opacity':0.24,'overlay-padding':5}},
+          {selector:'.highlight',style:{'z-index':999}},
+          {selector:'.faded',style:{opacity:0.38}},
+          {selector:'.fresh',style:{opacity:0}},
+        ]; },
+      layoutOpts(fit=true, animate=true){ return {name:'dagre',rankDir:'TB',nodeSep:60,rankSep:80,padding:50,fit,animate,animationDuration:400,animationEasing:'ease-in-out-cubic'}; },
+      nodeSize(label,ntype){
+        if(ntype==="in_progress"||ntype==="unclaimed") return {width:22,height:22};
+        if(ntype==="flag") return {width:52,height:52};
+        const preset=["origin","goal"].includes(ntype)
+          ? {fontSize:11,maxTextWidth:92,minWidth:58,minHeight:38,paddingX:10,paddingY:10}
+          : {fontSize:10,maxTextWidth:116,minWidth:52,minHeight:34,paddingX:10,paddingY:10};
+        const measured=this.measureWrappedText(label,preset.maxTextWidth,preset.fontSize);
+        return {
+          width:Math.max(preset.minWidth,Math.ceil(measured.width+preset.paddingX*2)),
+          height:Math.max(preset.minHeight,Math.ceil(measured.height+preset.paddingY*2)),
+        };
+      },
+      measureWrappedText(text,maxWidth,fontSize){
+        const content=(text||"").trim()||" ";
+        const lines=[]; let currentWidth=0,currentChars=0,maxLineWidth=0;
+        const pushLine=()=>{ if(currentChars===0&&lines.length>0)lines.push(0); else if(currentChars>0)lines.push(currentWidth); maxLineWidth=Math.max(maxLineWidth,currentWidth); currentWidth=0; currentChars=0; };
+        for(const char of Array.from(content)){
+          if(char==="\n"){ pushLine(); continue; }
+          const charWidth=this.estimateLabelCharWidth(char,fontSize);
+          if(currentChars>0&&currentWidth+charWidth>maxWidth) pushLine();
+          currentWidth+=charWidth; currentChars+=1;
+        }
+        pushLine();
+        const lineCount=Math.max(1,lines.length);
+        return {width:Math.min(maxWidth,Math.max(fontSize*1.6,maxLineWidth)),height:lineCount*fontSize*1.35};
+      },
+      estimateLabelCharWidth(char,fontSize){
+        if(/\s/.test(char)) return fontSize*0.35;
+        if(/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/.test(char)) return fontSize;
+        return fontSize*0.58;
+      },
+      snapshotNodePositions(){
+        const positions=new Map();
+        if(!this.cy) return positions;
+        this.cy.nodes().forEach(n=>positions.set(n.id(),{x:n.position("x"),y:n.position("y")}));
+        return positions;
+      },
+      anchorPositionFromIds(nodeIds,previousPositions,offset=36){
+        const anchors=[];
+        for(const nodeId of nodeIds){
+          const cyId=nodeId.startsWith("fact:")?nodeId:"fact:"+nodeId;
+          const existing=this.cy?.getElementById(cyId);
+          if(existing?.length){ anchors.push({x:existing.position("x"),y:existing.position("y")}); continue; }
+          const previous=previousPositions.get(cyId);
+          if(previous) anchors.push(previous);
+        }
+        if(!anchors.length) return null;
+        const center=anchors.reduce((acc,pos)=>({x:acc.x+pos.x,y:acc.y+pos.y}),{x:0,y:0});
+        return {x:center.x/anchors.length,y:center.y/anchors.length+offset};
+      },
+      initialPositionForNode(nodeData,previousPositions){
+        if(!this.current) return null;
+        if(nodeData.kind==="intent"){
+          const previous=previousPositions.get(nodeData.id);
+          if(previous) return previous;
+          const intent=this.current.intents.find(i=>i.id===nodeData.intentId);
+          return intent ? this.anchorPositionFromIds(intent.from,previousPositions,32) : null;
+        }
+        if(nodeData.kind==="fact"){
+          const intent=this.current.intents.find(i=>i.to===nodeData.factId);
+          if(!intent) return null;
+          const placeholder=previousPositions.get("ph:"+intent.id);
+          if(placeholder) return placeholder;
+          return this.anchorPositionFromIds(intent.from,previousPositions,44);
+        }
+        return null;
+      },
+      fadeInFreshElement(element){
+        if(!element||element.length===0) return;
+        element.addClass("fresh");
+        setTimeout(()=>{
+          if(!element.inside()) return;
+          element.animate({style:{opacity:1}},{duration:500,complete:()=>{ if(element.inside()) element.removeStyle("opacity"); }});
+          element.removeClass("fresh");
+        },30);
+      },
+      renderGraph(fit=true){
+        const el=document.getElementById('cy'); if(!el) return;
+        const {nodes,edges}=this.buildElements();
+        if(!this.cy){
+          this.cy=cytoscape({container:el,elements:[...nodes,...edges],style:this.graphStyles(),layout:this.layoutOpts(fit,false),minZoom:0.15,maxZoom:3.5});
+          this.cy.on('tap','node',e=>this.onNodeTap(e));
+          this.cy.on('tap','edge',e=>this.onEdgeTap(e));
+          this.cy.on('tap',e=>{ if(e.target===this.cy) this.clearSelection(); });
+          this.startEdgeFlow();
+        } else {
+          const wantNodes=new Set(nodes.map(n=>n.data.id));
+          const wantEdges=new Set(edges.map(e=>e.data.id));
+          const previousPositions=this.snapshotNodePositions();
+          let changed=false;
+
+          this.cy.nodes().forEach(n=>{ if(!wantNodes.has(n.id())){ n.remove(); changed=true; } });
+          this.cy.edges().forEach(e=>{ if(!wantEdges.has(e.id())){ e.remove(); changed=true; } });
+
+          for(const n of nodes){
+            const ex=this.cy.getElementById(n.data.id);
+            if(ex.length===0){
+              const initialPosition=this.initialPositionForNode(n.data,previousPositions);
+              const added=this.cy.add(initialPosition ? {...n,position:initialPosition} : n);
+              this.fadeInFreshElement(added);
+              changed=true;
+            } else {
+              const keys=["ntype","label","description","width","height","state"];
+              if(keys.some(k=>ex.data(k)!==n.data[k])){ ex.data(n.data); changed=true; }
+            }
+          }
+          for(const e of edges){
+            const ex=this.cy.getElementById(e.data.id);
+            if(ex.length===0){
+              const added=this.cy.add(e);
+              this.fadeInFreshElement(added);
+              changed=true;
+            } else if(ex.data("etype")!==e.data.etype||ex.data("label")!==e.data.label){
+              ex.data(e.data);
+            }
+          }
+          if(changed) this.cy.layout(this.layoutOpts(fit,true)).run();
+        }
+        this.refreshGraphDecorations();
+      },
+      fit(){ if(this.cy)this.cy.fit(undefined,50); },
+      clearSelection(){ this.selectedNode=null; if(this.cy)this.cy.elements().removeClass('highlight focus faded'); },
+      onNodeTap(e){
+        const n=e.target, kind=n.data('kind');
+        if(kind==="fact") this.selectFact(n.data('factId'));
+        else if(kind==="intent") this.selectIntent(n.data('intentId'));
+        else if(kind==="agent") this.selectAgent(n.data('agent'));
+        else if(kind==="special") this.selectSpecial(n.data('specialId'));
+        this.sideTab="detail";
+      },
+      onEdgeTap(e){ const iid=e.target.data('intentId'); if(iid) this.selectIntent(iid); this.sideTab="detail"; },
+      selectFact(id){ this.selectedNode={type:"fact",id}; this.applyLineageHighlightForFact(id); },
+      selectIntent(id){ this.selectedNode={type:"intent",id}; this.applyLineageHighlightForIntent(id); },
+      selectAgent(id){ this.selectedNode={type:"agent",id}; this.applyFocus([id],[]); },
+      selectSpecial(id){ this.selectedNode={type:"special",id}; this.applyFocus([id],[]); },
+      refreshGraphDecorations(){ if(!this.selectedNode||!this.cy)return; if(this.selectedNode.type==="fact")this.applyLineageHighlightForFact(this.selectedNode.id); if(this.selectedNode.type==="intent")this.applyLineageHighlightForIntent(this.selectedNode.id); if(this.selectedNode.type==="agent")this.applyFocus([this.selectedNode.id],[]); if(this.selectedNode.type==="special")this.applyFocus([this.selectedNode.id],[]); },
+      startEdgeFlow(){
+        if(!this.cy) return;
+        if(this._flowTimer) return;
+        let offset = 0;
+        this._flowTimer = setInterval(()=>{
+          if(!this.cy) return;
+          offset = (offset + 1) % 40;
+          this.cy.edges('[etype = "in_progress"], [etype = "unclaimed"], [etype = "orch"]').style('line-dash-offset', offset);
+        }, 70);
+      },
+      applyFocus(nodeIds,edgeIds){
+        if(!this.cy)return; this.cy.elements().removeClass('highlight focus faded');
+        const nodes=this.cy.nodes().filter(n=>nodeIds.includes(n.id()));
+        const edges=this.cy.edges().filter(e=>edgeIds.includes(e.id()));
+        nodes.addClass('focus'); edges.addClass('focus');
+        const visible=nodes.add(edges); this.cy.elements().not(visible).addClass('faded');
+      },
+      collectIntentElements(intent,nodeIds,edgeIds){
+        if(intent.to) nodeIds.add("fact:"+intent.to); else nodeIds.add("ph:"+intent.id);
+        for(const s of intent.from){ nodeIds.add("fact:"+s); edgeIds.add(intent.id+"_"+s); }
+      },
+      collectFactLineage(fid){
+        const facts=new Set(), intents=new Set();
+        const walkFact=(id)=>{ if(facts.has(id)||!this.current)return; facts.add(id); for(const i of this.current.intents){ if(i.to===id) walkIntent(i.id); } };
+        const walkIntent=(id)=>{ if(intents.has(id)||!this.current)return; intents.add(id); const i=this.current.intents.find(x=>x.id===id); if(!i)return; for(const s of i.from) walkFact(s); };
+        walkFact(fid); return {facts,intents};
+      },
+      applyLineageHighlightForIntent(iid){
+        if(!this.cy||!this.current)return; const i=this.current.intents.find(x=>x.id===iid); if(!i)return;
+        const nodeIds=new Set(), edgeIds=new Set(); this.collectIntentElements(i,nodeIds,edgeIds);
+        this.applyFocus([...nodeIds],[...edgeIds]);
+      },
+      applyLineageHighlightForFact(fid){
+        if(!this.cy||!this.current)return; const {facts,intents}=this.collectFactLineage(fid);
+        const nodeIds=new Set([...facts].map(x=>"fact:"+x)), edgeIds=new Set();
+        for(const iid of intents){ const i=this.current.intents.find(x=>x.id===iid); if(i)this.collectIntentElements(i,nodeIds,edgeIds); }
+        nodeIds.add("fact:"+fid); this.applyFocus([...nodeIds],[...edgeIds]);
+      },
+      getFactRecord(fid){ return this.current ? this.current.facts.find(f=>f.id===fid) || null : null; },
+      selectedFactId(){ return this.selectedNode?.type==="fact" ? this.selectedNode.id : null; },
+      selectedFactRecord(){ const id=this.selectedFactId(); return id ? this.getFactRecord(id) : null; },
+      selectedFactProducingIntent(){ const id=this.selectedFactId(); return id&&this.current ? this.current.intents.find(i=>i.to===id) || null : null; },
+      selectedIntentId(){ return this.selectedNode?.type==="intent" ? this.selectedNode.id : null; },
+      selectedIntentRecord(){ const id=this.selectedIntentId(); return id&&this.current ? this.current.intents.find(i=>i.id===id) || null : null; },
+      selectedAgentRecord(){ const id=this.selectedNode?.type==="agent" ? this.selectedNode.id : null; return id&&this.current ? this.current.agents.find(a=>a.name===id) || null : null; },
+      selectedSpecialId(){ return this.selectedNode?.type==="special" ? this.selectedNode.id : null; },
+      selectedSpecialLabel(){ return this.selectedSpecialId()==="flag" ? "Flag Captured" : this.selectedSpecialId()==="wp" ? "Writeup" : "Stage"; },
+      agentReports(name){ return this.current ? this.current.reports.filter(r=>r.member===name) : []; },
+      intentStatusClass(i){ if(i.to) return "text-teal-600"; return i.worker ? "text-amber-600" : "text-slate-400"; },
+      intentStatusLabel(i){ if(i.to) return "Concluded"; return i.worker ? "In Progress" : "Unclaimed"; },
+      nodeThoughts(){
+        const node=this.selectedNode; if(!node) return [];
+        const entries=[...this.llmEntries,...this.logEntries];
+        if(node.type==="agent") return entries.filter(e=>e.member===node.id || e.worker===node.id).slice(-12).reverse();
+        if(node.type==="intent"){
+          const intent=this.selectedIntentRecord();
+          const worker=intent?.worker;
+          return entries.filter(e=>e.intent===node.id || e.intent_id===node.id || (worker && (e.member===worker || e.worker===worker))).slice(-12).reverse();
+        }
+        if(node.type==="fact"){
+          const intent=this.selectedFactProducingIntent();
+          const worker=intent?.worker;
+          return entries.filter(e=>e.fact===node.id || e.fact_id===node.id || (intent && (e.intent===intent.id || e.intent_id===intent.id)) || (worker && (e.member===worker || e.worker===worker))).slice(-12).reverse();
+        }
+        return [];
+      },
+      timelineEvents(){
+        if(!this.current) return [];
+        const events=[]; let order=0;
+        const origin=this.getFactRecord("origin"), goal=this.getFactRecord("goal");
+        events.push({id:"created-"+this.current.project.id,type:"project_created",timestamp:this.current.project.created_at,actor:"system",title:this.current.project.title,meta:[origin?.description, goal ? "goal: "+goal.description : null].filter(Boolean),targetType:"fact",targetId:"origin",order:order++});
+        for(const h of this.current.hints){ events.push({id:"hint-"+h.id,type:"hint_added",timestamp:h.created_at,actor:h.creator,title:h.content,meta:[],targetType:"hints",targetId:h.id,order:order++}); }
+        for(const i of this.current.intents){
+          events.push({id:"intent-"+i.id,type:"intent_declared",timestamp:i.created_at,actor:i.creator,title:i.description,meta:[i.id,"from "+i.from.join(", ")],targetType:"intent",targetId:i.id,order:order++});
+          if(i.concluded_at&&i.to){ const f=this.getFactRecord(i.to); events.push({id:"done-"+i.id,type:i.to==="goal"?"project_completed":"intent_concluded",timestamp:i.concluded_at,actor:i.worker||i.creator,title:f?.description||i.description,meta:[i.id,"produced "+i.to],targetType:"fact",targetId:i.to,order:order++}); }
+        }
+        for(const r of this.current.reports){ events.push({id:"report-"+r.id,type:"report",timestamp:r.created_at,actor:r.member,title:r.progress,meta:[r.difficulty,...(r.directions||[])],targetType:"agent",targetId:r.member,order:order++}); }
+        return events.sort((a,b)=>(a.timestamp||"").localeCompare(b.timestamp||"")||a.order-b.order).map((e,i,a)=>({...e,isLast:i===a.length-1}));
+      },
+      timelineEventBadge(e){ return {project_created:"Project",hint_added:"Hint",intent_declared:"Intent",intent_concluded:"Conclude",project_completed:"Complete",report:"Report"}[e.type]||"Event"; },
+      timelineEventBadgeClass(e){ return {project_created:"bg-slate-100 text-slate-600",hint_added:"bg-amber-50 text-amber-700",intent_declared:"bg-violet-50 text-violet-700",intent_concluded:"bg-teal-50 text-teal-700",project_completed:"bg-rose-50 text-rose-700",report:"bg-sky-50 text-sky-700"}[e.type]||"bg-slate-100 text-slate-600"; },
+      timelineEventDotClass(e){ return {project_created:"bg-slate-400",hint_added:"bg-amber-400",intent_declared:"bg-violet-400",intent_concluded:"bg-teal-400",project_completed:"bg-rose-400",report:"bg-sky-400"}[e.type]||"bg-slate-300"; },
+      openTimelineEntry(e){ if(e.targetType==="fact")this.selectFact(e.targetId); if(e.targetType==="intent")this.selectIntent(e.targetId); if(e.targetType==="agent")this.selectAgent(e.targetId); if(e.targetType!=="hints")this.sideTab="detail"; },
+      async openWP(){ const r=await fetch("/projects/"+this.selectedId+"/wp"); this.wpText=await r.text(); this.showWP=true; },
+
+      async openIPCConfig(){ this.cfg=await this.api("GET","/config"); this.health={}; this.showIPC=true; },
+      llmFields(name, obj){
+        const fmt=["mock","openai","claudecode","deepseek","pi"].map(f=>`<option value="${f}" ${obj.api_format===f?"selected":""}>${f}</option>`).join("");
+        return `<div class="grid grid-cols-2 gap-2 text-xs text-slate-500">
+          <label>Format<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_format',this.value)">${fmt}</select></label>
+          <label>Model<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${obj.model||''}" oninput="window._ipc.setField('${name}','model',this.value)"/></label>
+          <label class="col-span-2">Base URL<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${obj.base_url||''}" oninput="window._ipc.setField('${name}','base_url',this.value)"/></label>
+          <label class="col-span-2">API Key <span class="text-slate-400">(${obj.api_key_set?'set: '+obj.api_key_preview:'unset'})</span>
+            <input type="password" class="w-full rounded-lg px-2 py-1 mt-0.5" placeholder="leave blank to keep" oninput="window._ipc.setField('${name}','api_key',this.value)"/></label>
+        </div>`;
+      },
+      _edits: {},
+      setField(name, field, value){ (this._edits[name]=this._edits[name]||{})[field]=value; },
+      async saveIPC(){
+        const body={}; if(this._edits.diamond) body.diamond=this._edits.diamond;
+        const members={}; for(const k in this._edits){ if(k!=="diamond") members[k]=this._edits[k]; }
+        if(Object.keys(members).length) body.members=members;
+        this.cfg=await this.api("PUT","/config",body); this._edits={}; this.flash("config saved");
+      },
+      async runHealth(){ const r=await this.api("POST","/config/health"); this.health=r.results; this.flash("health checked"); },
+
+      async openMemory(){ this.memories=await this.api("GET","/memory"); this.showMemory=true; },
+      async addMemory(){ await this.api("POST","/memory",{category:this.nm.category,title:this.nm.title,
+        content:this.nm.content,tags:this.nm.tags.split(",").map(t=>t.trim()).filter(Boolean)});
+        this.nm={category:"knowledge",title:"",content:"",tags:""}; this.showAddMem=false; this.memories=await this.api("GET","/memory"); },
+      async deriveMemory(){ const r=await this.api("POST","/memory/derive"); this.flash("exported: "+r.vault); },
+    };
+  }
+  </script>
+</body>
+</html>

@@ -2,6 +2,16 @@
 __pycache__/
 *.py[codz]
 *$py.class
+Seed.md
+tools/
+.github/
+Interastral_Peace_Corporation_2.png
+backend/config/config.yaml
+docs/
+logs/llm_logs/proj_015.jsonl
+logs/tool_logs/proj_015.jsonl
+logs/project_logs/proj_015.jsonl
+logs/project_logs/system.jsonl
 
 # C extensions
 *.so

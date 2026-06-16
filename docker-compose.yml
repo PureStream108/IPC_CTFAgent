@@ -1,0 +1,32 @@
+services:
+  ipc-member-image:
+    build:
+      context: .
+      dockerfile: docker/member/Dockerfile
+    image: ipc-member:latest
+    command: ["true"]
+    restart: "no"
+
+  ipc-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ipc-ctfagent:latest
+    container_name: ipc-app
+    ports:
+      - "8000:8000"
+    environment:
+      - IPC_ROOT=/app
+      - IPC_LOG_ENABLED=true
+    volumes:
+      - ./wp:/app/wp
+      - ./logs:/app/logs
+      - ./backend/config:/app/backend/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - ipc-member-image
+
+# Shared MCP services (Browser/Ghidra/ZAP) are integrated in-process as stubs in
+# this build; production deployments can add dedicated services here and point
+# the shared MCP clients at them.

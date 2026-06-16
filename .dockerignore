@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+.pytest_cache
+tools/
+data/
+logs/
+wp/
+projects/
+memory/
+ipc_check.js

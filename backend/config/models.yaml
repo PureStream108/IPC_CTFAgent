@@ -1,0 +1,6 @@
+defaults:
+  openai: gpt-4o
+  claudecode: claude-opus-4-8
+  deepseek: deepseek-v4-pro
+  pi: pi-default
+  mock: mock-model
