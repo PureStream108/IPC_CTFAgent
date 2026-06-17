@@ -34,6 +34,9 @@ def test_index_served(client):
     assert "Logs" in body
     assert "WP" in body
     assert "Derive" in body
+    assert "project_log" in body
+    assert "llm_log" in body
+    assert "memory_log" in body
     assert "+ New Project" in body
     assert "Memory" in body
     # dagre remains the hidden graph layout engine

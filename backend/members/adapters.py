@@ -54,8 +54,6 @@ def health_check(config: LLMConfig) -> dict:
 
 def make_adapter(config: LLMConfig, name: str = "agent", script: list | None = None) -> BaseAdapter:
     fmt = config.api_format
-    # An explicit script is a deterministic test/replay override: always honor it
-    # with the mock adapter regardless of the configured (possibly real) api_format.
     if fmt == "mock" or script is not None:
         from backend.members.mock_adapter import MockAdapter
 
@@ -77,6 +75,8 @@ _SYSTEM_PROMPT = (
     "intent for a concrete next direction, or report when blocked; do not silently spin. "
     "Always inspect attachments and other provided materials first if they exist, because they may contain "
     "the real foothold or clue. If the current path is not moving, switch angle instead of repeating the same recon. "
+    "When declaring a new intent, anchor its from field to the most relevant latest confirmed fact id rather than "
+    "resetting to origin unless you are intentionally restarting from the root. "
     "Do not mention CVEs unless the current evidence really points to a component/version issue. "
     "Difficulty calibration matters: use low for source disclosure, direct attachment clues, standard exploit chains, "
     "single-surface web tasks, or anything a single focused agent should likely finish soon. "
@@ -136,7 +136,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
 
 class ClaudeAdapter(BaseAdapter):
-    """Anthropic /v1/messages on a user-provided base_url."""
 
     def health(self) -> dict:
         import requests

@@ -524,10 +524,10 @@
               @click="selectedLogProjectId=item.project_id">
               <div class="flex items-center justify-between gap-2">
                 <span class="text-[11px] font-mono text-slate-400" x-text="item.project_id"></span>
-                <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="item.entries.length"></span>
+                <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="logEntryCount(item)"></span>
               </div>
               <div class="mt-1 text-sm font-semibold break-words [overflow-wrap:anywhere]" x-text="item.title"></div>
-              <div class="mt-1 text-[10px] text-slate-400 truncate" x-text="item.filename"></div>
+              <div class="mt-1 text-[10px] text-slate-400 truncate" x-text="selectedProjectLogFilename(item)"></div>
             </button>
           </template>
           <div x-show="globalLogs.length===0" class="text-xs text-slate-400 p-4">No logs</div>
@@ -538,20 +538,30 @@
               <div class="flex items-center justify-between gap-3 mb-3">
                 <div class="min-w-0">
                   <div class="text-sm font-semibold text-slate-700 truncate" x-text="selectedLogProject().title"></div>
-                  <div class="text-[11px] text-slate-400 truncate" x-text="selectedLogProject().filename"></div>
+                  <div class="text-[11px] text-slate-400 truncate" x-text="selectedLogFilename()"></div>
                 </div>
                 <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="openGlobalLogs()">Refresh</button>
               </div>
-              <template x-for="(entry,i) in selectedLogProject().entries" :key="i">
+              <div class="flex flex-wrap gap-1.5 mb-3">
+                <template x-for="kind in logKinds()" :key="kind">
+                  <button class="h-7 px-2.5 rounded-lg border text-xs transition"
+                    :class="globalLogKind===kind ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'"
+                    @click="globalLogKind=kind">
+                    <span x-text="kind"></span>
+                    <span class="ml-1 text-[10px] opacity-70" x-text="logKindCount(selectedLogProject(), kind)"></span>
+                  </button>
+                </template>
+              </div>
+              <template x-for="(entry,i) in selectedLogEntries()" :key="globalLogKind+'-'+i">
                 <div class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 mb-2">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="text-[11px] text-slate-400 tabular-nums" x-text="formatTime(entry.ts)"></span>
                     <span class="px-2 py-0.5 rounded-md bg-white text-[10px] font-semibold uppercase tracking-wide text-slate-500" x-text="entry.event"></span>
                   </div>
-                  <div class="text-[11px] text-slate-500 mt-2 whitespace-pre-wrap break-words" x-text="logSummary(entry)"></div>
+                  <pre class="text-[11px] text-slate-500 mt-2 whitespace-pre-wrap break-words" x-text="globalLogDetail(entry)"></pre>
                 </div>
               </template>
-              <div x-show="selectedLogProject().entries.length===0" class="text-xs text-slate-400">No entries</div>
+              <div x-show="selectedLogEntries().length===0" class="text-xs text-slate-400">No entries</div>
             </div>
           </template>
         </div>
@@ -621,7 +631,7 @@
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, health: {}, memories: [], wpText: "", toast: "",
-      globalLogs: [], selectedLogProjectId: null, completedWPs: [], selectedCompletedWPId: null,
+      globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
@@ -713,9 +723,29 @@
         const r=await this.api("GET","/logs/projects?limit=500");
         this.globalLogs=r.logs||[];
         this.selectedLogProjectId=this.globalLogs[0]?.project_id||null;
+        this.globalLogKind="project_log";
         this.showGlobalLogs=true;
       },
+      logKinds(){ return ["project_log","llm_log","tool_log","memory_log"]; },
+      logKindCount(item, kind){ return item?.[kind]?.entries?.length || 0; },
+      logEntryCount(item){ return this.logKinds().reduce((count, kind)=>count+this.logKindCount(item, kind), 0); },
       selectedLogProject(){ return this.globalLogs.find(x=>x.project_id===this.selectedLogProjectId)||this.globalLogs[0]||null; },
+      selectedProjectLogFilename(item){ return item?.[this.globalLogKind]?.filename || item?.project_log?.filename || ""; },
+      selectedLogEntries(){ return this.selectedLogProject()?.[this.globalLogKind]?.entries || []; },
+      selectedLogFilename(){ return this.selectedProjectLogFilename(this.selectedLogProject()); },
+      globalLogDetail(entry){
+        const parts=[];
+        if(entry.thought) parts.push("thought="+entry.thought);
+        if(entry.action) parts.push("action="+entry.action);
+        if(entry.command) parts.push("command="+entry.command);
+        if(entry.progress) parts.push("progress="+entry.progress);
+        if(entry.description) parts.push("description="+entry.description);
+        if(entry.query) parts.push("query="+entry.query);
+        if(entry.stdout) parts.push("stdout="+entry.stdout);
+        if(entry.stderr) parts.push("stderr="+entry.stderr);
+        if(entry.error) parts.push("error="+entry.error);
+        return (parts.join("\n\n") || this.logSummary(entry) || JSON.stringify(entry, null, 2)).trim();
+      },
       async deriveLogs(){ const r=await this.api("POST","/logs/derive"); this.flash("exported: "+r.dir); },
 
       buildElements(){
@@ -733,13 +763,25 @@
           const prefix=f.id==="origin"?"ORIGIN":f.id==="goal"?"GOAL":f.id;
           add("fact:"+f.id,{label:prefix+": "+this.truncate(f.description,42),ntype:t,kind:"fact",factId:f.id,description:f.description});
         }
+        if(have.has("fact:origin")&&have.has("ipc")){
+          edges.push({data:{id:"origin_ipc",source:"fact:origin",target:"ipc",etype:"orch",label:"start"}});
+        }
+        const intentOwner=(intent)=>{
+          if(intent.worker && have.has(intent.worker)) return intent.worker;
+          if(intent.creator && have.has(intent.creator)) return intent.creator;
+          const link=d.agent_links.find(x=>x.kind==="explore" && x.dst===`intent:${intent.id}` && have.has(x.src));
+          return link ? link.src : null;
+        };
         for(const i of d.intents){
+          const owner=intentOwner(i);
           if(i.to){
             for(const s of i.from){ edges.push({data:{id:i.id+"_"+s,source:"fact:"+s,target:"fact:"+i.to,etype:"concluded",intentId:i.id,label:this.truncate(i.description,34)}}); }
+            if(owner){ edges.push({data:{id:"P"+i.id,source:owner,target:"fact:"+i.to,etype:"producer",intentId:i.id,label:""}}); }
           } else {
             const ph="ph:"+i.id;
             add(ph,{label:"?",ntype:i.worker?"in_progress":"unclaimed",kind:"intent",intentId:i.id,description:i.description});
             for(const s of i.from){ edges.push({data:{id:i.id+"_"+s,source:"fact:"+s,target:ph,etype:i.worker?"in_progress":"unclaimed",intentId:i.id,label:this.truncate(i.description,34)}}); }
+            if(owner){ edges.push({data:{id:"P"+i.id,source:owner,target:ph,etype:"producer",intentId:i.id,label:""}}); }
           }
         }
         const resolve=(ref)=>{ if(ref.startsWith("fact:"))return ref; if(ref.startsWith("intent:")){const iid=ref.slice(7); const it=d.intents.find(x=>x.id===iid); return it&&it.to?("fact:"+it.to):("ph:"+iid);}
@@ -767,6 +809,7 @@
           {selector:'edge[etype="concluded"]',style:{'line-color':'#6ee7b7','target-arrow-color':'#6ee7b7','width':2}},
           {selector:'edge[etype="in_progress"]',style:{'line-color':'#fbbf24','target-arrow-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'color':'#b45309','text-background-color':'#fffbeb'}},
           {selector:'edge[etype="unclaimed"]',style:{'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','line-style':'dashed','line-dash-pattern':[5,5]}},
+          {selector:'edge[etype="producer"]',style:{'line-color':'#38bdf8','target-arrow-color':'#38bdf8','line-style':'dotted','line-dash-pattern':[3,4],'width':1.4,'curve-style':'taxi','taxi-direction':'rightward','label':''}},
           {selector:'edge[etype="orch"]',style:{'line-color':'#818cf8','target-arrow-color':'#818cf8','line-style':'dotted','line-dash-pattern':[2,5],'width':2,'color':'#6366f1'}},
           {selector:'node.focus',style:{'border-width':3,'border-color':'#312e81','border-opacity':0.95,'z-index':1000}},
           {selector:'edge.focus',style:{'z-index':1000,'overlay-color':'#93c5fd','overlay-opacity':0.24,'overlay-padding':5}},

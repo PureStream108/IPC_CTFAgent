@@ -133,14 +133,19 @@ def test_project_logs_list_and_derive(client):
     assert r.status_code == 200
     item = r.json()["logs"][0]
     assert item["project_id"] == pid
-    assert item["filename"] == "Demo.json"
-    assert item["entries"][0]["event"] == "project_created"
+    assert item["project_log"]["filename"] == "Demo.json"
+    assert item["project_log"]["entries"][0]["event"] == "project_created"
+    assert item["llm_log"]["entries"] == []
+    assert item["tool_log"]["entries"] == []
+    assert item["memory_log"]["entries"] == []
 
     r = client.post("/logs/derive")
     assert r.status_code == 200
-    export = client.app.state.ipc.log_export_dir / "Demo.json"
+    export = client.app.state.ipc.log_export_dir / "project_logs" / "Demo.json"
     assert export.exists()
     assert json.loads(export.read_text(encoding="utf-8"))[0]["project_id"] == pid
+    assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.json").exists()
+    assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.json").exists()
 
 
 def test_report_submission(client):

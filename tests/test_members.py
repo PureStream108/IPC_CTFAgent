@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.blackboard import edge_store, graph_store
+from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.db import Database
 from backend.core.config import LLMConfig, MemberConfig
 from backend.core.logging_util import IPCLogger
@@ -169,3 +169,24 @@ def test_member_creates_at_most_one_new_intent_per_task(deps):
         detail = graph_store.project_detail(conn, pid)
     created = [i.description for i in detail.intents if i.creator == "jade"]
     assert created == ["try admin path"]
+
+
+def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    with db.connect() as conn:
+        fact = node_store.create_fact(conn, pid, "found debug endpoint")
+    d.max_actions_per_task = 2
+    script = [
+        {"action": "intent", "description": "follow debug endpoint"},
+        {"action": "done", "reason": "branched"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+    assert result.status == "done"
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    created = next(i for i in detail.intents if i.creator == "jade")
+    assert created.from_ == [fact.id]
+    assert any(l.src == "jade" and l.dst == f"intent:{created.id}" for l in detail.agent_links)

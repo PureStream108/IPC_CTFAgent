@@ -10,6 +10,12 @@ from backend.blackboard import graph_store
 from backend.core.state import AppState
 
 router = APIRouter(tags=["logs"])
+LOG_GROUPS = (
+    ("project", "project_log"),
+    ("llm", "llm_log"),
+    ("tool", "tool_log"),
+    ("memory", "memory_log"),
+)
 
 
 class LogToggle(BaseModel):
@@ -33,17 +39,21 @@ def set_log_status(body: LogToggle, state: AppState = Depends(get_state)):
 def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
     with state.db.connect() as conn:
         projects = graph_store.project_summaries(conn)
-    return {
-        "logs": [
-            {
-                "project_id": p.id,
-                "title": p.title,
-                "status": p.status,
-                "filename": p.log_filename or f"{p.id}.json",
-                "entries": state.logger.read_log("project", p.id, limit),
+    logs = []
+    for project in projects:
+        item = {
+            "project_id": project.id,
+            "title": project.title,
+            "status": project.status,
+        }
+        for kind, key in LOG_GROUPS:
+            item[key] = {
+                "filename": project.log_filename or f"{project.id}.json",
+                "entries": state.logger.read_log(kind, project.id, limit),
             }
-            for p in projects
-        ]
+        logs.append(item)
+    return {
+        "logs": logs
     }
 
 
@@ -53,17 +63,21 @@ def derive_project_logs(state: AppState = Depends(get_state)):
         projects = graph_store.project_summaries(conn)
     target = state.log_export_dir
     target.mkdir(parents=True, exist_ok=True)
-    for stale in target.glob("*.json"):
-        stale.unlink()
-    files: list[str] = []
-    for p in projects:
-        filename = p.log_filename or f"{p.id}.json"
-        entries = state.logger.read_log("project", p.id, None)
-        (target / filename).write_text(
-            json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        files.append(filename)
+    files: dict[str, list[str]] = {}
+    for kind, _ in LOG_GROUPS:
+        folder = target / state.logger.KINDS[kind]
+        folder.mkdir(parents=True, exist_ok=True)
+        for stale in folder.glob("*.json"):
+            stale.unlink()
+        files[state.logger.KINDS[kind]] = []
+        for project in projects:
+            filename = project.log_filename or f"{project.id}.json"
+            entries = state.logger.read_log(kind, project.id, None)
+            (folder / filename).write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            files[state.logger.KINDS[kind]].append(filename)
     return {"dir": str(target), "files": files}
 
 

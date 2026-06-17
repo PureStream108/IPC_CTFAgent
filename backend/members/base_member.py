@@ -122,8 +122,6 @@ class BaseMember:
         )
         return SolveResult(status=status, steps=step)
 
-    # ---- action dispatch ----
-
     def _dispatch(
         self,
         project_id,
@@ -138,9 +136,21 @@ class BaseMember:
         kind = action.kind
         if kind == "bash":
             cmd = action.args.get("command", "")
+            if not cmd.strip():
+                d.logger.project("invalid_bash_action", project_id, member=self.name, intent=intent_id)
+                self._observe("[empty bash command omitted]")
+                return DispatchResult()
             res = d.sandbox.exec(cmd, timeout=60)
             self._observe(f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip())
-            d.logger.tool("bash", project_id, member=self.name, command=cmd, exit_code=res.exit_code)
+            d.logger.tool(
+                "bash",
+                project_id,
+                member=self.name,
+                command=cmd,
+                exit_code=res.exit_code,
+                stdout=res.stdout[:4000],
+                stderr=res.stderr[:4000],
+            )
             return DispatchResult()
         if kind == "tool":
             server = action.args.get("server", "")
@@ -178,7 +188,7 @@ class BaseMember:
                     description=action.args.get("description", "explore"),
                 )
                 return DispatchResult()
-            created = self._declare_intent(project_id, action)
+            created = self._declare_intent(project_id, intent_id, action)
             return DispatchResult(graph_action="intent" if created is not None else None)
         if kind == "conclude":
             return DispatchResult(result=self._conclude(project_id, intent_id, action), graph_action="conclude")
@@ -189,8 +199,6 @@ class BaseMember:
             d.logger.project("member_done", project_id, member=self.name, reason=action.args.get("reason"))
             return DispatchResult(result=SolveResult(status="done", steps=step))
         return DispatchResult()
-
-    # ---- blackboard ops ----
 
     def _claim(self, project_id, intent_id):
         with self.deps.db.connect() as conn:
@@ -214,6 +222,9 @@ class BaseMember:
         with d.db.connect() as conn:
             row = edge_store.get_intent(conn, project_id, intent_id)
             node_id = row["to_fact_id"] if row else None
+            if node_id is None and row is not None:
+                sources = self._intent_source_ids(conn, project_id, intent_id)
+                node_id = sources[-1] if sources else None
             report = graph_store.create_report(
                 conn, project_id, self.name, a.get("progress", ""), a.get("difficulty", "low"),
                 node_id, a.get("steps", []), a.get("directions", []), a.get("knowledge", []),
@@ -223,15 +234,19 @@ class BaseMember:
         if d.on_report is not None:
             d.on_report(project_id, report)
 
-    def _declare_intent(self, project_id, action: MemberAction):
+    def _declare_intent(self, project_id, current_intent_id, action: MemberAction):
         a = action.args
-        from_ids = a.get("from") or ["origin"]
+        requested_from = a.get("from")
         description = a.get("description", "explore")
         with self.deps.db.connect() as conn:
-            for fid in from_ids:
-                if not node_store.fact_exists(conn, project_id, fid):
-                    from_ids = ["origin"]
-                    break
+            if requested_from:
+                from_ids = list(requested_from)
+                for fid in from_ids:
+                    if not node_store.fact_exists(conn, project_id, fid):
+                        from_ids = ["origin"]
+                        break
+            else:
+                from_ids = self._default_intent_sources(conn, project_id, current_intent_id)
             existing = edge_store.find_similar_open_intent(conn, project_id, from_ids, description)
             if existing is not None:
                 self.deps.logger.project(
@@ -244,6 +259,7 @@ class BaseMember:
                 )
                 return None
             intent = edge_store.create_intent(conn, project_id, from_ids, description, self.name)
+            graph_store.add_link(conn, project_id, self.name, f"intent:{intent.id}", "explore")
             self.deps.logger.project(
                 "intent_declared",
                 project_id,
@@ -253,6 +269,28 @@ class BaseMember:
                 description=description,
             )
             return intent
+
+    def _intent_source_ids(self, conn, project_id, intent_id) -> list[str]:
+        rows = conn.execute(
+            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
+            (intent_id, project_id),
+        ).fetchall()
+        return [row["fact_id"] for row in rows]
+
+    def _default_intent_sources(self, conn, project_id, intent_id) -> list[str]:
+        current_sources = [
+            fact_id
+            for fact_id in self._intent_source_ids(conn, project_id, intent_id)
+            if node_store.fact_exists(conn, project_id, fact_id)
+        ]
+        non_root_sources = [fact_id for fact_id in current_sources if fact_id not in ("origin", "goal")]
+        if non_root_sources:
+            return non_root_sources
+
+        facts = [fact.id for fact in node_store.list_facts(conn, project_id) if fact.id not in ("origin", "goal")]
+        if facts:
+            return [facts[-1]]
+        return current_sources or ["origin"]
 
     def _submit_stall_report(self, project_id, intent_id, category, step) -> None:
         recent = self.observations[-4:]
@@ -301,6 +339,7 @@ class BaseMember:
                 return SolveResult(status="done", steps=0)
             fact = node_store.create_fact(conn, project_id, desc)
             edge_store.conclude_intent(conn, project_id, intent_id, self.name, fact.id)
+            graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
             graph_store.touch_project(conn, project_id)
         self.deps.logger.project("intent_concluded", project_id, member=self.name, intent=intent_id, fact=fact.id)
         return SolveResult(status="concluded", steps=0, fact_id=fact.id)
@@ -315,6 +354,7 @@ class BaseMember:
             if row is not None and row["to_fact_id"] is None:
                 fact = node_store.create_fact(conn, project_id, desc)
                 edge_store.conclude_intent(conn, project_id, intent_id, self.name, fact.id)
+                graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
                 from_fact = fact.id
             else:
                 from_fact = row["to_fact_id"] if row else "origin"
@@ -387,6 +427,8 @@ class BaseMember:
             "expected_flag": d.expected_flag,
             "goal": next((f.description for f in detail.facts if f.id == "goal"), ""),
             "assigned_intent": {"id": intent_id, "description": assigned.description if assigned else ""},
+            "assigned_intent_sources": assigned.from_ if assigned else ["origin"],
+            "latest_fact_id": detail.facts[-1].id if detail.facts else "origin",
             "facts": [{"id": f.id, "description": f.description} for f in detail.facts],
             "open_intents": [
                 {"id": i.id, "description": i.description}
