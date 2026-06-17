@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from backend.blackboard import graph_store
 from backend.core.config import AppConfig, load_config, save_config
 from backend.core.logging_util import IPCLogger
 from backend.blackboard.db import Database
@@ -26,6 +27,8 @@ class AppState:
 
         data_dir = self.root / "data"
         self.db = Database(data_dir / "graph.db").configure()
+        with self.db.connect() as conn:
+            graph_store.reset_project_counter_if_empty(conn)
         self.memory = MemoryStore(
             data_dir / "memory.db", export_dir=self.root / "memory"
         ).configure()

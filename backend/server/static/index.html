@@ -108,6 +108,11 @@
         <span class="px-2 py-1 rounded-lg chip uppercase tracking-wide" x-text="current.project.category"></span>
         <span class="truncate max-w-[320px]" x-text="current.project.title"></span>
         <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.status"></span>
+        <span class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-slate-500">
+          <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 7v5l3 3"/><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Z"/></svg>
+          <span class="uppercase tracking-wide text-[10px] text-slate-400">Elapsed</span>
+          <span class="font-semibold text-slate-700 tabular-nums" x-text="currentElapsed()"></span>
+        </span>
       </div>
     </template>
   </div>
@@ -524,7 +529,7 @@
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, health: {}, memories: [], wpText: "", toast: "",
-      selectedNode: null, cy: null, _poll: null, _flowTimer: null,
+      nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
         window._ipc = this;
@@ -532,9 +537,11 @@
         await this.loadBroadcasts();
         const st = await this.api("GET","/logs/status"); this.logEnabled = st.enabled;
         if (this.projects.length) this.openProject(this.projects[0].id);
+        this._clock = setInterval(()=>{ this.nowMs = Date.now(); }, 1000);
         this._poll = setInterval(()=>this.tick(), 2500);
       },
       async tick() {
+        this.nowMs = Date.now();
         await this.loadProjects(); await this.loadBroadcasts();
         if (this.selectedId) { await this.loadProject(this.selectedId); this.renderGraph(false); }
       },
@@ -559,6 +566,22 @@
         completed:"bg-slate-100 text-slate-600",stopped:"bg-amber-50 text-amber-700"}[s]||"bg-slate-100 text-slate-600"; },
       factBadgeClass(id){ return id==="origin" ? "bg-teal-50 text-teal-700" : id==="goal" ? "bg-rose-50 text-rose-600" : "bg-brand-50 text-brand-700"; },
       formatTime(ts){ if(!ts) return ""; return new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"}); },
+      parseTimestamp(ts){ const ms = Date.parse(ts || ""); return Number.isNaN(ms) ? null : ms; },
+      formatDuration(ms){
+        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        return [hours, minutes, seconds].map(v => String(v).padStart(2, "0")).join(":");
+      },
+      projectElapsed(project){
+        const start = this.parseTimestamp(project?.created_at);
+        if (start === null) return "--:--:--";
+        const frozen = ["completed","stopped"].includes(project.status) ? this.parseTimestamp(project.updated_at) : null;
+        const end = frozen === null ? this.nowMs : frozen;
+        return this.formatDuration(Math.max(0, end - start));
+      },
+      currentElapsed(){ return this.projectElapsed(this.current?.project); },
 
       async loadProjects(){ this.projects = await this.api("GET","/projects"); },
       async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },

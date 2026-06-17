@@ -29,7 +29,6 @@ class MockAdapter(BaseAdapter):
         is_initial = context.get("is_initial", False)
         evaluate_now = context.get("evaluate_now", False)
 
-        # Difficulty self-evaluation (Seed.md: every 7 steps).
         if evaluate_now and not self._reported:
             self._reported = True
             difficulty = "high" if is_initial else "medium"

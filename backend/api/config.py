@@ -63,6 +63,40 @@ def get_config(state: AppState = Depends(get_state)):
     return _config_view(state)
 
 
+@router.get("/config/runtime")
+def get_runtime_config(state: AppState = Depends(get_state)):
+    orchestrator = state.orchestrator
+    active_members: dict[str, list[str]] = {}
+    running_tasks: list[dict[str, str]] = []
+    if orchestrator is not None:
+        with orchestrator._lock:
+            active_members = {
+                project_id: sorted(members.keys())
+                for project_id, members in orchestrator._members.items()
+                if members
+            }
+            running_tasks = [
+                {"project_id": project_id, "intent_id": intent_id}
+                for (project_id, intent_id), future in orchestrator._task_index.items()
+                if not future.done()
+            ]
+    return {
+        "runtime": state.config.runtime.model_dump(),
+        "limits": state.config.limits.model_dump(),
+        "limiter": {
+            "reserved_memory_gb": state.limiter.reserved_memory_gb,
+            "reservations": dict(state.limiter._reserved),
+        },
+        "pool": {
+            "active_keys": state.pool.active_keys(),
+        },
+        "orchestrator": {
+            "active_members": active_members,
+            "running_tasks": running_tasks,
+        },
+    }
+
+
 def _apply(llm, upd: LLMUpdate) -> None:
     if upd.api_format is not None:
         llm.api_format = upd.api_format

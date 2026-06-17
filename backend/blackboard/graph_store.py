@@ -155,8 +155,15 @@ def set_wp_path(conn: sqlite3.Connection, project_id: str, wp_path: str) -> None
     )
 
 
+def reset_project_counter_if_empty(conn: sqlite3.Connection) -> None:
+    row = conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone()
+    if row is None:
+        conn.execute("UPDATE counters SET value = 0 WHERE name = 'project'")
+
+
 def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
     conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    reset_project_counter_if_empty(conn)
 
 
 # ---------- hints ----------

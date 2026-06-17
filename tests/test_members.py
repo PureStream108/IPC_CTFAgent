@@ -117,3 +117,55 @@ def test_scripted_member_tool_and_done(deps):
     result = member.solve(pid, iid, "web", is_initial=False)
     assert result.status == "done"
     assert any("mcp:browser.navigate" in o for o in member.observations)
+
+
+def test_member_report_defaults_to_low_when_unspecified(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 2
+    script = [
+        {"action": "report", "progress": "need a second look", "steps": ["recon"], "directions": ["check source"]},
+        {"action": "done", "reason": "reported"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+    assert result.status == "done"
+    assert len(reports) == 1
+    assert reports[0].difficulty == "low"
+
+
+def test_member_duplicate_intent_does_not_count_as_progress(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 1
+    script = [
+        {"action": "intent", "from": ["origin"], "description": "Explore web app!!"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+    assert result.status == "stalled"
+    assert len(reports) == 1
+    assert reports[0].difficulty == "low"
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    assert [i.id for i in detail.intents] == [iid]
+
+
+def test_member_creates_at_most_one_new_intent_per_task(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 3
+    script = [
+        {"action": "intent", "from": ["origin"], "description": "try admin path"},
+        {"action": "intent", "from": ["origin"], "description": "try sql injection"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+    assert result.status == "done"
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    created = [i.description for i in detail.intents if i.creator == "jade"]
+    assert created == ["try admin path"]

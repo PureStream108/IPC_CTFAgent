@@ -7,8 +7,25 @@ from backend.blackboard import graph_store
 from backend.core.replay import build_timeline
 
 
-def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:60]
+_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = "".join("_" if c in _INVALID_FILENAME_CHARS or ord(c) < 32 else c for c in name)
+    cleaned = cleaned.strip().rstrip(".")
+    return (cleaned[:120].strip() or "writeup")
+
+
+def _target_path(wp_dir: Path, project_id: str, title: str, existing_wp_path: str | None) -> Path:
+    if existing_wp_path:
+        existing = Path(existing_wp_path)
+        if existing.parent == wp_dir:
+            return existing
+    base = _safe_filename(title)
+    path = wp_dir / f"{base}.md"
+    if not path.exists():
+        return path
+    return wp_dir / f"{base}_{project_id}.md"
 
 
 def write_wp(db, project_id: str, wp_dir: Path, diamond_adapter=None) -> str:
@@ -73,7 +90,7 @@ def write_wp(db, project_id: str, wp_dir: Path, diamond_adapter=None) -> str:
     lines.append("")
 
     content = "\n".join(lines)
-    path = wp_dir / f"{project_id}_{_safe(p.title)}.md"
+    path = _target_path(wp_dir, project_id, p.title, p.wp_path)
     path.write_text(content, encoding="utf-8")
 
     with db.connect() as conn:

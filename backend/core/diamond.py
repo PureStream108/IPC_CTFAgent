@@ -58,37 +58,62 @@ class Diamond:
 
     def decide_reinforcements(self, project_id: str, report) -> list[Assignment]:
         """On a difficulty report, add 1..N idle members on fresh directions."""
-        difficulty = (report.difficulty or "medium").lower()
+        difficulty = (report.difficulty or "low").lower()
         if difficulty in ("low", "trivial", "easy"):
             self.logger.project("diamond_no_reinforce", project_id, reason="low difficulty")
             return []
         idle = self._idle_members(project_id)
         if not idle:
             return []
-        # how many: high->3, medium->1, scaled by max_members_per_report and idle count.
-        want = 3 if difficulty in ("high", "hard") else (2 if difficulty == "medium" else 1)
+        # Medium means "one helper may help"; only high/hard fans out harder.
+        want = 3 if difficulty in ("high", "hard") else (1 if difficulty == "medium" else 1)
         want = min(want, self.config.runtime.max_members_per_report, len(idle))
 
-        directions = report.directions or [f"alternate approach to: {report.progress}"]
+        directions = self._dedupe_directions(
+            report.directions or [f"alternate approach to: {report.progress}"]
+        )
         start_node = report.node_id or "origin"
 
         assignments: list[Assignment] = []
         with self.db.connect() as conn:
             if not node_store.fact_exists(conn, project_id, start_node):
                 start_node = "origin"
-            for i in range(want):
-                member = idle[i]
-                direction = directions[i % len(directions)]
+            for member, direction in zip(idle[:want], directions[:want]):
+                existing = edge_store.find_similar_open_intent(conn, project_id, [start_node], direction)
+                if existing is not None:
+                    self.logger.project(
+                        "diamond_intent_deduped",
+                        project_id,
+                        existing_intent=existing.id,
+                        source=start_node,
+                        direction=direction,
+                    )
+                    continue
                 intent = edge_store.create_intent(conn, project_id, [start_node], direction, "diamond")
                 graph_store.add_agent(conn, project_id, member.name, "member", state="active", start_fact_id=start_node)
                 graph_store.add_link(conn, project_id, "diamond", member.name, "assign")
                 graph_store.add_link(conn, project_id, member.name, f"intent:{intent.id}", "explore")
                 assignments.append(Assignment(member=member.name, intent_id=intent.id))
+        if not assignments:
+            self.logger.project("diamond_no_reinforce", project_id, reason="no_fresh_directions")
+            return []
         self.logger.project(
             "diamond_reinforce", project_id, count=len(assignments),
             members=[a.member for a in assignments], difficulty=difficulty,
         )
         return assignments
+
+    def _dedupe_directions(self, directions: list[str]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for direction in directions:
+            text = (direction or "").strip()
+            key = edge_store.normalize_intent_description(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(text)
+        return unique
 
     # ---- closing the project ----
 

@@ -68,9 +68,6 @@ def make_adapter(config: LLMConfig, name: str = "agent", script: list | None = N
         return PiAdapter(config, name=name)
     raise ValueError(f"unknown api_format: {fmt}")
 
-
-# ---- real HTTP adapters ----
-
 _SYSTEM_PROMPT = (
     "You are an expert CTF solver agent. Respond with EXACTLY ONE JSON object describing "
     "your next action and nothing else. Schema: "
@@ -81,6 +78,11 @@ _SYSTEM_PROMPT = (
     "Always inspect attachments and other provided materials first if they exist, because they may contain "
     "the real foothold or clue. If the current path is not moving, switch angle instead of repeating the same recon. "
     "Do not mention CVEs unless the current evidence really points to a component/version issue. "
+    "Difficulty calibration matters: use low for source disclosure, direct attachment clues, standard exploit chains, "
+    "single-surface web tasks, or anything a single focused agent should likely finish soon. "
+    "Reserve medium for genuine branching uncertainty or when one concrete path failed and another distinct path is needed. "
+    "Reserve high only for unusual complexity, repeated failed exploit classes, or multiple credible attack surfaces. "
+    "Do not label a task medium or high merely because a short attempt did not finish yet. "
     "Use bash to run sandbox commands, tool to call an MCP tool {server,tool,args}, memory to recall "
     "past experience {query}, report to escalate difficulty to Diamond "
     "{progress,difficulty,steps,directions,knowledge}, conclude to record a confirmed fact for your "

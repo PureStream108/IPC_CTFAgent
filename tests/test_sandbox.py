@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+import types
 
 import pytest
 
+from backend.sandbox import docker_manager
+from backend.core.resource_manager import ResourceManager
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import ResourceLimiter
@@ -57,6 +60,25 @@ def test_resource_limiter_rejects_over_per_agent():
     assert rl.reserve("a", 6) is False
 
 
+def test_resource_limiter_repeated_reserve_same_agent_replaces_reservation():
+    rl = ResourceLimiter(total_memory_gb=8, per_agent_memory_gb=5)
+    assert rl.reserve("a", 5) is True
+    assert rl.reserve("a", 3) is True
+    assert rl.reserved_memory_gb == 3
+    assert rl.reserve("b", 5) is True
+    assert rl.reserved_memory_gb == 8
+
+
+def test_resource_manager_resets_leaked_reservations_when_no_sandboxes(tmp_path):
+    rl = ResourceLimiter(total_memory_gb=5, per_agent_memory_gb=5)
+    assert rl.reserve("ghost", 5) is True
+    pool = ContainerPool(backend="local", workspace_root=tmp_path)
+    manager = ResourceManager(rl, pool)
+
+    assert manager.can_admit_member() is True
+    assert rl.reserved_memory_gb == 0
+
+
 def test_container_pool_isolated_workspaces(tmp_path):
     pool = ContainerPool(backend="local", workspace_root=tmp_path)
     sb1 = pool.get("proj_001", "aventurine")
@@ -78,6 +100,24 @@ def test_container_pool_stop_project(tmp_path):
     assert ("proj_002", "jade") in keys
 
 
+def test_container_pool_removes_failed_sandbox_from_cache(tmp_path, monkeypatch):
+    class BrokenSandbox:
+        name = "broken"
+
+        def start(self):
+            raise RuntimeError("boom")
+
+        def stop(self):
+            return None
+
+    pool = ContainerPool(backend="local", workspace_root=tmp_path)
+    monkeypatch.setattr(pool, "_create", lambda project_id, member, env: BrokenSandbox())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        pool.get("proj_001", "aventurine")
+    assert pool.active_keys() == []
+
+
 def test_network_manager_detects_compose(tmp_path):
     att = tmp_path / "attachments"
     att.mkdir()
@@ -97,3 +137,44 @@ def test_network_manager_no_docker_files(tmp_path):
     (att / "challenge.bin").write_text("x", encoding="utf-8")
     nm = NetworkManager(backend="local")
     assert nm.start("proj_001", att) is None
+
+
+def test_load_docker_sdk_skips_repo_local_shadow(monkeypatch, tmp_path):
+    repo_root = tmp_path / "repo"
+    local_docker_dir = repo_root / "docker"
+    local_docker_dir.mkdir(parents=True)
+
+    shadow = types.SimpleNamespace(__path__=[str(local_docker_dir)])
+    sdk = types.SimpleNamespace(from_env=lambda: "client")
+    import_calls: list[list[str]] = []
+
+    def fake_import_module(name: str):
+        assert name == "docker"
+        import_calls.append(list(docker_manager.sys.path))
+        module = shadow if len(import_calls) == 1 else sdk
+        docker_manager.sys.modules[name] = module
+        return module
+
+    monkeypatch.setattr(docker_manager, "_project_root", lambda: repo_root)
+    monkeypatch.setattr(docker_manager.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(docker_manager.sys, "path", ["", str(repo_root), "/site-packages"])
+    monkeypatch.setitem(docker_manager.sys.modules, "docker", shadow)
+    monkeypatch.chdir(repo_root)
+
+    loaded = docker_manager._load_docker_sdk()
+
+    assert loaded is sdk
+    assert import_calls[0] == ["", str(repo_root), "/site-packages"]
+    assert import_calls[1] == ["/site-packages"]
+    assert docker_manager.sys.modules["docker"] is sdk
+
+
+def test_docker_sandbox_releases_reservation_on_start_failure(monkeypatch):
+    limiter = ResourceLimiter(total_memory_gb=5, per_agent_memory_gb=5)
+    sb = docker_manager.DockerSandbox(name="broken", image="ipc-member:latest", limiter=limiter)
+
+    monkeypatch.setattr(sb, "_docker", lambda: (_ for _ in ()).throw(RuntimeError("docker unavailable")))
+
+    with pytest.raises(RuntimeError, match="docker unavailable"):
+        sb.start()
+    assert limiter.reserved_memory_gb == 0

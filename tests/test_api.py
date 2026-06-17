@@ -89,6 +89,21 @@ def test_delete_project_removes_project_files(client):
     assert client.get(f"/projects/{pid}").status_code == 404
 
 
+def test_delete_last_project_resets_project_counter(client):
+    first = client.post(
+        "/projects",
+        json={"title": "A", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()["project"]["id"]
+    assert first == "proj_001"
+    assert client.delete(f"/projects/{first}").status_code == 204
+
+    second = client.post(
+        "/projects",
+        json={"title": "B", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()["project"]["id"]
+    assert second == "proj_001"
+
+
 def test_report_submission(client):
     pid = client.post("/projects", json={"title": "A", "origin": "o", "goal": "g", "category": "web"}).json()["project"]["id"]
     r = client.post(f"/projects/{pid}/reports", json={
@@ -134,6 +149,17 @@ def test_config_api_update_and_redaction(client):
     assert r.status_code == 200
     assert r.json()["diamond"]["api_key_set"] is True
     assert "secretkey" not in str(r.json())  # redacted
+
+
+def test_config_runtime_api(client):
+    r = client.get("/config/runtime")
+    assert r.status_code == 200
+    body = r.json()
+    assert "runtime" in body
+    assert "limits" in body
+    assert "limiter" in body
+    assert "pool" in body
+    assert "orchestrator" in body
 
 
 def test_logs_toggle(client):

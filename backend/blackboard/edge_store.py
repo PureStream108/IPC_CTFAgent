@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+from difflib import SequenceMatcher
 
 from backend.blackboard.ids import next_intent_id, utcnow
 from backend.blackboard.models import Intent
+
+
+_WS_RE = re.compile(r"\s+")
+_PUNCT_RE = re.compile(r"[^a-z0-9_./:-]+")
+
+
+def normalize_intent_description(description: str) -> str:
+    text = description.strip().lower()
+    text = _PUNCT_RE.sub(" ", text)
+    return _WS_RE.sub(" ", text).strip()
 
 
 def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Intent:
@@ -36,6 +48,32 @@ def get_intent(conn: sqlite3.Connection, project_id: str, intent_id: str) -> sql
     return conn.execute(
         "SELECT * FROM intents WHERE id = ? AND project_id = ?", (intent_id, project_id)
     ).fetchone()
+
+
+def find_similar_open_intent(
+    conn: sqlite3.Connection,
+    project_id: str,
+    from_ids: list[str],
+    description: str,
+    *,
+    threshold: float = 0.86,
+) -> Intent | None:
+    """Find an unresolved intent that is close enough to skip branch duplication."""
+    wanted_sources = set(from_ids)
+    wanted = normalize_intent_description(description)
+    if not wanted:
+        return None
+    for intent in list_intents(conn, project_id):
+        if intent.to is not None:
+            continue
+        if set(intent.from_) != wanted_sources:
+            continue
+        existing = normalize_intent_description(intent.description)
+        if existing == wanted:
+            return intent
+        if existing and SequenceMatcher(None, existing, wanted).ratio() >= threshold:
+            return intent
+    return None
 
 
 def create_intent(

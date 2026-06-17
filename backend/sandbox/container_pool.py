@@ -32,10 +32,18 @@ class ContainerPool:
         with self._lock:
             sb = self._sandboxes.get(key)
             if sb is not None:
-                return sb
-            sb = self._create(project_id, member, env)
-            self._sandboxes[key] = sb
-        sb.start()
+                created = False
+            else:
+                sb = self._create(project_id, member, env)
+                self._sandboxes[key] = sb
+                created = True
+        try:
+            sb.start()
+        except Exception:
+            with self._lock:
+                if created and self._sandboxes.get(key) is sb:
+                    self._sandboxes.pop(key, None)
+            raise
         return sb
 
     def _create(self, project_id: str, member: str, env: dict[str, str] | None) -> Sandbox:

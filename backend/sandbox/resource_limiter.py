@@ -27,10 +27,12 @@ class ResourceLimiter:
         with self._lock:
             if mem > self.per_agent_memory_gb:
                 return False
-            if self._reserved_memory + mem > self.total_memory_gb:
+            current = self._reserved.get(agent, 0.0)
+            new_total = self._reserved_memory - current + mem
+            if new_total > self.total_memory_gb:
                 return False
             self._reserved[agent] = mem
-            self._reserved_memory += mem
+            self._reserved_memory = new_total
             return True
 
     def release(self, agent: str) -> None:
@@ -44,6 +46,11 @@ class ResourceLimiter:
     def reserved_memory_gb(self) -> float:
         with self._lock:
             return self._reserved_memory
+
+    def reset(self) -> None:
+        with self._lock:
+            self._reserved.clear()
+            self._reserved_memory = 0.0
 
     def docker_limits(self, memory_gb: float | None = None) -> dict:
         """Return Docker run kwargs enforcing the per-agent cap."""

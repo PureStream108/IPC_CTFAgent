@@ -290,10 +290,21 @@ class Orchestrator:
         if not open_intents:
             return
         category = detail.project.category
-        for intent in sorted(open_intents, key=lambda i: (i.worker is None, i.created_at, i.id)):
+        active_members = self._members.get(project_id, {})
+        claimable = [i for i in open_intents if i.id not in running]
+        claimed = [
+            i for i in claimable
+            if i.worker is not None and i.worker in active_members
+        ]
+        unclaimed = [i for i in claimable if i.worker is None]
+        ordered = (
+            sorted(claimed, key=lambda i: (i.created_at, i.id))
+            + sorted(unclaimed, key=lambda i: (i.created_at, i.id), reverse=True)
+        )
+        for intent in ordered:
             if intent.id in running:
                 continue
-            if intent.worker is not None and intent.worker not in self._members.get(project_id, {}):
+            if intent.worker is not None and intent.worker not in active_members:
                 continue
             if intent.worker is None and project_tasks:
                 continue

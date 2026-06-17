@@ -79,6 +79,26 @@ def test_diamond_reinforcements_on_high_difficulty(state):
     assert "aventurine" not in names  # initial member already active
 
 
+def test_diamond_reinforcement_dedupes_duplicate_directions(state):
+    pid = _make_project(state)
+    d = Diamond(state.db, state.config, state.logger)
+    d.assign_initial(pid)
+    with state.db.connect() as conn:
+        report = graph_store.create_report(
+            conn, pid, "aventurine", "stuck on login", "high", "origin",
+            ["recon done"], ["try sqli", "Try SQLi!!", "try sqli"], ["web"],
+        )
+    assignments = d.decide_reinforcements(pid, report)
+    assert len(assignments) == 1
+    with state.db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    matching = [
+        i for i in detail.intents
+        if edge_store.normalize_intent_description(i.description) == "try sqli"
+    ]
+    assert len(matching) == 1
+
+
 def test_diamond_no_reinforce_low_difficulty(state):
     pid = _make_project(state)
     d = Diamond(state.db, state.config, state.logger)
@@ -88,6 +108,20 @@ def test_diamond_no_reinforce_low_difficulty(state):
             conn, pid, "aventurine", "easy", "low", "origin", [], [], ["web"]
         )
     assert d.decide_reinforcements(pid, report) == []
+
+
+def test_diamond_medium_difficulty_adds_one_helper(state):
+    pid = _make_project(state)
+    d = Diamond(state.db, state.config, state.logger)
+    d.assign_initial(pid)
+    with state.db.connect() as conn:
+        report = graph_store.create_report(
+            conn, pid, "aventurine", "branching web target", "medium", "origin",
+            ["basic recon done"], ["check source leak", "check auth bypass"], ["web"],
+        )
+    assignments = d.decide_reinforcements(pid, report)
+    assert len(assignments) == 1
+    assert assignments[0].member != "aventurine"
 
 
 def test_full_solve_pipeline_to_completed(state):
@@ -114,6 +148,7 @@ def test_full_solve_pipeline_to_completed(state):
     assert any(b.project_id == pid for b in broadcasts)
     # WP file exists
     assert Path(row["wp_path"]).exists()
+    assert Path(row["wp_path"]).name == "Demo.md"
     # memory was written (4 categories may not all fill, but at least exploit+knowledge)
     assert len(state.memory.all()) >= 1
     # completion graph links
@@ -152,4 +187,25 @@ def test_reinforcement_pipeline_with_scripts(state):
     assigned = {l.dst for l in detail.agent_links if l.kind == "assign"}
     assert len(assigned) >= 2
     assert detail.project.flag == "flag{rsa_pwned}"
+    orch.shutdown()
+
+
+def test_orchestrator_prefers_newest_unclaimed_intent(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        old = edge_store.create_intent(conn, pid, ["origin"], "older branch", "diamond")
+        newest = edge_store.create_intent(conn, pid, ["origin"], "newer branch", "diamond")
+
+    orch = Orchestrator(state, max_workers=2)
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    assert launched == [(pid, "aventurine", newest.id, "web", False)]
+    assert old.id != newest.id
     orch.shutdown()

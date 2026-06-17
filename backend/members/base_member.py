@@ -38,6 +38,12 @@ class SolveResult:
     flag: str | None = None
 
 
+@dataclass
+class DispatchResult:
+    result: SolveResult | None = None
+    graph_action: str | None = None
+
+
 class BaseMember:
     role_blurb = "a versatile CTF solver"
 
@@ -62,6 +68,7 @@ class BaseMember:
         step = 0
         task_budget = max(1, min(d.max_steps, d.max_actions_per_task))
         graph_actions: list[str] = []
+        branch_intents = 0
         while step < task_budget and not self._stop.is_set():
             step += 1
             evaluate_now = step % d.eval_interval == 0
@@ -81,11 +88,20 @@ class BaseMember:
                 d.logger.project("member_loop_detected", project_id, member=self.name, intent=intent_id, steps=step)
                 return SolveResult(status="stalled", steps=step)
 
-            result = self._dispatch(project_id, intent_id, category, action, step)
-            if action.kind in ("report", "intent", "conclude", "flag"):
-                graph_actions.append(action.kind)
-            if result is not None:
-                return result
+            dispatched = self._dispatch(
+                project_id,
+                intent_id,
+                category,
+                action,
+                step,
+                allow_intent=branch_intents < 1,
+            )
+            if dispatched.graph_action is not None:
+                graph_actions.append(dispatched.graph_action)
+                if dispatched.graph_action == "intent":
+                    branch_intents += 1
+            if dispatched.result is not None:
+                return dispatched.result
         if self._stop.is_set():
             self._release(project_id, intent_id)
             d.logger.project("member_stopped", project_id, member=self.name, intent=intent_id, steps=step)
@@ -108,7 +124,16 @@ class BaseMember:
 
     # ---- action dispatch ----
 
-    def _dispatch(self, project_id, intent_id, category, action: MemberAction, step) -> SolveResult | None:
+    def _dispatch(
+        self,
+        project_id,
+        intent_id,
+        category,
+        action: MemberAction,
+        step,
+        *,
+        allow_intent: bool,
+    ) -> DispatchResult:
         d = self.deps
         kind = action.kind
         if kind == "bash":
@@ -116,7 +141,7 @@ class BaseMember:
             res = d.sandbox.exec(cmd, timeout=60)
             self._observe(f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip())
             d.logger.tool("bash", project_id, member=self.name, command=cmd, exit_code=res.exit_code)
-            return None
+            return DispatchResult()
         if kind == "tool":
             server = action.args.get("server", "")
             tool = action.args.get("tool", "")
@@ -127,34 +152,43 @@ class BaseMember:
                 out = {"error": str(exc)}
             self._observe(f"[mcp:{server}.{tool}] {out}")
             d.logger.tool("mcp_call", project_id, member=self.name, server=server, tool=tool)
-            return None
+            return DispatchResult()
         if kind == "memory":
             query = action.args.get("query", "")
             hits = mem_search(d.memory, query, limit=5)
             self._observe(f"[memory:{query}] " + "; ".join(f"{m.title}" for m, _ in hits))
             d.logger.memory("search", project_id, member=self.name, query=query, hits=len(hits))
-            return None
+            return DispatchResult()
         if kind == "tool_search":
             query = action.args.get("query", "")
             tools = d.registry.search(query)
             self._observe(f"[tool_search:{query}] " + ", ".join(t.name for t in tools))
             d.logger.tool("tool_search", project_id, member=self.name, query=query)
-            return None
+            return DispatchResult()
         if kind == "report":
             self._submit_report(project_id, intent_id, action)
-            return None
+            return DispatchResult(graph_action="report")
         if kind == "intent":
-            self._declare_intent(project_id, action)
-            return None
+            if not allow_intent:
+                d.logger.project(
+                    "intent_budget_exhausted",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    description=action.args.get("description", "explore"),
+                )
+                return DispatchResult()
+            created = self._declare_intent(project_id, action)
+            return DispatchResult(graph_action="intent" if created is not None else None)
         if kind == "conclude":
-            return self._conclude(project_id, intent_id, action)
+            return DispatchResult(result=self._conclude(project_id, intent_id, action), graph_action="conclude")
         if kind == "flag":
-            return self._raise_flag(project_id, intent_id, action, step)
+            return DispatchResult(result=self._raise_flag(project_id, intent_id, action, step), graph_action="flag")
         if kind == "done":
             self._release(project_id, intent_id)
             d.logger.project("member_done", project_id, member=self.name, reason=action.args.get("reason"))
-            return SolveResult(status="done", steps=step)
-        return None
+            return DispatchResult(result=SolveResult(status="done", steps=step))
+        return DispatchResult()
 
     # ---- blackboard ops ----
 
@@ -181,7 +215,7 @@ class BaseMember:
             row = edge_store.get_intent(conn, project_id, intent_id)
             node_id = row["to_fact_id"] if row else None
             report = graph_store.create_report(
-                conn, project_id, self.name, a.get("progress", ""), a.get("difficulty", "medium"),
+                conn, project_id, self.name, a.get("progress", ""), a.get("difficulty", "low"),
                 node_id, a.get("steps", []), a.get("directions", []), a.get("knowledge", []),
             )
             graph_store.add_link(conn, project_id, self.name, "diamond", "report")
@@ -192,12 +226,33 @@ class BaseMember:
     def _declare_intent(self, project_id, action: MemberAction):
         a = action.args
         from_ids = a.get("from") or ["origin"]
+        description = a.get("description", "explore")
         with self.deps.db.connect() as conn:
             for fid in from_ids:
                 if not node_store.fact_exists(conn, project_id, fid):
                     from_ids = ["origin"]
                     break
-            edge_store.create_intent(conn, project_id, from_ids, a.get("description", "explore"), self.name)
+            existing = edge_store.find_similar_open_intent(conn, project_id, from_ids, description)
+            if existing is not None:
+                self.deps.logger.project(
+                    "intent_deduped",
+                    project_id,
+                    member=self.name,
+                    existing_intent=existing.id,
+                    from_ids=from_ids,
+                    description=description,
+                )
+                return None
+            intent = edge_store.create_intent(conn, project_id, from_ids, description, self.name)
+            self.deps.logger.project(
+                "intent_declared",
+                project_id,
+                member=self.name,
+                intent=intent.id,
+                from_ids=from_ids,
+                description=description,
+            )
+            return intent
 
     def _submit_stall_report(self, project_id, intent_id, category, step) -> None:
         recent = self.observations[-4:]
@@ -206,10 +261,10 @@ class BaseMember:
             progress = "Short exploration observations:\n" + "\n\n".join(recent)
         action = MemberAction(
             kind="report",
-            thought="short task budget exhausted; escalating with observations",
+            thought="short task budget exhausted; sharing observations for follow-up",
             args={
                 "progress": progress[:1800],
-                "difficulty": "medium",
+                "difficulty": "low",
                 "steps": recent or [f"Used {step} short-task actions on {category} intent."],
                 "directions": [
                     "Try a different concrete approach for this intent.",
