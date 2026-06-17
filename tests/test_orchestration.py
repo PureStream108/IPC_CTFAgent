@@ -38,6 +38,42 @@ def _make_project(state, category="web"):
     return pid
 
 
+def test_app_state_clean_start_wipes_runtime_state(tmp_path, monkeypatch):
+    import shutil
+
+    cfgdir = tmp_path / "config"
+    cfgdir.mkdir()
+    src = Path(__file__).resolve().parent.parent / "backend" / "config"
+    for name in ("config.yaml", "models.yaml", "limits.yaml"):
+        shutil.copy(src / name, cfgdir / name)
+
+    data_dir = tmp_path / "data"
+    st = AppState(root=tmp_path, config_dir=cfgdir)
+    with st.db.connect() as conn:
+        graph_store.create_project(conn, "Old", "origin", "goal", "web")
+    (tmp_path / "logs" / "project_logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs" / "project_logs" / "Old.json").write_text("old\n", encoding="utf-8")
+    (tmp_path / "projects" / "proj_001" / "attachments").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "projects" / "proj_001" / "attachments" / "x.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "memory" / "export").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "export" / "memory.md").write_text("old", encoding="utf-8")
+    (tmp_path / "wp").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "wp" / "Old.md").write_text("old", encoding="utf-8")
+
+    monkeypatch.setenv("IPC_CLEAN_START", "1")
+    cleaned = AppState(root=tmp_path, config_dir=cfgdir)
+
+    with cleaned.db.connect() as conn:
+        assert graph_store.project_summaries(conn) == []
+        next_id = graph_store.create_project(conn, "New", "origin", "goal", "web")
+    assert next_id == "proj_001"
+    assert not (tmp_path / "logs" / "project_logs" / "Old.json").exists()
+    assert not (tmp_path / "projects" / "proj_001" / "attachments" / "x.txt").exists()
+    assert not (tmp_path / "memory" / "export" / "memory.md").exists()
+    assert not (tmp_path / "wp" / "Old.md").exists()
+    assert data_dir.exists()
+
+
 def test_lifecycle_transitions(state):
     pid = _make_project(state)
     lc = Lifecycle(state.db)

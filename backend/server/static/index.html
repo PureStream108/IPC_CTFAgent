@@ -81,10 +81,8 @@
         <span class="font-semibold text-slate-600 tabular-nums" x-text="countBy('completed')"></span>
       </span>
     </div>
-    <label class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 transition inline-flex items-center gap-1.5">
-      <input type="checkbox" x-model="logEnabled" @change="toggleLog()" />
-      Logs
-    </label>
+    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalLogs()">Logs</button>
+    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalWP()">WP</button>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">IPC</button>
   </header>
 
@@ -505,6 +503,99 @@
     </div>
   </div>
 
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showGlobalLogs" x-cloak>
+    <div class="panel rounded-2xl w-[860px] max-h-[90vh] overflow-hidden p-5 flex flex-col">
+      <div class="flex items-center justify-between mb-4 shrink-0">
+        <div class="text-lg font-semibold text-slate-700">Logs</div>
+        <div class="flex items-center gap-2">
+          <label class="btn-ghost px-3 py-1.5 rounded-lg text-sm inline-flex items-center gap-2">
+            <input type="checkbox" x-model="logEnabled" @change="toggleLog()" />
+            Enabled
+          </label>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveLogs()">Derive</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showGlobalLogs=false">Close</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
+        <div class="border-r border-slate-100 overflow-y-auto p-2 bg-slate-50/70">
+          <template x-for="item in globalLogs" :key="item.project_id">
+            <button class="w-full text-left rounded-xl p-3 mb-1 transition"
+              :class="selectedLogProjectId===item.project_id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
+              @click="selectedLogProjectId=item.project_id">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-mono text-slate-400" x-text="item.project_id"></span>
+                <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="item.entries.length"></span>
+              </div>
+              <div class="mt-1 text-sm font-semibold break-words [overflow-wrap:anywhere]" x-text="item.title"></div>
+              <div class="mt-1 text-[10px] text-slate-400 truncate" x-text="item.filename"></div>
+            </button>
+          </template>
+          <div x-show="globalLogs.length===0" class="text-xs text-slate-400 p-4">No logs</div>
+        </div>
+        <div class="overflow-y-auto p-4 min-w-0">
+          <template x-if="selectedLogProject()">
+            <div>
+              <div class="flex items-center justify-between gap-3 mb-3">
+                <div class="min-w-0">
+                  <div class="text-sm font-semibold text-slate-700 truncate" x-text="selectedLogProject().title"></div>
+                  <div class="text-[11px] text-slate-400 truncate" x-text="selectedLogProject().filename"></div>
+                </div>
+                <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="openGlobalLogs()">Refresh</button>
+              </div>
+              <template x-for="(entry,i) in selectedLogProject().entries" :key="i">
+                <div class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 mb-2">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-[11px] text-slate-400 tabular-nums" x-text="formatTime(entry.ts)"></span>
+                    <span class="px-2 py-0.5 rounded-md bg-white text-[10px] font-semibold uppercase tracking-wide text-slate-500" x-text="entry.event"></span>
+                  </div>
+                  <div class="text-[11px] text-slate-500 mt-2 whitespace-pre-wrap break-words" x-text="logSummary(entry)"></div>
+                </div>
+              </template>
+              <div x-show="selectedLogProject().entries.length===0" class="text-xs text-slate-400">No entries</div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showGlobalWP" x-cloak>
+    <div class="panel rounded-2xl w-[860px] max-h-[90vh] overflow-hidden p-5 flex flex-col">
+      <div class="flex items-center justify-between mb-4 shrink-0">
+        <div class="text-lg font-semibold text-slate-700">WP</div>
+        <div class="flex gap-2">
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveWP()">Derive</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showGlobalWP=false">Close</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
+        <div class="border-r border-slate-100 overflow-y-auto p-2 bg-slate-50/70">
+          <template x-for="item in completedWPs" :key="item.project_id">
+            <button class="w-full text-left rounded-xl p-3 mb-1 transition"
+              :class="selectedCompletedWPId===item.project_id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
+              @click="selectedCompletedWPId=item.project_id">
+              <div class="text-[11px] font-mono text-slate-400" x-text="item.project_id"></div>
+              <div class="mt-1 text-sm font-semibold break-words [overflow-wrap:anywhere]" x-text="item.title"></div>
+              <div class="mt-1 text-[10px] text-slate-400 truncate" x-text="item.filename"></div>
+            </button>
+          </template>
+          <div x-show="completedWPs.length===0" class="text-xs text-slate-400 p-4">No WP</div>
+        </div>
+        <div class="overflow-y-auto p-4 min-w-0">
+          <template x-if="selectedCompletedWP()">
+            <div>
+              <div class="mb-3">
+                <div class="text-sm font-semibold text-slate-700 truncate" x-text="selectedCompletedWP().title"></div>
+                <div class="text-[11px] text-slate-400 truncate" x-text="selectedCompletedWP().filename"></div>
+              </div>
+              <pre class="text-[11px] whitespace-pre-wrap text-slate-600" x-text="selectedCompletedWP().content"></pre>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showWP" x-cloak>
     <div class="panel rounded-2xl w-[760px] max-h-[90vh] overflow-y-auto p-5">
       <div class="flex items-center justify-between mb-4">
@@ -526,9 +617,11 @@
       categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
+      showGlobalLogs: false, showGlobalWP: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, health: {}, memories: [], wpText: "", toast: "",
+      globalLogs: [], selectedLogProjectId: null, completedWPs: [], selectedCompletedWPId: null,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
@@ -616,6 +709,14 @@
         this.logEntries=p.entries||[]; this.llmEntries=l.entries||[];
       },
       logSummary(e){ const k=Object.keys(e).filter(x=>!["ts","event","project_id"].includes(x)); return k.map(x=>x+"="+JSON.stringify(e[x])).join(" ").slice(0,160); },
+      async openGlobalLogs(){
+        const r=await this.api("GET","/logs/projects?limit=500");
+        this.globalLogs=r.logs||[];
+        this.selectedLogProjectId=this.globalLogs[0]?.project_id||null;
+        this.showGlobalLogs=true;
+      },
+      selectedLogProject(){ return this.globalLogs.find(x=>x.project_id===this.selectedLogProjectId)||this.globalLogs[0]||null; },
+      async deriveLogs(){ const r=await this.api("POST","/logs/derive"); this.flash("exported: "+r.dir); },
 
       buildElements(){
         const d=this.current; if(!d) return {nodes:[],edges:[]};
@@ -894,6 +995,14 @@
       timelineEventDotClass(e){ return {project_created:"bg-slate-400",hint_added:"bg-amber-400",intent_declared:"bg-violet-400",intent_concluded:"bg-teal-400",project_completed:"bg-rose-400",report:"bg-sky-400"}[e.type]||"bg-slate-300"; },
       openTimelineEntry(e){ if(e.targetType==="fact")this.selectFact(e.targetId); if(e.targetType==="intent")this.selectIntent(e.targetId); if(e.targetType==="agent")this.selectAgent(e.targetId); if(e.targetType!=="hints")this.sideTab="detail"; },
       async openWP(){ const r=await fetch("/projects/"+this.selectedId+"/wp"); this.wpText=await r.text(); this.showWP=true; },
+      async openGlobalWP(){
+        const r=await this.api("GET","/wp/completed");
+        this.completedWPs=r.writeups||[];
+        this.selectedCompletedWPId=this.completedWPs[0]?.project_id||null;
+        this.showGlobalWP=true;
+      },
+      selectedCompletedWP(){ return this.completedWPs.find(x=>x.project_id===this.selectedCompletedWPId)||this.completedWPs[0]||null; },
+      async deriveWP(){ const r=await this.api("POST","/wp/derive"); this.flash("exported: "+r.dir); },
 
       async openIPCConfig(){ this.cfg=await this.api("GET","/config"); this.health={}; this.showIPC=true; },
       llmFields(name, obj){

@@ -79,6 +79,32 @@ def test_resource_manager_resets_leaked_reservations_when_no_sandboxes(tmp_path)
     assert rl.reserved_memory_gb == 0
 
 
+def test_resource_manager_reclaims_orphaned_projects():
+    class FakePool:
+        def __init__(self):
+            self.keys = [("proj_001", "aventurine"), ("proj_002", "jade")]
+            self.stopped = []
+
+        def active_keys(self):
+            return list(self.keys)
+
+        def stop_project(self, project_id):
+            self.stopped.append(project_id)
+            self.keys = [key for key in self.keys if key[0] != project_id]
+
+    rl = ResourceLimiter(total_memory_gb=10, per_agent_memory_gb=5)
+    assert rl.reserve("proj_001-aventurine", 5) is True
+    assert rl.reserve("proj_002-jade", 5) is True
+    pool = FakePool()
+    manager = ResourceManager(rl, pool)
+
+    reclaimed = manager.reclaim_orphaned_projects({"proj_002"})
+
+    assert reclaimed == ["proj_001"]
+    assert pool.stopped == ["proj_001"]
+    assert rl.reserved_memory_gb == 10
+
+
 def test_container_pool_isolated_workspaces(tmp_path):
     pool = ContainerPool(backend="local", workspace_root=tmp_path)
     sb1 = pool.get("proj_001", "aventurine")

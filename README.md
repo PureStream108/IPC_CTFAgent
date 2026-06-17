@@ -51,10 +51,16 @@ MEMORY_WRITING
 COMPLETED
 ```
 
-## 关于Wp
+## 关于Wp和日志
 
 当 Member 解出 FLAG 的时候，Diamond 负责沿着已确定的解题步骤撰写 Wp 和 Exp
 
 文件为 markdown 文件，流程为：
 
-题目信息 --> 解题过程 --> Exp，Wp 默认保存在 Docker启动目录下的 /wp 文件夹
+题目信息 --> 解题过程 --> Exp。运行时 Wp 默认保存在容器内 `/app/wp`。
+
+日志会记录 Diamond 和 Member 间的调用/反馈记录，工具调用记录，Member思考过程
+
+主界面 WP -> Derive 会把已完成项目的 Wp 导出到 Docker 启动目录下的 `/Wp` 文件夹；主界面 Logs -> Derive 会把项目日志导出到 Docker 启动目录下的 `/logs` 文件夹
+
+删除并重建容器会清空容器内运行记录

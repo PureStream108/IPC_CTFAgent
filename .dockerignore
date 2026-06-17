@@ -6,6 +6,8 @@ tools/
 data/
 logs/
 wp/
+Wp/
 projects/
 memory/
+exports/
 ipc_check.js

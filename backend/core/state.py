@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -19,10 +20,17 @@ from backend.tools.tool_mcp import build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
 
 
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 class AppState:
     def __init__(self, root: str | Path = ".", config_dir: Path | None = None):
         self.root = Path(root)
         self.config_dir = config_dir
+        if _env_flag("IPC_CLEAN_START"):
+            self._clean_runtime_state()
         self.config: AppConfig = load_config(config_dir)
 
         data_dir = self.root / "data"
@@ -33,7 +41,17 @@ class AppState:
             data_dir / "memory.db", export_dir=self.root / "memory"
         ).configure()
         self.registry = ToolRegistry(cache_db=data_dir / "tool_cache.db").load()
-        self.logger = IPCLogger(self.root / "logs", enabled=self.config.log_enabled)
+        self.log_export_dir = Path(
+            os.environ.get("IPC_LOG_EXPORT_DIR", self.root / "exports" / "logs")
+        )
+        self.wp_export_dir = Path(
+            os.environ.get("IPC_WP_EXPORT_DIR", self.root / "exports" / "Wp")
+        )
+        self.logger = IPCLogger(
+            self.root / "logs",
+            enabled=self.config.log_enabled,
+            project_filename_resolver=self.project_log_filename,
+        )
 
         self.limiter = ResourceLimiter(
             total_cpu=self.config.limits.total_cpu,
@@ -66,6 +84,16 @@ class AppState:
         # Attached by module 8.
         self.orchestrator = None
 
+    def _clean_runtime_state(self) -> None:
+        for name in ("data", "projects", "memory", "logs", "wp"):
+            target = self.root / name
+            if not target.exists():
+                continue
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+
     def reload_config(self) -> None:
         self.config = load_config(self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
@@ -73,6 +101,10 @@ class AppState:
     def save_config(self) -> None:
         save_config(self.config, self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+
+    def project_log_filename(self, project_id: str) -> str | None:
+        with self.db.connect() as conn:
+            return graph_store.project_log_filename(conn, project_id)
 
     def attachments_dir(self, project_id: str) -> Path:
         d = self.projects_dir / project_id / "attachments"
@@ -85,3 +117,4 @@ class AppState:
         if target == root or root not in target.parents:
             raise ValueError(f"refusing to delete project path outside projects dir: {target}")
         shutil.rmtree(target, ignore_errors=True)
+        self.logger.delete_project_logs(project_id)

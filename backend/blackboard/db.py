@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL DEFAULT 'created',
     flag TEXT,
     wp_path TEXT,
+    log_filename TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     reason_worker TEXT,

@@ -69,8 +69,9 @@ def delete_project(project_id: str, state: AppState = Depends(get_state)):
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
             raise HTTPException(404, "Project not found")
-        graph_store.delete_project(conn, project_id)
     state.delete_project_files(project_id)
+    with state.db.connect() as conn:
+        graph_store.delete_project(conn, project_id)
 
 
 @router.post("/projects/{project_id}/attachments")

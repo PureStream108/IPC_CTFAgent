@@ -18,9 +18,11 @@ services:
     environment:
       - IPC_ROOT=/app
       - IPC_LOG_ENABLED=true
+      - IPC_LOG_EXPORT_DIR=/app/exports/logs
+      - IPC_WP_EXPORT_DIR=/app/exports/Wp
     volumes:
-      - ./wp:/app/wp
-      - ./logs:/app/logs
+      - ./logs:/app/exports/logs
+      - ./Wp:/app/exports/Wp
       - ./backend/config:/app/backend/config
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

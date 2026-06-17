@@ -13,9 +13,8 @@ COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
-# Runtime data dirs. Compose persists only wp/ and logs/ on the host; project
-# state, memory DB, and workspaces stay in the app container layer.
-RUN mkdir -p /app/data /app/memory /app/wp /app/logs /app/projects
+# Runtime data stays in the container layer. Compose mounts only export targets.
+RUN mkdir -p /app/data /app/memory /app/wp /app/logs /app/projects /app/exports/logs /app/exports/Wp
 
 ENV IPC_ROOT=/app
 EXPOSE 8000

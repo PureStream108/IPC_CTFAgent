@@ -61,6 +61,7 @@ class Orchestrator:
     # ---- start solving ----
 
     def start_project(self, project_id: str) -> None:
+        self._reconcile_resources()
         status = self.lifecycle.status(project_id)
         if status is None:
             return
@@ -83,6 +84,7 @@ class Orchestrator:
         self._launch_member(project_id, assignment.member, assignment.intent_id, self._category(project_id), assignment.is_initial)
 
     def resume_project(self, project_id: str) -> None:
+        self._reconcile_resources()
         status = self.lifecycle.status(project_id)
         if status is None:
             return
@@ -143,7 +145,13 @@ class Orchestrator:
         if cfg is None:
             return
         if not self.resources.can_admit_member():
-            self.state.logger.project("member_admission_denied", project_id, member=member_name)
+            self.state.logger.project(
+                "member_admission_denied",
+                project_id,
+                member=member_name,
+                reserved_memory_gb=self.state.limiter.reserved_memory_gb,
+                active_sandboxes=self.state.pool.active_keys(),
+            )
             return
         sandbox = self.resources.sandbox_for(project_id, member_name)
         deps = MemberDeps(
@@ -265,6 +273,7 @@ class Orchestrator:
             self._stop.wait(interval)
 
     def _tick(self) -> None:
+        self._reconcile_resources()
         with self.state.db.connect() as conn:
             graph_store.expire_reason_leases(conn, self.state.config.runtime.reason_timeout)
             edge_store.expire_workers(conn, self.state.config.runtime.intent_timeout)
@@ -313,6 +322,22 @@ class Orchestrator:
                 continue
             self._launch_member(project_id, member_name, intent.id, category, intent.description.startswith("bootstrap"))
             return
+
+    def _reconcile_resources(self) -> None:
+        with self.state.db.connect() as conn:
+            summaries = graph_store.project_summaries(conn)
+        active_project_ids = {
+            summary.id
+            for summary in summaries
+            if summary.status in ("running", "flag_found", "wp_writing", "memory_writing")
+        }
+        reclaimed = self.resources.reclaim_orphaned_projects(active_project_ids)
+        if reclaimed:
+            self.state.logger.project(
+                "orphaned_project_resources_reclaimed",
+                "system",
+                projects=reclaimed,
+            )
 
     def _pick_idle_member(self, project_id: str) -> str | None:
         with self._lock:

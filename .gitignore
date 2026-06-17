@@ -9,6 +9,12 @@ Interastral_Peace_Corporation_2.png
 backend/config/config.yaml
 docs/
 logs/
+data/
+memory/
+projects/
+wp/
+Wp/
+exports/
 
 # C extensions
 *.so

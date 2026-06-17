@@ -24,6 +24,7 @@ from backend.blackboard.models import (
     ProjectSummary,
     Report,
 )
+from backend.filename_util import numbered_filename
 
 # ---------- settings ----------
 
@@ -88,6 +89,7 @@ def project_meta(row: sqlite3.Row) -> ProjectMeta:
         status=row["status"],
         flag=row["flag"],
         wp_path=row["wp_path"],
+        log_filename=row["log_filename"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         reason=reason_from_row(row),
@@ -109,10 +111,15 @@ def create_project(
     """Create a project with origin/goal facts and the IPC + Diamond agents."""
     pid = next_project_id(conn)
     now = utcnow()
+    used = [
+        r["log_filename"]
+        for r in conn.execute("SELECT log_filename FROM projects WHERE log_filename IS NOT NULL")
+    ]
+    log_filename = numbered_filename(title, ".json", used, fallback=pid)
     conn.execute(
-        "INSERT INTO projects (id, title, category, status, created_at, updated_at) "
-        "VALUES (?, ?, ?, 'created', ?, ?)",
-        (pid, title, category, now, now),
+        "INSERT INTO projects (id, title, category, status, log_filename, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'created', ?, ?, ?)",
+        (pid, title, category, log_filename, now, now),
     )
     node_store.insert_fact(conn, pid, "origin", origin)
     node_store.insert_fact(conn, pid, "goal", goal)
@@ -153,6 +160,11 @@ def set_wp_path(conn: sqlite3.Connection, project_id: str, wp_path: str) -> None
         "UPDATE projects SET wp_path = ?, updated_at = ? WHERE id = ?",
         (wp_path, utcnow(), project_id),
     )
+
+
+def project_log_filename(conn: sqlite3.Connection, project_id: str) -> str | None:
+    row = conn.execute("SELECT log_filename FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return row["log_filename"] if row else None
 
 
 def reset_project_counter_if_empty(conn: sqlite3.Connection) -> None:

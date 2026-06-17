@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.blackboard import graph_store
 from backend.server.app import create_app
 
 
@@ -81,11 +84,15 @@ def test_delete_project_removes_project_files(client):
     r = client.post(f"/projects/{pid}/attachments", files={"file": ("chal.bin", b"data", "application/octet-stream")})
     assert r.status_code == 200
     project_dir = client.app.state.ipc.projects_dir / pid
+    project_log = client.app.state.ipc.logger.root / "project_logs" / "A.json"
     assert project_dir.exists()
+    assert project_log.exists()
+    assert isinstance(json.loads(project_log.read_text(encoding="utf-8")), list)
 
     r = client.delete(f"/projects/{pid}")
     assert r.status_code == 204
     assert not project_dir.exists()
+    assert not project_log.exists()
     assert client.get(f"/projects/{pid}").status_code == 404
 
 
@@ -102,6 +109,38 @@ def test_delete_last_project_resets_project_counter(client):
         json={"title": "B", "origin": "o", "goal": "g", "category": "misc"},
     ).json()["project"]["id"]
     assert second == "proj_001"
+
+
+def test_project_log_filenames_use_title_suffixes(client):
+    names = []
+    for _ in range(3):
+        detail = client.post(
+            "/projects",
+            json={"title": "Demo", "origin": "o", "goal": "g", "category": "misc"},
+        ).json()
+        names.append(detail["project"]["log_filename"])
+    assert names == ["Demo.json", "Demo01.json", "Demo02.json"]
+
+
+def test_project_logs_list_and_derive(client):
+    detail = client.post(
+        "/projects",
+        json={"title": "Demo", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()
+    pid = detail["project"]["id"]
+
+    r = client.get("/logs/projects")
+    assert r.status_code == 200
+    item = r.json()["logs"][0]
+    assert item["project_id"] == pid
+    assert item["filename"] == "Demo.json"
+    assert item["entries"][0]["event"] == "project_created"
+
+    r = client.post("/logs/derive")
+    assert r.status_code == 200
+    export = client.app.state.ipc.log_export_dir / "Demo.json"
+    assert export.exists()
+    assert json.loads(export.read_text(encoding="utf-8"))[0]["project_id"] == pid
 
 
 def test_report_submission(client):
@@ -167,6 +206,36 @@ def test_logs_toggle(client):
     assert r.json()["enabled"] is False
     r = client.put("/logs/status", json={"enabled": True})
     assert r.json()["enabled"] is True
+
+
+def test_completed_wp_list_and_derive(client):
+    detail = client.post(
+        "/projects",
+        json={"title": "Solved", "origin": "o", "goal": "g", "category": "web"},
+    ).json()
+    pid = detail["project"]["id"]
+    wp_path = client.app.state.ipc.wp_dir / "Solved.md"
+    wp_path.write_text("# Solved\n", encoding="utf-8")
+    with client.app.state.ipc.db.connect() as conn:
+        graph_store.set_wp_path(conn, pid, str(wp_path))
+        graph_store.set_status(conn, pid, "running")
+        graph_store.set_status(conn, pid, "flag_found")
+        graph_store.set_status(conn, pid, "wp_writing")
+        graph_store.set_status(conn, pid, "memory_writing")
+        graph_store.set_status(conn, pid, "completed")
+
+    r = client.get("/wp/completed")
+    assert r.status_code == 200
+    item = r.json()["writeups"][0]
+    assert item["project_id"] == pid
+    assert item["filename"] == "Solved.md"
+    assert item["content"] == "# Solved\n"
+
+    r = client.post("/wp/derive")
+    assert r.status_code == 200
+    export = client.app.state.ipc.wp_export_dir / "Solved.md"
+    assert export.exists()
+    assert export.read_text(encoding="utf-8") == "# Solved\n"
 
 
 def test_export_and_replay(client):

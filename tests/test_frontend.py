@@ -31,6 +31,9 @@ def test_index_served(client):
     # IPC branding + key UI elements present
     assert "Equal CTF Solver Agents" in body
     assert "BROADCAST" in body
+    assert "Logs" in body
+    assert "WP" in body
+    assert "Derive" in body
     assert "+ New Project" in body
     assert "Memory" in body
     # dagre remains the hidden graph layout engine

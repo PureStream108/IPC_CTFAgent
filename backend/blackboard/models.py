@@ -98,6 +98,7 @@ class ProjectMeta(BaseModel):
     status: ProjectStatus
     flag: str | None = None
     wp_path: str | None = None
+    log_filename: str | None = None
     created_at: str
     updated_at: str
     reason: ProjectReason | None = None
