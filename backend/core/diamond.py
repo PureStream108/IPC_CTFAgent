@@ -6,7 +6,7 @@ from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.config import AppConfig, MemberConfig
 from backend.core.logging_util import IPCLogger
 
-BOOTSTRAP_DESC = "bootstrap: take the first crack at the challenge"
+BOOTSTRAP_DESC = "Bootstrap: Starting"
 
 
 @dataclass
