@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS reports (
     member TEXT NOT NULL,
     node_id TEXT,                -- submission node (fact id) the report attaches to
     progress TEXT NOT NULL,
-    difficulty TEXT NOT NULL,    -- low|medium|high (free text tolerated)
+    difficulty TEXT NOT NULL,    -- low|medium|high|ex (free text tolerated)
     steps_json TEXT NOT NULL,    -- existing problem-solving steps
     directions_json TEXT NOT NULL,  -- directions for other Members
     knowledge_json TEXT NOT NULL,   -- involved knowledge points

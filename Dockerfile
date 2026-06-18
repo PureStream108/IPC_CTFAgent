@@ -13,7 +13,7 @@ COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
-# Runtime data stays in the container layer. Compose mounts only export targets.
+# Runtime data directories are mounted as named volumes by docker-compose.yml.
 RUN mkdir -p /app/data /app/memory /app/wp /app/logs /app/projects /app/exports/logs /app/exports/Wp
 
 ENV IPC_ROOT=/app

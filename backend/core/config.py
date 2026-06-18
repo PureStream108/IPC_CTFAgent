@@ -55,8 +55,8 @@ class LimitsConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Difficulty self-evaluation cadence for Members (Seed.md: every 7 steps).
-    eval_interval_steps: int = Field(default=7, gt=0)
+    # Difficulty self-evaluation cadence for Members.
+    eval_interval_steps: int = Field(default=20, gt=0)
     # Scheduler tick + heartbeat cadence (seconds).
     interval: int = Field(default=2, gt=0)
     intent_timeout: int = Field(default=30, ge=5)
@@ -65,7 +65,7 @@ class RuntimeConfig(BaseModel):
     max_members_per_report: int = Field(default=3, gt=0)
     sandbox_backend: Literal["local", "docker"] = "docker"
     max_member_steps: int = Field(default=60, gt=0)
-    max_member_actions_per_task: int = Field(default=7, gt=0)
+    max_member_actions_per_task: int = Field(default=20, gt=0)
 
 
 class AppConfig(BaseModel):

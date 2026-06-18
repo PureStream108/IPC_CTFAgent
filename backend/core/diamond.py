@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.config import AppConfig, MemberConfig
+from backend.core.difficulty import extra_members_for_difficulty, normalize_difficulty
 from backend.core.logging_util import IPCLogger
+from backend.core.wp_writer import write_wp
 
 BOOTSTRAP_DESC = "Bootstrap: Starting"
 
@@ -58,15 +60,14 @@ class Diamond:
 
     def decide_reinforcements(self, project_id: str, report) -> list[Assignment]:
         """On a difficulty report, add 1..N idle members on fresh directions."""
-        difficulty = (report.difficulty or "low").lower()
-        if difficulty in ("low", "trivial", "easy"):
+        difficulty = normalize_difficulty(report.difficulty)
+        want = extra_members_for_difficulty(difficulty)
+        if want <= 0:
             self.logger.project("diamond_no_reinforce", project_id, reason="low difficulty")
             return []
         idle = self._idle_members(project_id)
         if not idle:
             return []
-        # Medium means "one helper may help"; only high/hard fans out harder.
-        want = 3 if difficulty in ("high", "hard") else (1 if difficulty == "medium" else 1)
         want = min(want, self.config.runtime.max_members_per_report, len(idle))
 
         directions = self._dedupe_directions(
@@ -115,7 +116,57 @@ class Diamond:
             unique.append(text)
         return unique
 
+    # ---- checkpoint-gated re-planning ----
+
+    def plan_next_intent(self, project_id: str, detail, trigger: str):
+        """Create one follow-up intent after a real graph-state checkpoint change."""
+        open_intents = [intent for intent in detail.intents if intent.to is None]
+        if open_intents:
+            self.logger.project(
+                "diamond_reason_noop",
+                project_id,
+                reason="open_intents_exist",
+                trigger=trigger,
+            )
+            return None
+        facts = [fact for fact in detail.facts if fact.id != "goal"]
+        source = facts[-1].id if facts else "origin"
+        latest = facts[-1].description if facts else ""
+        goal = next((fact.description for fact in detail.facts if fact.id == "goal"), "")
+        direction = (
+            "Continue from the latest confirmed fact and choose the next concrete exploit or analysis step "
+            f"toward the goal. Latest fact: {latest[:240]} Goal: {goal[:160]}"
+        )
+        with self.db.connect() as conn:
+            if not node_store.fact_exists(conn, project_id, source):
+                source = "origin"
+            existing = edge_store.find_similar_open_intent(conn, project_id, [source], direction)
+            if existing is not None:
+                self.logger.project(
+                    "diamond_reason_deduped",
+                    project_id,
+                    existing_intent=existing.id,
+                    source=source,
+                    trigger=trigger,
+                )
+                return None
+            intent = edge_store.create_intent(conn, project_id, [source], direction, "diamond")
+        self.logger.project(
+            "diamond_reason_intent",
+            project_id,
+            intent=intent.id,
+            source=source,
+            trigger=trigger,
+        )
+        return intent
+
     # ---- closing the project ----
+
+    def write_wp(self, project_id: str, wp_dir) -> str:
+        """Diamond writes the final Chinese WP/EXP from the confirmed graph state."""
+        path = write_wp(self.db, project_id, wp_dir)
+        self.logger.project("diamond_wp_written", project_id, path=path)
+        return path
 
     def draw_completion(self, project_id: str) -> None:
         """Draw the WP -> Diamond -> IPC return lines after flag (Seed.md 流程图)."""

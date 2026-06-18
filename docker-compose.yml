@@ -21,6 +21,11 @@ services:
       - IPC_LOG_EXPORT_DIR=/app/exports/logs
       - IPC_WP_EXPORT_DIR=/app/exports/Wp
     volumes:
+      - ipc_data:/app/data
+      - ipc_memory:/app/memory
+      - ipc_wp:/app/wp
+      - ipc_runtime_logs:/app/logs
+      - ipc_projects:/app/projects
       - ./logs:/app/exports/logs
       - ./Wp:/app/exports/Wp
       - ./backend/config:/app/backend/config
@@ -32,3 +37,10 @@ services:
 # Shared MCP services (Browser/Ghidra/ZAP) are integrated in-process as stubs in
 # this build; production deployments can add dedicated services here and point
 # the shared MCP clients at them.
+
+volumes:
+  ipc_data:
+  ipc_memory:
+  ipc_wp:
+  ipc_runtime_logs:
+  ipc_projects:

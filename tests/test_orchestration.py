@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.blackboard import edge_store, graph_store
+from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.diamond import Diamond
 from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.state import AppState
@@ -244,4 +244,30 @@ def test_orchestrator_prefers_newest_unclaimed_intent(state):
     orch._dispatch_project(pid)
     assert launched == [(pid, "aventurine", newest.id, "web", False)]
     assert old.id != newest.id
+    orch.shutdown()
+
+
+def test_reason_checkpoint_ignores_intent_created_by_reason(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    orch = Orchestrator(state, max_workers=2)
+    with state.db.connect() as conn:
+        before_reason = graph_store.project_detail(conn, pid)
+
+    assert orch._reason_trigger(before_reason) == "initial"
+    created = orch.diamond.plan_next_intent(pid, before_reason, "initial")
+    assert created is not None
+    orch._record_reason_checkpoint(pid, before_reason)
+
+    with state.db.connect() as conn:
+        after_reason = graph_store.project_detail(conn, pid)
+    assert any(intent.id == created.id and intent.to is None for intent in after_reason.intents)
+    assert orch._reason_trigger(after_reason) is None
+
+    with state.db.connect() as conn:
+        fact = node_store.create_fact(conn, pid, "confirmed new foothold")
+        edge_store.conclude_intent(conn, pid, created.id, "aventurine", fact.id)
+        changed = graph_store.project_detail(conn, pid)
+    assert orch._reason_trigger(changed).startswith("facts:")
     orch.shutdown()

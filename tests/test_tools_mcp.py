@@ -88,10 +88,34 @@ def test_antsword_has_five_tools():
     assert names == {"encoder", "upload", "php_bypass", "traffic_mutation", "webshell_generator"}
 
 
-def test_shared_mcps():
+def test_shared_mcps(monkeypatch, tmp_path):
+    class FakeResponse:
+        url = "http://x/final"
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        text = "<html><title>Hello</title><body>Visible text</body></html>"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"scan": "1", "alerts": [{"risk": "Low"}], "urls": ["http://x/a"]}
+
+    def fake_get(url, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr("backend.mcp.shared.requests.get", fake_get)
+
     b = build_browser_mcp()
-    assert b.call("navigate", url="http://x")["status"] == 200
+    nav = b.call("navigate", url="http://x")
+    assert nav["available"] is True
+    assert nav["status"] == 200
+    assert nav["title"] == "Hello"
     g = build_ghidra_mcp()
-    assert "pseudocode" in g.call("decompile", binary="/bin/ls")
+    missing = g.call("decompile", binary=str(tmp_path / "missing.bin"))
+    assert missing["available"] is False
+    assert "stub" not in missing["error"].lower()
     z = build_zap_mcp()
-    assert "alerts" in z.call("active_scan", url="http://x")
+    scan = z.call("active_scan", url="http://x")
+    assert scan["available"] is True
+    assert scan["alerts"] == [{"risk": "Low"}]

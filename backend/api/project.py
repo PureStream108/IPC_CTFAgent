@@ -18,6 +18,7 @@ from backend.blackboard.models import (
     ProjectDetail,
     ProjectSummary,
     ReportRequest,
+    ReasonClaimRequest,
 )
 from backend.core.config import CATEGORIES
 from backend.core.state import AppState
@@ -161,6 +162,47 @@ def release_intent(
         if row["worker"] == body.worker:
             edge_store.release_intent(conn, project_id, intent_id)
         return edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent_id), project_id)
+
+
+# ---- reason lease ----
+
+
+@router.post("/projects/{project_id}/reason/claim")
+def claim_reason(project_id: str, body: ReasonClaimRequest, state: AppState = Depends(get_state)):
+    with state.db.connect() as conn:
+        _require_active(conn, project_id)
+        _, reason_timeout = graph_store.get_timeouts(conn)
+        graph_store.expire_reason_leases(conn, reason_timeout, project_id)
+        current = graph_store.reason_holder(conn, project_id)
+        if current is not None and current.worker != body.worker:
+            raise HTTPException(409, f"Reason is currently claimed by {current.worker}")
+        return graph_store.claim_reason(conn, project_id, body.worker, body.trigger)
+
+
+@router.post("/projects/{project_id}/reason/heartbeat")
+def heartbeat_reason(project_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)):
+    with state.db.connect() as conn:
+        _require_active(conn, project_id)
+        _, reason_timeout = graph_store.get_timeouts(conn)
+        graph_store.expire_reason_leases(conn, reason_timeout, project_id)
+        current = graph_store.reason_holder(conn, project_id)
+        if current is not None and current.worker != body.worker:
+            raise HTTPException(409, f"Reason is currently claimed by {current.worker}")
+        renewed = graph_store.heartbeat_reason(conn, project_id, body.worker)
+        if renewed is None:
+            raise HTTPException(404, "Reason claim not found")
+        return renewed
+
+
+@router.post("/projects/{project_id}/reason/release")
+def release_reason(project_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)):
+    with state.db.connect() as conn:
+        _require_active(conn, project_id)
+        current = graph_store.reason_holder(conn, project_id)
+        if current is not None and current.worker != body.worker:
+            raise HTTPException(409, f"Reason is currently claimed by {current.worker}")
+        graph_store.clear_reason(conn, project_id)
+    return {"released": True}
 
 
 @router.post("/projects/{project_id}/intents/{intent_id}/conclude", response_model=ConcludeResponse)

@@ -13,7 +13,7 @@ def test_default_config_loads_and_starts():
     assert cfg.startup_errors() == []
     assert len(cfg.members) == 4
     assert {m.name for m in cfg.members} == {"aventurine", "pearl", "jade", "topaz"}
-    assert cfg.runtime.eval_interval_steps == 7
+    assert cfg.runtime.eval_interval_steps == 20
 
 
 def test_mock_is_always_configured():

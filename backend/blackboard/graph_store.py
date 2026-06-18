@@ -24,6 +24,7 @@ from backend.blackboard.models import (
     ProjectSummary,
     Report,
 )
+from backend.core.difficulty import normalize_difficulty
 from backend.filename_util import numbered_filename
 
 # ---------- settings ----------
@@ -61,6 +62,48 @@ def clear_reason(conn: sqlite3.Connection, project_id: str) -> None:
         "reason_started_at=NULL, reason_last_heartbeat_at=NULL WHERE id = ?",
         (project_id,),
     )
+
+
+def claim_reason(conn: sqlite3.Connection, project_id: str, worker: str, trigger: str) -> ProjectReason | None:
+    row = conn.execute(
+        "SELECT reason_worker FROM projects WHERE id = ?",
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    current = row["reason_worker"]
+    if current is not None and current != worker:
+        return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+    now = utcnow()
+    if current == worker:
+        conn.execute(
+            "UPDATE projects SET reason_trigger=?, reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+            (trigger, now, now, project_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE projects SET reason_worker=?, reason_trigger=?, reason_started_at=?, "
+            "reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+            (worker, trigger, now, now, now, project_id),
+        )
+    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+
+
+def heartbeat_reason(conn: sqlite3.Connection, project_id: str, worker: str) -> ProjectReason | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if row is None or row["reason_worker"] != worker:
+        return None
+    now = utcnow()
+    conn.execute(
+        "UPDATE projects SET reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+        (now, now, project_id),
+    )
+    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+
+
+def reason_holder(conn: sqlite3.Connection, project_id: str) -> ProjectReason | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return reason_from_row(row) if row is not None else None
 
 
 def expire_reason_leases(conn: sqlite3.Connection, timeout: int, project_id: str | None = None) -> None:
@@ -115,7 +158,7 @@ def create_project(
         r["log_filename"]
         for r in conn.execute("SELECT log_filename FROM projects WHERE log_filename IS NOT NULL")
     ]
-    log_filename = numbered_filename(title, ".json", used, fallback=pid)
+    log_filename = numbered_filename(title, ".jsonl", used, fallback=pid)
     conn.execute(
         "INSERT INTO projects (id, title, category, status, log_filename, created_at, updated_at) "
         "VALUES (?, ?, ?, 'created', ?, ?, ?)",
@@ -289,6 +332,7 @@ def create_report(
 ) -> Report:
     now = utcnow()
     rid = next_report_id(conn, project_id)
+    normalized_difficulty = normalize_difficulty(difficulty)
     conn.execute(
         "INSERT INTO reports (id, project_id, member, node_id, progress, difficulty, "
         "steps_json, directions_json, knowledge_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -298,7 +342,7 @@ def create_report(
             member,
             node_id,
             progress,
-            difficulty,
+            normalized_difficulty,
             json.dumps(steps, ensure_ascii=False),
             json.dumps(directions, ensure_ascii=False),
             json.dumps(knowledge, ensure_ascii=False),
@@ -310,7 +354,7 @@ def create_report(
         member=member,
         node_id=node_id,
         progress=progress,
-        difficulty=difficulty,
+        difficulty=normalized_difficulty,
         steps=steps,
         directions=directions,
         knowledge=knowledge,

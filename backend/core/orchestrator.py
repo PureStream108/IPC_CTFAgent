@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 from backend.blackboard import edge_store, graph_store
@@ -11,9 +12,15 @@ from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.memory_writer import write_memory
 from backend.core.project_manager import ProjectManager
 from backend.core.resource_manager import ResourceManager
-from backend.core.wp_writer import write_wp
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
+
+
+@dataclass(slots=True)
+class ReasonCheckpoint:
+    fact_count: int
+    hint_count: int
+    open_intent_count: int
 
 
 class Orchestrator:
@@ -28,6 +35,7 @@ class Orchestrator:
         self._futures: dict[str, list] = {}
         self._task_index: dict[tuple[str, str], Any] = {}
         self._completing: set[str] = set()
+        self._reason_checkpoints: dict[str, ReasonCheckpoint] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -127,10 +135,44 @@ class Orchestrator:
     def handle_report(self, project_id: str, report) -> None:
         if self.lifecycle.status(project_id) != "running":
             return
+        self._broadcast_bump(project_id, report)
         assignments = self.diamond.decide_reinforcements(project_id, report)
         category = self._category(project_id)
         for a in assignments:
             self._launch_member(project_id, a.member, a.intent_id, category, a.is_initial)
+
+    def _broadcast_bump(self, project_id: str, report) -> None:
+        insights = self._format_report_bump(report)
+        with self._lock:
+            members = list(self._members.get(project_id, {}).values())
+        bumped: list[str] = []
+        for member in members:
+            if member.name == report.member:
+                continue
+            member.bump(insights)
+            bumped.append(member.name)
+        if bumped:
+            self.state.logger.project(
+                "member_bump_broadcast",
+                project_id,
+                source=report.member,
+                targets=bumped,
+                difficulty=report.difficulty,
+            )
+
+    def _format_report_bump(self, report) -> str:
+        parts = [
+            f"{report.member} reports difficulty={report.difficulty}.",
+            f"Progress: {report.progress}",
+        ]
+        if report.steps:
+            parts.append("Tried:\n" + "\n".join(f"- {step}" for step in report.steps[:6]))
+        if report.directions:
+            parts.append("Suggested next directions:\n" + "\n".join(f"- {direction}" for direction in report.directions[:6]))
+        if report.knowledge:
+            parts.append("Knowledge/evidence: " + ", ".join(report.knowledge[:10]))
+        parts.append("Use this to switch angle; avoid repeating the same action signature or exploit class.")
+        return "\n\n".join(parts)
 
     # ---- member execution ----
 
@@ -228,7 +270,7 @@ class Orchestrator:
             self.lifecycle.transition(project_id, "wp_writing")
         except LifecycleError:
             pass
-        wp_path = write_wp(state.db, project_id, state.wp_dir)
+        wp_path = self.diamond.write_wp(project_id, state.wp_dir)
         state.logger.project("wp_written", project_id, path=wp_path)
 
         # MEMORY_WRITING
@@ -280,6 +322,7 @@ class Orchestrator:
         self._reap_finished_futures()
         with self.state.db.connect() as conn:
             summaries = graph_store.project_summaries(conn)
+        self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
             if summary.status != "running":
                 continue
@@ -296,8 +339,6 @@ class Orchestrator:
             return
         running = {intent_id for (pid, intent_id), fut in project_tasks.items() if pid == project_id and not fut.done()}
         open_intents = [i for i in detail.intents if i.to is None]
-        if not open_intents:
-            return
         category = detail.project.category
         active_members = self._members.get(project_id, {})
         claimable = [i for i in open_intents if i.id not in running]
@@ -306,6 +347,29 @@ class Orchestrator:
             if i.worker is not None and i.worker in active_members
         ]
         unclaimed = [i for i in claimable if i.worker is None]
+        if not claimed and not unclaimed:
+            reason_trigger = self._reason_trigger(detail)
+            if reason_trigger is None:
+                self.state.logger.project(
+                    "diamond_reason_skipped",
+                    project_id,
+                    reason="graph_checkpoint_unchanged",
+                    facts=len(detail.facts),
+                    hints=len(detail.hints),
+                    open_intents=len(open_intents),
+                )
+                return
+            reason_snapshot = detail
+            created = self.diamond.plan_next_intent(project_id, reason_snapshot, reason_trigger)
+            self._record_reason_checkpoint(project_id, reason_snapshot)
+            if created is not None:
+                self.state.logger.project(
+                    "diamond_reason_planned",
+                    project_id,
+                    trigger=reason_trigger,
+                    intent=created.id,
+                )
+            return
         ordered = (
             sorted(claimed, key=lambda i: (i.created_at, i.id))
             + sorted(unclaimed, key=lambda i: (i.created_at, i.id), reverse=True)
@@ -346,6 +410,69 @@ class Orchestrator:
             if member.name not in active:
                 return member.name
         return None
+
+    def _project_open_intent_count(self, detail) -> int:
+        return sum(1 for intent in detail.intents if intent.to is None)
+
+    def _initialize_reason_checkpoints(self, summaries) -> None:
+        running_ids = {summary.id for summary in summaries if summary.status == "running"}
+        for project_id in list(self._reason_checkpoints):
+            if project_id not in running_ids:
+                self._reason_checkpoints.pop(project_id, None)
+        for summary in summaries:
+            if summary.status != "running" or summary.id in self._reason_checkpoints:
+                continue
+            open_intent_count = summary.working_intent_count + summary.unclaimed_intent_count
+            if open_intent_count == 0:
+                continue
+            self._reason_checkpoints[summary.id] = ReasonCheckpoint(
+                fact_count=summary.fact_count,
+                hint_count=summary.hint_count,
+                open_intent_count=open_intent_count,
+            )
+            self.state.logger.project(
+                "diamond_reason_checkpoint_initialized",
+                summary.id,
+                facts=summary.fact_count,
+                hints=summary.hint_count,
+                open_intents=open_intent_count,
+            )
+
+    def _reason_trigger(self, detail) -> str | None:
+        open_intent_count = self._project_open_intent_count(detail)
+        checkpoint = self._reason_checkpoints.get(detail.project.id)
+        if checkpoint is None:
+            return "initial"
+        changes: list[str] = []
+        if len(detail.facts) > checkpoint.fact_count:
+            changes.append(f"facts:{checkpoint.fact_count}->{len(detail.facts)}")
+        if len(detail.hints) > checkpoint.hint_count:
+            changes.append(f"hints:{checkpoint.hint_count}->{len(detail.hints)}")
+        if checkpoint.open_intent_count > 0 and open_intent_count == 0:
+            changes.append(f"open_intents:{checkpoint.open_intent_count}->0")
+        if not changes:
+            return None
+        return ",".join(changes)
+
+    def _record_reason_checkpoint(self, project_id: str, detail) -> None:
+        """Record the pre-reason graph snapshot, matching Cairn's checkpoint gate.
+
+        A reason pass may create a new intent. That intent is work to dispatch, not
+        a graph-state change that should immediately trigger another reason pass.
+        """
+        checkpoint = ReasonCheckpoint(
+            fact_count=len(detail.facts),
+            hint_count=len(detail.hints),
+            open_intent_count=self._project_open_intent_count(detail),
+        )
+        self._reason_checkpoints[project_id] = checkpoint
+        self.state.logger.project(
+            "diamond_reason_checkpoint_updated",
+            project_id,
+            facts=checkpoint.fact_count,
+            hints=checkpoint.hint_count,
+            open_intents=checkpoint.open_intent_count,
+        )
 
     def _reap_finished_futures(self) -> None:
         done: list[tuple[str, str, Any]] = []

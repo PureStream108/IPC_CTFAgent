@@ -119,6 +119,24 @@ def test_scripted_member_tool_and_done(deps):
     assert any("mcp:browser.navigate" in o for o in member.observations)
 
 
+def test_scripted_member_category_tools_mcp(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    script = [
+        {"action": "tool", "server": "tools", "tool": "get_tool", "args": {"name": "sqlmap"}},
+        {"action": "done", "reason": "checked tools"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+
+    assert result.status == "done"
+    assert any("mcp:tools.get_tool" in o and "sqlmap" in o for o in member.observations)
+    context = member._build_context(pid, iid, "web", 1, False, False)
+    assert "browser" in context["public_mcps"]
+    assert "python" in context["available_languages"]
+
+
 def test_member_report_defaults_to_low_when_unspecified(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -133,6 +151,71 @@ def test_member_report_defaults_to_low_when_unspecified(deps):
     assert result.status == "done"
     assert len(reports) == 1
     assert reports[0].difficulty == "low"
+
+
+def test_member_suppresses_same_difficulty_without_new_evidence(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 3
+    script = [
+        {"action": "report", "progress": "branching but stable", "difficulty": "medium",
+         "steps": ["checked login"], "directions": ["continue auth"], "knowledge": ["web"]},
+        {"action": "report", "progress": "still branching", "difficulty": "medium",
+         "steps": ["checked login again"], "directions": ["continue auth"], "knowledge": ["web"]},
+        {"action": "done", "reason": "reported"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    member.solve(pid, iid, "web", is_initial=False)
+    assert len(reports) == 1
+    assert reports[0].difficulty == "medium"
+
+
+def test_member_reports_same_difficulty_when_evidence_accumulates(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 3
+    script = [
+        {"action": "report", "progress": "tried sqli", "difficulty": "medium",
+         "steps": ["union select failed"], "directions": ["collect a second signal"], "knowledge": ["sqli"]},
+        {"action": "report", "progress": "tried ssti too", "difficulty": "medium",
+         "steps": ["jinja probe failed"], "directions": ["collect another signal"], "knowledge": ["ssti"]},
+        {"action": "done", "reason": "reported"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    member.solve(pid, iid, "web", is_initial=False)
+    assert len(reports) == 2
+    assert reports[1].difficulty == "medium"
+    assert "evidence:distinct_exploit_classes:2" in reports[1].knowledge
+
+
+def test_no_new_fact_accumulates_for_same_intent_across_members(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    intent_tag = f"intent:{iid}"
+    with db.connect() as conn:
+        graph_store.create_report(
+            conn, pid, "pearl", "no fact", "low", "origin",
+            ["short task exhausted"], ["switch angle"], [intent_tag, "short_task_stall", "no_new_fact"],
+        )
+        graph_store.create_report(
+            conn, pid, "topaz", "still no fact", "low", "origin",
+            ["short task exhausted"], ["switch exploit class"], [intent_tag, "short_task_stall", "no_new_fact"],
+        )
+    d.max_actions_per_task = 2
+    script = [
+        {"action": "report", "progress": "third short task produced no new fact", "difficulty": "low",
+         "steps": ["short task exhausted"], "directions": ["try a different attack surface"],
+         "knowledge": ["short_task_stall", "no_new_fact"]},
+        {"action": "done", "reason": "reported"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    member.solve(pid, iid, "web", is_initial=False)
+    assert len(reports) == 1
+    assert reports[0].difficulty == "high"
+    assert "evidence:no_new_fact_short_tasks:3" in reports[0].knowledge
 
 
 def test_member_duplicate_intent_does_not_count_as_progress(deps):

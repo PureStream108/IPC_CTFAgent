@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
+from backend.core.logging_util import IPCLogger
 from backend.core.state import AppState
 
 router = APIRouter(tags=["logs"])
@@ -48,7 +47,7 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
         }
         for kind, key in LOG_GROUPS:
             item[key] = {
-                "filename": project.log_filename or f"{project.id}.json",
+                "filename": project.log_filename or f"{project.id}.jsonl",
                 "entries": state.logger.read_log(kind, project.id, limit),
             }
         logs.append(item)
@@ -67,16 +66,14 @@ def derive_project_logs(state: AppState = Depends(get_state)):
     for kind, _ in LOG_GROUPS:
         folder = target / state.logger.KINDS[kind]
         folder.mkdir(parents=True, exist_ok=True)
-        for stale in folder.glob("*.json"):
-            stale.unlink()
+        for pattern in ("*.jsonl", "*.json"):
+            for stale in folder.glob(pattern):
+                stale.unlink()
         files[state.logger.KINDS[kind]] = []
         for project in projects:
-            filename = project.log_filename or f"{project.id}.json"
+            filename = project.log_filename or f"{project.id}.jsonl"
             entries = state.logger.read_log(kind, project.id, None)
-            (folder / filename).write_text(
-                json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            IPCLogger.write_jsonl(folder / filename, entries)
             files[state.logger.KINDS[kind]].append(filename)
     return {"dir": str(target), "files": files}
 

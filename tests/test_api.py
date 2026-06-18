@@ -70,6 +70,30 @@ def test_intent_protocol_flow(client):
     assert r.json()["fact"]["description"] == "n = p*q found"
 
 
+def test_reason_claim_heartbeat_release(client):
+    pid = client.post(
+        "/projects",
+        json={"title": "R", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+
+    r = client.post(f"/projects/{pid}/reason/claim", json={"worker": "diamond", "trigger": "initial"})
+    assert r.status_code == 200
+    assert r.json()["worker"] == "diamond"
+    assert r.json()["trigger"] == "initial"
+
+    r = client.post(f"/projects/{pid}/reason/claim", json={"worker": "aventurine", "trigger": "facts:2"})
+    assert r.status_code == 409
+
+    r = client.post(f"/projects/{pid}/reason/heartbeat", json={"worker": "diamond"})
+    assert r.status_code == 200
+    assert r.json()["worker"] == "diamond"
+
+    r = client.post(f"/projects/{pid}/reason/release", json={"worker": "diamond"})
+    assert r.status_code == 200
+    assert r.json()["released"] is True
+    assert client.get(f"/projects/{pid}").json()["project"]["reason"] is None
+
+
 def test_hint_and_attachment(client):
     pid = client.post("/projects", json={"title": "A", "origin": "o", "goal": "g", "category": "misc"}).json()["project"]["id"]
     r = client.post(f"/projects/{pid}/hints", json={"content": "look at exif", "creator": "human"})
@@ -84,10 +108,10 @@ def test_delete_project_removes_project_files(client):
     r = client.post(f"/projects/{pid}/attachments", files={"file": ("chal.bin", b"data", "application/octet-stream")})
     assert r.status_code == 200
     project_dir = client.app.state.ipc.projects_dir / pid
-    project_log = client.app.state.ipc.logger.root / "project_logs" / "A.json"
+    project_log = client.app.state.ipc.logger.root / "project_logs" / "A.jsonl"
     assert project_dir.exists()
     assert project_log.exists()
-    assert isinstance(json.loads(project_log.read_text(encoding="utf-8")), list)
+    assert json.loads(project_log.read_text(encoding="utf-8").splitlines()[0])["event"] == "project_created"
 
     r = client.delete(f"/projects/{pid}")
     assert r.status_code == 204
@@ -119,7 +143,7 @@ def test_project_log_filenames_use_title_suffixes(client):
             json={"title": "Demo", "origin": "o", "goal": "g", "category": "misc"},
         ).json()
         names.append(detail["project"]["log_filename"])
-    assert names == ["Demo.json", "Demo01.json", "Demo02.json"]
+    assert names == ["Demo.jsonl", "Demo01.jsonl", "Demo02.jsonl"]
 
 
 def test_project_logs_list_and_derive(client):
@@ -133,7 +157,7 @@ def test_project_logs_list_and_derive(client):
     assert r.status_code == 200
     item = r.json()["logs"][0]
     assert item["project_id"] == pid
-    assert item["project_log"]["filename"] == "Demo.json"
+    assert item["project_log"]["filename"] == "Demo.jsonl"
     assert item["project_log"]["entries"][0]["event"] == "project_created"
     assert item["llm_log"]["entries"] == []
     assert item["tool_log"]["entries"] == []
@@ -141,11 +165,11 @@ def test_project_logs_list_and_derive(client):
 
     r = client.post("/logs/derive")
     assert r.status_code == 200
-    export = client.app.state.ipc.log_export_dir / "project_logs" / "Demo.json"
+    export = client.app.state.ipc.log_export_dir / "project_logs" / "Demo.jsonl"
     assert export.exists()
-    assert json.loads(export.read_text(encoding="utf-8"))[0]["project_id"] == pid
-    assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.json").exists()
-    assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.json").exists()
+    assert json.loads(export.read_text(encoding="utf-8").splitlines()[0])["project_id"] == pid
+    assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.jsonl").exists()
+    assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.jsonl").exists()
 
 
 def test_report_submission(client):

@@ -45,15 +45,15 @@ class IPCLogger:
         if project_id:
             name = self._project_filename(project_id)
         else:
-            name = "global.json"
+            name = "global.jsonl"
         return folder / name
 
     def _project_filename(self, project_id: str) -> str:
         if self._project_filename_resolver is not None:
             filename = self._project_filename_resolver(project_id)
             if filename:
-                return filename if filename.endswith(".json") else f"{filename}.json"
-        return f"{project_id}.json"
+                return filename if filename.endswith((".jsonl", ".json")) else f"{filename}.jsonl"
+        return f"{project_id}.jsonl"
 
     def log(self, kind: str, event: str, project_id: str | None = None, **fields) -> None:
         if not self._enabled:
@@ -61,12 +61,8 @@ class IPCLogger:
         record = {"ts": _utcnow(), "event": event, "project_id": project_id, **fields}
         with self._lock:
             path = self._file(kind, project_id)
-            entries = self._read_array(path)
-            entries.append(record)
-            path.write_text(
-                json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # convenience wrappers
     def project(self, event: str, project_id: str, **f) -> None:
@@ -108,7 +104,11 @@ class IPCLogger:
             return []
         try:
             parsed = json.loads(text)
-            return parsed if isinstance(parsed, list) else []
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict):
+                return [parsed]
+            return []
         except json.JSONDecodeError:
             return IPCLogger._read_jsonl(text)
 
@@ -126,3 +126,10 @@ class IPCLogger:
     def _tail(path: Path, limit: int | None) -> list[dict]:
         entries = IPCLogger._read_array(path)
         return entries if limit is None else entries[-limit:]
+
+    @staticmethod
+    def write_jsonl(path: Path, entries: list[dict]) -> None:
+        path.write_text(
+            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries),
+            encoding="utf-8",
+        )

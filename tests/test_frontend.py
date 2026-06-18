@@ -42,6 +42,12 @@ def test_index_served(client):
     # dagre remains the hidden graph layout engine
     assert "cytoscape-dagre.js" in body
     assert "name:'dagre'" in body
+    # origin is only the IPC entry point; derivation is rendered from agents.
+    assert 'id:"origin_ipc",source:"fact:origin",target:"ipc"' in body
+    assert 'source:"fact:"+s' not in body
+    assert 'etype:"producer"' not in body
+    assert 'etype:kind' in body
+    assert 'taxi-direction' not in body
     # category options
     for cat in ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint"):
         assert cat in body

@@ -26,13 +26,14 @@ members:
   model: gpt-5.4
   name: topaz
 runtime:
-  eval_interval_steps: 7
+  eval_interval_steps: 20
   interval: 2
   intent_timeout: 30
   reason_timeout: 30
   max_members_per_report: 3
   sandbox_backend: docker
   max_member_steps: 60
+  max_member_actions_per_task: 20
 limits:
   total_cpu: 4
   total_memory_gb: 20
