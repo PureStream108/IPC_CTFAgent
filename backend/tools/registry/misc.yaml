@@ -1,0 +1,44 @@
+category: misc
+tools:
+  - name: binwalk
+    description: Firmware/embedded file extraction and analysis.
+    path: system
+    exec: binwalk
+    tags: [forensics, extraction, misc]
+    when_to_use: Carve embedded files from blobs/firmware/images.
+  - name: steghide
+    description: Hide/extract data in JPEG/BMP/WAV.
+    path: system
+    exec: steghide
+    tags: [stego, misc]
+    when_to_use: Suspected steghide-embedded data in media.
+  - name: zsteg
+    description: PNG/BMP LSB steganography detector.
+    path: system
+    exec: zsteg
+    tags: [stego, png, misc]
+    when_to_use: PNG/BMP LSB and bit-plane steganography.
+  - name: exiftool
+    description: Read/write file metadata.
+    path: system
+    exec: exiftool
+    tags: [metadata, forensics, misc]
+    when_to_use: Inspect EXIF/metadata for hidden info.
+  - name: blindwatermark
+    description: Blind watermark embed/extract for images.
+    path: tools/BlindWaterMark
+    exec: python bwmforpy3.py
+    tags: [watermark, image, stego, misc]
+    when_to_use: Frequency-domain image watermark recovery.
+  - name: volatility3
+    description: Memory forensics framework.
+    path: system
+    exec: vol
+    tags: [memory, forensics, misc]
+    when_to_use: Analyze RAM dumps for processes, secrets, artifacts.
+  - name: ysoserial
+    description: Generate Java deserialization gadget payloads.
+    path: tools/ysoserial-master
+    exec: java -jar ysoserial.jar
+    tags: [java, deserialization, gadget, misc]
+    when_to_use: Build Java deser payloads (also useful for web/pwn).

@@ -94,8 +94,8 @@ def test_diamond_initial_assignment(state):
     assert a.is_initial is True
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
-    assert any(l.src == "ipc" and l.dst == "diamond" for l in detail.agent_links)
-    assert any(l.src == "diamond" and l.dst == "aventurine" for l in detail.agent_links)
+    assert any(link.src == "ipc" and link.dst == "diamond" for link in detail.agent_links)
+    assert any(link.src == "diamond" and link.dst == "aventurine" for link in detail.agent_links)
     assert "aventurine" in {ag.name for ag in detail.agents}
 
 
@@ -190,7 +190,7 @@ def test_full_solve_pipeline_to_completed(state):
     # completion graph links
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
-    kinds = {l.kind for l in detail.agent_links}
+    kinds = {link.kind for link in detail.agent_links}
     assert "return" in kinds  # Diamond -> IPC
     orch.shutdown()
 
@@ -220,7 +220,7 @@ def test_reinforcement_pipeline_with_scripts(state):
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
     # reinforcements were assigned (more than just aventurine got an assign link)
-    assigned = {l.dst for l in detail.agent_links if l.kind == "assign"}
+    assigned = {link.dst for link in detail.agent_links if link.kind == "assign"}
     assert len(assigned) >= 2
     assert detail.project.flag == "flag{rsa_pwned}"
     orch.shutdown()
@@ -244,6 +244,27 @@ def test_orchestrator_prefers_newest_unclaimed_intent(state):
     orch._dispatch_project(pid)
     assert launched == [(pid, "aventurine", newest.id, "web", False)]
     assert old.id != newest.id
+    orch.shutdown()
+
+
+def test_member_assignment_records_graph_entry_fact(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        fact = node_store.create_fact(conn, pid, "confirmed leaked source code")
+        intent = edge_store.create_intent(conn, pid, [fact.id], "exploit leaked source", "diamond")
+
+    orch = Orchestrator(state, max_workers=2)
+    orch._record_member_assignment(pid, "topaz", intent.id)
+
+    with state.db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    topaz = next(agent for agent in detail.agents if agent.name == "topaz")
+    assert topaz.start_fact_id == fact.id
+    assert topaz.state == "active"
+    assert any(link.src == "diamond" and link.dst == "topaz" and link.kind == "assign" for link in detail.agent_links)
+    assert any(link.src == "topaz" and link.dst == f"intent:{intent.id}" and link.kind == "explore" for link in detail.agent_links)
     orch.shutdown()
 
 

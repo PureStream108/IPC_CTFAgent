@@ -161,13 +161,29 @@ class DockerSandbox:
                 "command": ["sleep", "infinity"],
                 "detach": True,
                 "name": cname,
-                "working_dir": self.workdir,
+                "working_dir": "/",
                 "mem_limit": f"{int(self.memory_gb)}g",
                 "network_mode": "bridge" if self.network else "none",
                 "extra_hosts": {"host.docker.internal": "host-gateway"},
             }
             self._container = client.containers.run(**run_kwargs)
-            self.exec(f"mkdir -p {shlex.quote(self.workdir)}", timeout=10)
+            quoted_workdir = shlex.quote(self.workdir)
+            setup = (
+                f"mkdir -p {quoted_workdir} "
+                f"&& if [ -d /opt/ipc-tools/tools ] && [ ! -e {quoted_workdir}/tools ]; then "
+                f"ln -s /opt/ipc-tools/tools {quoted_workdir}/tools; fi"
+            )
+            setup_res = self._container.exec_run(["bash", "-lc", setup], workdir="/")
+            if setup_res.exit_code not in (0, None):
+                output = setup_res.output
+                if isinstance(output, tuple):
+                    out, err = output
+                    detail = b"\n".join(part for part in (out, err) if part).decode(errors="replace")
+                elif isinstance(output, bytes):
+                    detail = output.decode(errors="replace")
+                else:
+                    detail = str(output)
+                raise RuntimeError(f"failed to initialize sandbox workspace {self.workdir}: {detail.strip()}")
         except Exception:
             if self._container is not None:
                 try:

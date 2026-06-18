@@ -1,0 +1,38 @@
+category: crypto
+tools:
+  - name: rsactftool
+    description: Automated attacks against weak RSA keys/ciphertexts.
+    path: /opt/RsaCtfTool
+    exec: python RsaCtfTool.py
+    tags: [rsa, factoring, crypto]
+    when_to_use: RSA with suspicious modulus; try --attack all with n,e[,c].
+  - name: rsa-sign2n
+    description: Recover RSA public key (n) from two or more signatures/messages.
+    path: tools/RSASIGN/rsa_sign2n-release
+    exec: python sig2n.py
+    tags: [rsa, signature, recover-n, crypto]
+    when_to_use: Only signatures and messages known, need the modulus n.
+  - name: sage
+    description: SageMath CAS — factoring (ECM), discrete log, LLL lattice reduction.
+    path: system
+    exec: sage
+    tags: [lattice, lll, ecm, discrete-log, crypto]
+    when_to_use: Lattice attacks, factoring mid-size n, modular arithmetic.
+  - name: cado-nfs
+    description: Number Field Sieve for large integer factoring / DLP.
+    path: system
+    exec: cado-nfs
+    tags: [factoring, nfs, dlp, crypto]
+    when_to_use: Large semiprime where ECM is too slow.
+  - name: openssl
+    description: Crypto swiss-army knife (enc/rsa/x509/s_client).
+    path: system
+    exec: openssl
+    tags: [openssl, tls, encoding, crypto]
+    when_to_use: Encode/decode, inspect certs/keys, TLS handshakes.
+  - name: python-crypto
+    description: pycryptodome / sympy / gmpy2 / z3 / fpylll available in sandbox.
+    path: system
+    exec: python
+    tags: [pycryptodome, sympy, gmpy2, z3, fpylll, crypto]
+    when_to_use: Custom crypto scripting, padding oracles, CRT, modular math.

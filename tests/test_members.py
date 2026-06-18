@@ -55,6 +55,8 @@ def test_member_action_parsing():
     act = MemberAction.from_obj({"action": "bash", "command": "ls", "thought": "list"})
     assert act.kind == "bash"
     assert act.args["command"] == "ls"
+    alias = MemberAction.from_obj({"action": "bash", "cmd": "whoami"})
+    assert alias.args["command"] == "whoami"
     with pytest.raises(ValueError):
         MemberAction.from_obj({"action": "nonsense"})
 
@@ -92,8 +94,6 @@ def test_followup_member_concludes(deps):
 def test_member_reports_difficulty_on_eval_step(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
-    # script: bash 6 times, then nothing -> step 7 triggers evaluate_now -> mock reports
-    script = [{"action": "bash", "command": f"echo {i}"} for i in range(6)]
     cfg = MemberConfig(name="aventurine", api_format="mock")
     # use default (non-script) behaviour but force eval interval small
     d.eval_interval = 3
@@ -119,6 +119,23 @@ def test_scripted_member_tool_and_done(deps):
     assert any("mcp:browser.navigate" in o for o in member.observations)
 
 
+def test_member_stalls_after_repeated_invalid_bash(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 5
+    script = [
+        {"action": "bash", "thought": "forgot command"},
+        {"action": "bash", "thought": "forgot command again"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    result = member.solve(pid, iid, "web", is_initial=False)
+    assert result.status == "stalled"
+    assert result.steps == 2
+    assert len(reports) == 1
+    assert "invalid_action_contract" in reports[0].knowledge
+
+
 def test_scripted_member_category_tools_mcp(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -132,9 +149,17 @@ def test_scripted_member_category_tools_mcp(deps):
 
     assert result.status == "done"
     assert any("mcp:tools.get_tool" in o and "sqlmap" in o for o in member.observations)
+    with db.connect() as conn:
+        graph_store.create_hint(conn, pid, "check /flag before deeper recon", "human")
     context = member._build_context(pid, iid, "web", 1, False, False)
     assert "browser" in context["public_mcps"]
     assert "python" in context["available_languages"]
+    assert context["hints"][0]["content"] == "check /flag before deeper recon"
+    assert "member_tool_inventory" in context
+    assert "TyphonBreaker" in context["member_tool_inventory"]
+    assert "TyphonBreaker" in (d.sandbox.read_file("tools.txt") or "")
+    assert context["member_tool_inventory_source"]["workspace_path"] == "tools.txt"
+    assert context["member_tool_inventory_source"]["docker_path"] == "/tools.txt"
 
 
 def test_member_report_defaults_to_low_when_unspecified(deps):
@@ -236,6 +261,37 @@ def test_member_duplicate_intent_does_not_count_as_progress(deps):
     assert [i.id for i in detail.intents] == [iid]
 
 
+def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    with db.connect() as conn:
+        node_store.create_fact(
+            conn,
+            pid,
+            "Flask source code leak shows app.py and POST /check exec(data) on port 9000.",
+        )
+        edge_store.create_intent(conn, pid, ["origin"], "try session cookie forgery on the web app", "diamond")
+        edge_store.create_intent(conn, pid, ["origin"], "attempt file read of the local flag path", "diamond")
+        edge_store.create_intent(conn, pid, ["origin"], "probe extra api routes on port 9000", "diamond")
+    d.max_actions_per_task = 2
+    script = [
+        {
+            "action": "report",
+            "progress": "source disclosure confirms a small Flask pyjail with restricted builtins",
+            "difficulty": "low",
+            "steps": ["read leaked app.py source", "identified the /check sink"],
+            "directions": ["try cookie ideas later", "try file read later"],
+            "knowledge": ["web"],
+        },
+        {"action": "done", "reason": "reported"},
+    ]
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=script)
+    member.solve(pid, iid, "web", is_initial=False)
+    assert len(reports) == 1
+    assert reports[0].difficulty in ("low", "medium")
+
+
 def test_member_creates_at_most_one_new_intent_per_task(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -272,4 +328,4 @@ def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
         detail = graph_store.project_detail(conn, pid)
     created = next(i for i in detail.intents if i.creator == "jade")
     assert created.from_ == [fact.id]
-    assert any(l.src == "jade" and l.dst == f"intent:{created.id}" for l in detail.agent_links)
+    assert any(link.src == "jade" and link.dst == f"intent:{created.id}" for link in detail.agent_links)

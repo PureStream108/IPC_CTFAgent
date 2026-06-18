@@ -15,9 +15,7 @@ from backend.blackboard.models import (
     AgentLink,
     Attachment,
     Broadcast,
-    Fact,
     Hint,
-    Intent,
     ProjectDetail,
     ProjectMeta,
     ProjectReason,
@@ -33,13 +31,6 @@ from backend.filename_util import numbered_filename
 def get_timeouts(conn: sqlite3.Connection) -> tuple[int, int]:
     row = conn.execute("SELECT intent_timeout, reason_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["intent_timeout"], row["reason_timeout"]
-
-
-def set_timeouts(conn: sqlite3.Connection, intent_timeout: int, reason_timeout: int) -> None:
-    conn.execute(
-        "UPDATE settings SET intent_timeout = ?, reason_timeout = ? WHERE rowid = 1",
-        (intent_timeout, reason_timeout),
-    )
 
 
 # ---------- reason lease ----------

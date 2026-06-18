@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
 from backend.sandbox.resource_limiter import ResourceLimiter
 from backend.sandbox.sandbox import LocalSandbox, Sandbox
+
+_SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _safe_segment(value: str) -> str:
+    text = _SAFE_SEGMENT.sub("_", value).strip("._")
+    return text or "workspace"
 
 
 class ContainerPool:
@@ -58,6 +66,7 @@ class ContainerPool:
                 memory_gb=self.limiter.per_agent_memory_gb,
                 network=self.network,
                 limiter=self.limiter,
+                workdir=f"/workspace/{_safe_segment(project_id)}/{_safe_segment(member)}",
             )
         ws = self.workspace_root / project_id / "sandbox" / member
         return LocalSandbox(name=name, workspace=ws, env=env)

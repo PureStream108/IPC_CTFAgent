@@ -1,0 +1,32 @@
+category: reverse
+tools:
+  - name: ghidra
+    description: NSA reverse-engineering suite (wrapped as Ghidra MCP, shared).
+    path: shared
+    exec: mcp:ghidra
+    tags: [decompile, disassemble, reverse]
+    when_to_use: Decompile binaries, analyze functions, rename/annotate.
+  - name: radare2
+    description: Reverse engineering framework (r2).
+    path: system
+    exec: r2
+    tags: [disassemble, reverse, patch]
+    when_to_use: Quick disassembly, patching, scripting analysis.
+  - name: objdump
+    description: Disassembler from binutils.
+    path: system
+    exec: objdump
+    tags: [disassemble, elf, reverse]
+    when_to_use: Static disassembly, section/symbol dumps.
+  - name: angr
+    description: Binary analysis / symbolic execution framework.
+    path: system
+    exec: python
+    tags: [symbolic-execution, angr, reverse]
+    when_to_use: Solve for inputs (license checks, branch constraints).
+  - name: strings
+    description: Extract printable strings.
+    path: system
+    exec: strings
+    tags: [recon, reverse]
+    when_to_use: Quick look for flags, hints, hardcoded data.

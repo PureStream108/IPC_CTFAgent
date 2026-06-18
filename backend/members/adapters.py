@@ -32,6 +32,17 @@ class MemberAction:
         if kind not in ACTION_KINDS:
             raise ValueError(f"invalid action kind: {kind!r}")
         args = {k: v for k, v in obj.items() if k not in ("action", "kind", "thought")}
+        if kind == "bash":
+            for alias in ("cmd", "shell", "script"):
+                if "command" not in args and alias in args:
+                    args["command"] = args.pop(alias)
+            if isinstance(args.get("command"), list):
+                args["command"] = " && ".join(str(part) for part in args["command"])
+        if kind == "tool":
+            if "tool" not in args and "name" in args:
+                args["tool"] = args.pop("name")
+            if "args" not in args:
+                args["args"] = {}
         return cls(kind=kind, args=args, thought=obj.get("thought", ""))
 
 
@@ -70,11 +81,20 @@ _SYSTEM_PROMPT = (
     "You are an expert CTF solver agent. Respond with EXACTLY ONE JSON object describing "
     "your next action and nothing else. Schema: "
     '{"thought": "...", "action": "tool|bash|memory|tool_search|report|intent|conclude|flag|done", ...}. '
+    "For bash actions, include a non-empty `command` string exactly; do not use `cmd`, `shell`, "
+    "or prose-only bash actions. For tool actions, include non-empty `server` and `tool` strings plus "
+    "an `args` object when arguments are needed. "
     "You are working inside a short exploration task: each run has only a few actions, "
     "so produce a clear result quickly. End with conclude for a confirmed fact, flag for a real flag, "
     "intent for a concrete next direction, or report when blocked; do not silently spin. "
+    "At the start of each CTF round, check likely flag sources in this order: first try reading /flag, "
+    "then inspect environment variables for flag-like values, then continue with challenge-specific methods. "
+    "Never claim a fake flag; use the flag action only for a confirmed real flag. "
     "Always inspect attachments and other provided materials first if they exist, because they may contain "
     "the real foothold or clue. If the current path is not moving, switch angle instead of repeating the same recon. "
+    "Read the member_tool_inventory in your context before choosing tools; it summarizes installed CLI tools, "
+    "Python libraries, MCP helpers, and when to use them. Check exposed tools or use tool_search for pyjail/sandbox "
+    "helpers before spending many steps on manual subclass enumeration. "
     "When declaring a new intent, anchor its from field to the most relevant latest confirmed fact id rather than "
     "resetting to origin unless you are intentionally restarting from the root. "
     "Do not mention CVEs unless the current evidence really points to a component/version issue. "
@@ -193,8 +213,6 @@ class PiAdapter(OpenAICompatibleAdapter):
 
 
 def _extract_json(text: str) -> dict:
-    import re
-
     text = text.strip()
     try:
         obj = json.loads(text)

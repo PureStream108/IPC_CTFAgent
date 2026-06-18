@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from backend.blackboard import edge_store, graph_store
+from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.diamond import Diamond
 from backend.core.ipc import verify_flag_and_wp
 from backend.core.lifecycle import Lifecycle, LifecycleError
@@ -136,7 +136,15 @@ class Orchestrator:
         if self.lifecycle.status(project_id) != "running":
             return
         self._broadcast_bump(project_id, report)
-        assignments = self.diamond.decide_reinforcements(project_id, report)
+        available_slots = max(
+            0,
+            self.state.config.runtime.max_members_per_report - self._project_running_future_count(project_id),
+        )
+        assignments = self.diamond.decide_reinforcements(
+            project_id,
+            report,
+            available_slots=available_slots,
+        )
         category = self._category(project_id)
         for a in assignments:
             self._launch_member(project_id, a.member, a.intent_id, category, a.is_initial)
@@ -174,6 +182,36 @@ class Orchestrator:
         parts.append("Use this to switch angle; avoid repeating the same action signature or exploit class.")
         return "\n\n".join(parts)
 
+    def _broadcast_fact(self, project_id: str, fact_id: str, source_member: str | None) -> None:
+        with self.state.db.connect() as conn:
+            facts = {fact.id: fact.description for fact in node_store.list_facts(conn, project_id)}
+        description = facts.get(fact_id)
+        if not description:
+            return
+        insight = (
+            f"Confirmed fact {fact_id}"
+            + (f" from {source_member}" if source_member else "")
+            + f": {description}\n\n"
+            "Treat this as shared graph state. Anchor follow-up work to this fact when relevant, "
+            "and avoid re-running steps already covered by it."
+        )
+        with self._lock:
+            members = list(self._members.get(project_id, {}).values())
+        bumped: list[str] = []
+        for member in members:
+            if source_member and member.name == source_member:
+                continue
+            member.bump(insight)
+            bumped.append(member.name)
+        if bumped:
+            self.state.logger.project(
+                "member_fact_broadcast",
+                project_id,
+                source=source_member,
+                fact=fact_id,
+                targets=bumped,
+            )
+
     # ---- member execution ----
 
     def _member_config(self, name: str):
@@ -196,6 +234,7 @@ class Orchestrator:
             )
             return
         sandbox = self.resources.sandbox_for(project_id, member_name)
+        self._record_member_assignment(project_id, member_name, intent_id)
         deps = MemberDeps(
             db=self.state.db,
             logger=self.state.logger,
@@ -218,6 +257,35 @@ class Orchestrator:
             self._futures.setdefault(project_id, []).append(future)
             self._task_index[(project_id, intent_id)] = future
 
+    def _record_member_assignment(self, project_id: str, member_name: str, intent_id: str) -> None:
+        with self.state.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
+                (intent_id, project_id),
+            ).fetchall()
+            start_fact_id = "origin"
+            for row in rows:
+                if node_store.fact_exists(conn, project_id, row["fact_id"]):
+                    start_fact_id = row["fact_id"]
+                    break
+            graph_store.add_agent(
+                conn,
+                project_id,
+                member_name,
+                "member",
+                state="active",
+                start_fact_id=start_fact_id,
+            )
+            conn.execute(
+                "UPDATE agents SET state = 'active', start_fact_id = ? "
+                "WHERE project_id = ? AND name = ?",
+                (start_fact_id, project_id, member_name),
+            )
+            if not graph_store.link_exists(conn, project_id, "diamond", member_name, "assign"):
+                graph_store.add_link(conn, project_id, "diamond", member_name, "assign")
+            if not graph_store.link_exists(conn, project_id, member_name, f"intent:{intent_id}", "explore"):
+                graph_store.add_link(conn, project_id, member_name, f"intent:{intent_id}", "explore")
+
     def _run_member(self, project_id, member, intent_id, category, is_initial):
         try:
             return member.solve(project_id, intent_id, category, is_initial=is_initial)
@@ -226,6 +294,10 @@ class Orchestrator:
         finally:
             with self._lock:
                 self._members.get(project_id, {}).pop(member.name, None)
+            with self.state.db.connect() as conn:
+                row = graph_store.get_project_row(conn, project_id)
+                if row is not None and row["status"] == "running":
+                    graph_store.set_agent_state(conn, project_id, member.name, "idle")
 
     # ---- stop ----
 
@@ -411,6 +483,14 @@ class Orchestrator:
                 return member.name
         return None
 
+    def _project_running_future_count(self, project_id: str) -> int:
+        with self._lock:
+            return sum(
+                1
+                for (pid, _), future in self._task_index.items()
+                if pid == project_id and not future.done()
+            )
+
     def _project_open_intent_count(self, detail) -> int:
         return sum(1 for intent in detail.intents if intent.to is None)
 
@@ -498,11 +578,18 @@ class Orchestrator:
                 self.state.logger.project("member_task_done", project_id, intent=intent_id, steps=result.steps)
             elif result.status == "concluded":
                 self.state.logger.project("member_task_concluded", project_id, intent=intent_id, fact=result.fact_id)
+                if result.fact_id is not None:
+                    self._broadcast_fact(project_id, result.fact_id, self._intent_worker(project_id, intent_id))
             elif result.status == "flag":
                 self.state.logger.project("member_task_flag", project_id, intent=intent_id, flag=result.flag)
             with self._lock:
                 if self._task_index.get((project_id, intent_id)) is future:
                     self._task_index.pop((project_id, intent_id), None)
+
+    def _intent_worker(self, project_id: str, intent_id: str) -> str | None:
+        with self.state.db.connect() as conn:
+            row = edge_store.get_intent(conn, project_id, intent_id)
+            return row["worker"] if row is not None else None
 
     # ---- test helper ----
 

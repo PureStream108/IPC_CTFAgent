@@ -33,10 +33,3 @@ def fact_exists(conn: sqlite3.Connection, project_id: str, fact_id: str) -> bool
         "SELECT 1 FROM facts WHERE id = ? AND project_id = ?", (fact_id, project_id)
     ).fetchone()
     return row is not None
-
-
-def fact_ids(conn: sqlite3.Connection, project_id: str) -> list[str]:
-    rows = conn.execute(
-        "SELECT id FROM facts WHERE project_id = ? ORDER BY rowid", (project_id,)
-    ).fetchall()
-    return [r["id"] for r in rows]

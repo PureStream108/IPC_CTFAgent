@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -13,6 +12,23 @@ from typing import Any
 import requests
 
 from backend.mcp.base import MCPServer
+
+_BUNDLED_CHROME_PATHS = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+)
+_BUNDLED_GHIDRA_HEADLESS_PATHS = (
+    "/opt/ghidra/support/analyzeHeadless",
+)
+_BUNDLED_NM_PATHS = (
+    "/usr/bin/nm",
+    "/bin/nm",
+)
+_BUNDLED_OBJDUMP_PATHS = (
+    "/usr/bin/objdump",
+    "/bin/objdump",
+)
 
 
 class _TitleAndTextParser(HTMLParser):
@@ -55,6 +71,23 @@ def _html_summary(body: str, max_chars: int = 6000) -> tuple[str, str]:
 
 def _tool_unavailable(tool: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"available": False, "tool": tool, "error": detail, **extra}
+
+
+def _first_existing_path(paths: tuple[str, ...]) -> str | None:
+    for path in paths:
+        if path and Path(path).exists():
+            return path
+    return None
+
+
+def _configured_or_bundled(env_name: str, bundled_paths: tuple[str, ...]) -> str | None:
+    configured = os.environ.get(env_name, "").strip()
+    candidates = (configured, *bundled_paths) if configured else bundled_paths
+    return _first_existing_path(candidates)
+
+
+def _chrome_bin() -> str | None:
+    return _configured_or_bundled("IPC_CHROME_BIN", _BUNDLED_CHROME_PATHS)
 
 
 def build_browser_mcp() -> MCPServer:
@@ -110,18 +143,11 @@ def build_browser_mcp() -> MCPServer:
     )
     def screenshot(url: str, path: str | None = None, timeout_ms: int = 15000):
         out = Path(path) if path else Path(tempfile.gettempdir()) / f"ipc_browser_{int(time.time()*1000)}.png"
-        chrome = (
-            shutil.which(os.environ.get("IPC_CHROME_BIN", ""))
-            or shutil.which("google-chrome")
-            or shutil.which("chromium")
-            or shutil.which("chromium-browser")
-            or shutil.which("msedge")
-            or shutil.which("chrome")
-        )
+        chrome = _chrome_bin()
         if not chrome:
             return _tool_unavailable(
                 "browser.screenshot",
-                "Chrome/Chromium CLI not found; install Playwright/Chromium or set IPC_CHROME_BIN.",
+                "Docker-bundled Chromium not found; rebuild ipc-app or set IPC_CHROME_BIN to an in-container path.",
                 url=url,
                 path=str(out),
             )
@@ -151,10 +177,9 @@ def build_browser_mcp() -> MCPServer:
 
 
 def _ghidra_headless() -> str | None:
-    configured = os.environ.get("GHIDRA_ANALYZE_HEADLESS") or os.environ.get("IPC_GHIDRA_HEADLESS")
-    if configured and Path(configured).exists():
-        return configured
-    return shutil.which("analyzeHeadless") or shutil.which("analyzeHeadless.bat")
+    configured = os.environ.get("IPC_GHIDRA_HEADLESS") or os.environ.get("GHIDRA_ANALYZE_HEADLESS")
+    candidates = (configured, *_BUNDLED_GHIDRA_HEADLESS_PATHS) if configured else _BUNDLED_GHIDRA_HEADLESS_PATHS
+    return _first_existing_path(candidates)
 
 
 def _run_command(cmd: list[str], timeout: int = 60) -> tuple[bool, str]:
@@ -190,7 +215,7 @@ def build_ghidra_mcp() -> MCPServer:
         if not headless:
             return _tool_unavailable(
                 "ghidra.decompile",
-                "Ghidra analyzeHeadless not found; set GHIDRA_ANALYZE_HEADLESS or IPC_GHIDRA_HEADLESS.",
+                "Docker-bundled Ghidra analyzeHeadless not found; rebuild ipc-app or set IPC_GHIDRA_HEADLESS to an in-container path.",
                 binary=binary,
                 function=function,
             )
@@ -215,10 +240,12 @@ def build_ghidra_mcp() -> MCPServer:
         if not binary_path.exists():
             return _tool_unavailable("ghidra.list_functions", f"binary not found: {binary}", binary=binary)
         cmd = None
-        if shutil.which("nm"):
-            cmd = ["nm", "-C", str(binary_path)]
-        elif shutil.which("objdump"):
-            cmd = ["objdump", "-t", str(binary_path)]
+        nm = _configured_or_bundled("IPC_NM_BIN", _BUNDLED_NM_PATHS)
+        objdump = _configured_or_bundled("IPC_OBJDUMP_BIN", _BUNDLED_OBJDUMP_PATHS)
+        if nm:
+            cmd = [nm, "-C", str(binary_path)]
+        elif objdump:
+            cmd = [objdump, "-t", str(binary_path)]
         if not cmd:
             return _tool_unavailable("ghidra.list_functions", "Neither nm nor objdump is available.", binary=binary)
         ok, output = _run_command(cmd, timeout=30)
@@ -233,7 +260,7 @@ def build_ghidra_mcp() -> MCPServer:
 
 
 def _zap_base() -> str:
-    return os.environ.get("ZAP_API_URL", "http://127.0.0.1:8080").rstrip("/")
+    return os.environ.get("ZAP_API_URL", "http://ipc-zap:8080").rstrip("/")
 
 
 def _zap_get(path: str, **params: Any) -> dict[str, Any]:

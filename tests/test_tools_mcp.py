@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from backend.mcp.antsword import build_antsword_mcp
+from backend.mcp import shared as shared_mcp
 from backend.mcp.shared import build_browser_mcp, build_ghidra_mcp, build_zap_mcp
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
@@ -24,6 +25,7 @@ def test_exposed_for_category(registry):
     web = registry.exposed_for("web")
     names = {t.name for t in web}
     assert "sqlmap" in names
+    assert "typhonbreaker" in names
     assert "ghidra" not in names  # reverse-only
 
 
@@ -31,6 +33,12 @@ def test_tool_search_finds_cross_category(registry):
     results = registry.search("rsa lattice factoring")
     names = {t.name for t in results}
     assert "rsactftool" in names or "sage" in names
+
+
+def test_tool_search_finds_pyjail_helper(registry):
+    results = registry.search("python pyjail sandbox blacklist builtins")
+    names = {t.name for t in results}
+    assert "typhonbreaker" in names
 
 
 def test_tool_search_cache(registry):
@@ -119,3 +127,34 @@ def test_shared_mcps(monkeypatch, tmp_path):
     scan = z.call("active_scan", url="http://x")
     assert scan["available"] is True
     assert scan["alerts"] == [{"risk": "Low"}]
+
+
+def test_shared_mcps_use_configured_or_bundled_docker_paths(monkeypatch, tmp_path):
+    chrome = tmp_path / "chromium"
+    ghidra = tmp_path / "analyzeHeadless"
+    nm = tmp_path / "nm"
+    for path in (chrome, ghidra, nm):
+        path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("IPC_CHROME_BIN", str(chrome))
+    monkeypatch.setenv("IPC_GHIDRA_HEADLESS", str(ghidra))
+    monkeypatch.setenv("IPC_NM_BIN", str(nm))
+
+    assert shared_mcp._chrome_bin() == str(chrome)
+    assert shared_mcp._ghidra_headless() == str(ghidra)
+    assert shared_mcp._configured_or_bundled("IPC_NM_BIN", ()) == str(nm)
+
+
+def test_shared_mcps_do_not_search_host_path(monkeypatch, tmp_path):
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    (host_bin / "chromium").write_text("", encoding="utf-8")
+    (host_bin / "analyzeHeadless").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(host_bin))
+    monkeypatch.delenv("IPC_CHROME_BIN", raising=False)
+    monkeypatch.delenv("IPC_GHIDRA_HEADLESS", raising=False)
+    monkeypatch.setattr(shared_mcp, "_BUNDLED_CHROME_PATHS", ())
+    monkeypatch.setattr(shared_mcp, "_BUNDLED_GHIDRA_HEADLESS_PATHS", ())
+
+    assert shared_mcp._chrome_bin() is None
+    assert shared_mcp._ghidra_headless() is None

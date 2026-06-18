@@ -115,6 +115,44 @@ def test_container_pool_isolated_workspaces(tmp_path):
     assert pool.get("proj_001", "aventurine") is sb1
 
 
+def test_container_pool_docker_isolates_member_containers_and_workdirs(monkeypatch):
+    created = []
+
+    class FakeDockerSandbox:
+        def __init__(self, name, image, env, memory_gb, network, limiter, workdir):
+            self.name = name
+            self.image = image
+            self.env = env
+            self.memory_gb = memory_gb
+            self.network = network
+            self.limiter = limiter
+            self.workdir = workdir
+            self.started = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.started = False
+
+    monkeypatch.setattr(docker_manager, "DockerSandbox", FakeDockerSandbox)
+
+    pool = ContainerPool(backend="docker", image="ipc-member:latest", limiter=ResourceLimiter())
+    sb1 = pool.get("proj_001", "aventurine")
+    sb2 = pool.get("proj_001", "pearl")
+
+    assert sb1 is not sb2
+    assert sb1.name == "proj_001-aventurine"
+    assert sb2.name == "proj_001-pearl"
+    assert sb1.workdir == "/workspace/proj_001/aventurine"
+    assert sb2.workdir == "/workspace/proj_001/pearl"
+    assert sb1.started is True
+    assert sb2.started is True
+    assert pool.get("proj_001", "aventurine") is sb1
+    assert created == [sb1, sb2]
+
+
 def test_container_pool_stop_project(tmp_path):
     pool = ContainerPool(backend="local", workspace_root=tmp_path)
     pool.get("proj_001", "aventurine")

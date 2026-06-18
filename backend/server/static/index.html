@@ -59,7 +59,7 @@
       </div>
       <div class="min-w-0">
         <div class="font-semibold text-slate-700 tracking-tight leading-tight">IPC</div>
-        <div class="text-[11px] text-slate-400 leading-tight truncate">Equal CTF Solver Agents</div>
+        <div class="text-[11px] text-slate-400 leading-tight truncate">CTF_Agent</div>
       </div>
     </div>
     <div class="flex-1"></div>
@@ -350,6 +350,20 @@
         </div>
 
         <div x-show="sideTab==='hints'" class="flex-1 overflow-y-auto p-4 space-y-3 bg-amber-50/25">
+          <form class="rounded-2xl border border-amber-200/80 bg-white shadow-sm overflow-hidden" @submit.prevent="addHint()">
+            <div class="px-4 py-3 border-b border-amber-100 bg-amber-50/80">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-amber-700">Add Hint</span>
+                <input class="w-24 rounded-lg border border-amber-200 bg-white/80 px-2 py-1 text-[11px] text-amber-800 focus:outline-none focus:ring-2 focus:ring-amber-100" x-model="newHint.creator" placeholder="creator" />
+              </div>
+            </div>
+            <div class="p-3 space-y-2">
+              <textarea class="w-full min-h-20 rounded-xl border border-amber-200 bg-amber-50/40 px-3 py-2 text-sm text-slate-700 placeholder:text-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-100 resize-y" x-model="newHint.content" placeholder="hint"></textarea>
+              <div class="flex justify-end">
+                <button type="submit" class="btn px-3 py-1.5 rounded-lg text-xs disabled:opacity-40" :disabled="!newHint.content.trim()">Add</button>
+              </div>
+            </div>
+          </form>
           <template x-if="current && current.hints.length===0">
             <div class="rounded-2xl border border-dashed border-amber-200 bg-white/80 px-5 py-10 text-center shadow-sm text-sm text-slate-300">No hints yet</div>
           </template>
@@ -629,6 +643,7 @@
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
       showGlobalLogs: false, showGlobalWP: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
+      newHint: { content:"", creator:"human" },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, health: {}, memories: [], wpText: "", toast: "",
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
@@ -704,6 +719,19 @@
         this.showNewProject=false; this.np={title:"",category:"web",origin:"",goal:"",hints:[{content:""}]};
         await this.loadProjects(); this.openProject(d.project.id);
       },
+      async addHint(){
+        if(!this.selectedId) return;
+        const content=this.newHint.content.trim();
+        if(!content) return;
+        const creator=(this.newHint.creator||"human").trim()||"human";
+        await this.api("POST","/projects/"+this.selectedId+"/hints",{content,creator});
+        this.newHint={content:"",creator};
+        await this.loadProject(this.selectedId);
+        await this.loadProjects();
+        this.sideTab="hints";
+        this.renderGraph(false);
+        this.flash("hint added");
+      },
       async startSolve(){ await this.api("POST","/projects/"+this.selectedId+"/start"); this.flash("solving started"); await this.loadProject(this.selectedId); this.renderGraph(); },
       async resumeSolve(){ await this.api("POST","/projects/"+this.selectedId+"/resume"); this.flash("resumed"); await this.loadProject(this.selectedId); this.renderGraph(); },
       async reopenProject(){ await this.api("POST","/projects/"+this.selectedId+"/reopen"); this.flash("reopened"); await this.loadProject(this.selectedId); this.renderGraph(); },
@@ -757,7 +785,9 @@
           const size=this.nodeSize(data.label,data.ntype);
           nodes.push({data:{id,...data,width:size.width,height:size.height}});
         };
-        for(const a of d.agents){ add(a.name,{label:a.name.toUpperCase(),ntype:a.role,kind:"agent",agent:a.name,state:a.state}); }
+        for(const a of d.agents){
+          add(a.name,{label:a.name.toUpperCase(),ntype:a.role,kind:"agent",agent:a.name,state:a.state});
+        }
         for(const f of d.facts){
           const t=f.id==="origin"?"origin":(f.id==="goal"?"goal":"fact");
           const prefix=f.id==="origin"?"ORIGIN":f.id==="goal"?"GOAL":f.id;
@@ -766,15 +796,19 @@
         if(have.has("fact:origin")&&have.has("ipc")){
           edges.push({data:{id:"origin_ipc",source:"fact:origin",target:"ipc",etype:"orch",label:"start"}});
         }
-        const intentOwner=(intent)=>{
-          if(intent.worker && have.has(intent.worker)) return intent.worker;
-          if(intent.creator && have.has(intent.creator)) return intent.creator;
-          const link=d.agent_links.find(x=>x.kind==="explore" && x.dst===`intent:${intent.id}` && have.has(x.src));
-          return link ? link.src : null;
-        };
+        for(const a of d.agents){
+          const contextSource=this.memberContextSource(a.name);
+          const contextEdge=this.memberContextEdgeId(a.name);
+          if(a.role==="member"&&contextSource&&contextEdge&&have.has(contextSource)&&have.has(a.name)){
+            edges.push({data:{id:contextEdge,source:contextSource,target:a.name,etype:"context",label:"context"}});
+          }
+        }
         const addDerivation=(intent, target, kind)=>{
-          const owner=intentOwner(intent);
-          if(owner){ edges.push({data:{id:"P"+intent.id,source:owner,target,etype:kind,intentId:intent.id,label:kind}}); }
+          for(const source of this.intentDisplaySources(intent)){
+            if(have.has(source)){
+              edges.push({data:{id:this.derivationEdgeId(intent,source),source,target,etype:kind,intentId:intent.id,label:intent.description||kind}});
+            }
+          }
         };
         for(const i of d.intents){
           if(i.to){
@@ -789,11 +823,42 @@
           if(ref==="flag"){add("flag",{label:"FLAG",ntype:"flag",kind:"special",specialId:"flag"});return "flag";}
           if(ref==="wp"){add("wp",{label:"WP",ntype:"wp",kind:"special",specialId:"wp"});return "wp";}
           return ref; };
-        for(const l of d.agent_links){ const s=resolve(l.src),t=resolve(l.dst); if(!have.has(s)||!have.has(t)) continue;
+        for(const l of d.agent_links){ if(!["start","assign","report","flag","wp","return"].includes(l.kind)) continue; const s=resolve(l.src),t=resolve(l.dst); if(!have.has(s)||!have.has(t)) continue;
           edges.push({data:{id:"L"+l.id,source:s,target:t,etype:"orch",label:l.kind}}); }
         return {nodes,edges};
       },
       truncate(text,n){ text=(text||"").trim(); return text.length>n ? text.slice(0,n-1)+"..." : text; },
+      agentRecord(name){ return this.current ? this.current.agents.find(a=>a.name===name) || null : null; },
+      agentRole(name){ return this.agentRecord(name)?.role || ""; },
+      derivationEdgeId(intent,source){ return `P${intent.id}_${source.replace(/[^A-Za-z0-9_-]/g,"_")}`; },
+      memberContextSource(name){
+        const agent=this.agentRecord(name);
+        if(!agent||agent.role!=="member"||!agent.start_fact_id||agent.start_fact_id==="origin") return null;
+        return "fact:"+agent.start_fact_id;
+      },
+      memberContextEdgeId(name){
+        const source=this.memberContextSource(name);
+        return source ? `C${name}_${source.replace(/[^A-Za-z0-9_-]/g,"_")}` : null;
+      },
+      memberForIntent(intent){
+        if(!this.current||!intent) return null;
+        const linked=this.current.agent_links.find(l=>l.kind==="explore" && l.dst===`intent:${intent.id}` && this.agentRole(l.src)==="member");
+        if(linked) return linked.src;
+        if(intent.worker && this.agentRole(intent.worker)==="member") return intent.worker;
+        return null;
+      },
+      intentDisplaySources(intent){
+        const owner=this.memberForIntent(intent);
+        const from=Array.isArray(intent?.from) ? intent.from : [];
+        if(owner){
+          const starts=new Set(["origin"]);
+          const agent=this.agentRecord(owner);
+          if(agent?.start_fact_id) starts.add(agent.start_fact_id);
+          if(from.length===0 || from.some(fid=>starts.has(fid))) return [owner];
+        }
+        const facts=from.map(fid=>"fact:"+fid);
+        return facts.length ? facts : (owner ? [owner] : []);
+      },
       graphStyles(){ const common={'text-valign':'center','text-halign':'center','font-family':'-apple-system,BlinkMacSystemFont,Inter,sans-serif'};
         return [
           {selector:'node',style:{...common,'label':'data(label)','color':'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere','width':'data(width)','height':'data(height)','shape':'round-rectangle','background-color':'#6366f1','border-width':0}},
@@ -809,6 +874,7 @@
           {selector:'edge',style:{'width':1.6,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier','font-size':'7px','color':'#94a3b8','label':'data(label)','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'86px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.88,'text-background-padding':'2px','arrow-scale':0.85}},
           {selector:'edge[etype="create"]',style:{'line-color':'#10b981','target-arrow-color':'#10b981','width':2.1,'color':'#047857','text-background-color':'#ecfdf5'}},
           {selector:'edge[etype="explore"]',style:{'line-color':'#fbbf24','target-arrow-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'width':1.8,'color':'#b45309','text-background-color':'#fffbeb'}},
+          {selector:'edge[etype="context"]',style:{'line-color':'#94a3b8','target-arrow-color':'#0ea5e9','line-style':'dashed','line-dash-pattern':[4,4],'width':1.7,'color':'#475569','text-background-color':'#f8fafc'}},
           {selector:'edge[etype="orch"]',style:{'line-color':'#818cf8','target-arrow-color':'#818cf8','line-style':'dotted','line-dash-pattern':[2,5],'width':2,'color':'#6366f1'}},
           {selector:'node.focus',style:{'border-width':3,'border-color':'#312e81','border-opacity':0.95,'z-index':1000}},
           {selector:'edge.focus',style:{'z-index':1000,'overlay-color':'#93c5fd','overlay-opacity':0.24,'overlay-padding':5}},
@@ -875,16 +941,14 @@
           const previous=previousPositions.get(nodeData.id);
           if(previous) return previous;
           const intent=this.current.intents.find(i=>i.id===nodeData.intentId);
-          const owner=intent ? (intent.worker||intent.creator) : null;
-          return owner ? this.anchorPositionFromIds([owner],previousPositions,42) : (intent ? this.anchorPositionFromIds(intent.from,previousPositions,32) : null);
+          return intent ? this.anchorPositionFromIds(this.intentDisplaySources(intent),previousPositions,32) : null;
         }
         if(nodeData.kind==="fact"){
           const intent=this.current.intents.find(i=>i.to===nodeData.factId);
           if(!intent) return null;
           const placeholder=previousPositions.get("ph:"+intent.id);
           if(placeholder) return placeholder;
-          const owner=intent.worker||intent.creator;
-          return owner ? this.anchorPositionFromIds([owner],previousPositions,54) : this.anchorPositionFromIds(intent.from,previousPositions,44);
+          return this.anchorPositionFromIds(this.intentDisplaySources(intent),previousPositions,44);
         }
         return null;
       },
@@ -972,12 +1036,20 @@
         const nodes=this.cy.nodes().filter(n=>nodeIds.includes(n.id()));
         const edges=this.cy.edges().filter(e=>edgeIds.includes(e.id()));
         nodes.addClass('focus'); edges.addClass('focus');
-        const visible=nodes.add(edges); this.cy.elements().not(visible).addClass('faded');
+        const visible=nodes.add(edges); if(visible.length===0) return;
+        this.cy.elements().not(visible).addClass('faded');
       },
       collectIntentElements(intent,nodeIds,edgeIds){
         if(intent.to) nodeIds.add("fact:"+intent.to); else nodeIds.add("ph:"+intent.id);
-        for(const s of intent.from){ nodeIds.add("fact:"+s); }
-        edgeIds.add("P"+intent.id);
+        for(const source of this.intentDisplaySources(intent)){
+          nodeIds.add(source); edgeIds.add(this.derivationEdgeId(intent,source));
+          if(this.agentRole(source)==="member"){
+            const contextSource=this.memberContextSource(source);
+            const contextEdge=this.memberContextEdgeId(source);
+            if(contextSource) nodeIds.add(contextSource);
+            if(contextEdge) edgeIds.add(contextEdge);
+          }
+        }
       },
       collectFactLineage(fid){
         const facts=new Set(), intents=new Set();

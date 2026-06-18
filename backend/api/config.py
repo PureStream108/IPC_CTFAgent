@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from backend.api.deps import get_state
-from backend.core.config import CATEGORIES, MEMBER_NAMES
+from backend.core.config import CATEGORIES
 from backend.core.state import AppState
 
 router = APIRouter(tags=["config"])

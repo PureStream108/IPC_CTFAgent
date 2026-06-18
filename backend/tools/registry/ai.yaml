@@ -1,0 +1,20 @@
+category: ai
+tools:
+  - name: pytorch
+    description: PyTorch (CPU) for model loading/inference.
+    path: system
+    exec: python
+    tags: [ml, torch, ai]
+    when_to_use: Inspect/attack ML models, adversarial inputs, weight analysis.
+  - name: keras
+    description: Keras deep learning model loading/inference.
+    path: system
+    exec: python
+    tags: [ml, keras, ai]
+    when_to_use: Load .h5/SavedModel, extract embedded data, inference attacks.
+  - name: numpy-scipy
+    description: Numerical/scientific stack for tensor/data manipulation.
+    path: system
+    exec: python
+    tags: [numpy, scipy, ai]
+    when_to_use: Manipulate model tensors, decode weights, signal processing.

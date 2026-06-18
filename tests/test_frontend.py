@@ -29,7 +29,7 @@ def test_index_served(client):
     body = r.text
     assert "ipcApp" in body
     # IPC branding + key UI elements present
-    assert "Equal CTF Solver Agents" in body
+    assert "CTF_Agent" in body
     assert "BROADCAST" in body
     assert "Logs" in body
     assert "WP" in body
@@ -39,12 +39,21 @@ def test_index_served(client):
     assert "memory_log" in body
     assert "+ New Project" in body
     assert "Memory" in body
+    assert "Add Hint" in body
     # dagre remains the hidden graph layout engine
     assert "cytoscape-dagre.js" in body
     assert "name:'dagre'" in body
-    # origin is only the IPC entry point; derivation is rendered from agents.
+    # Origin is a symbolic entry icon: Origin -> IPC -> Diamond. Member-owned
+    # root intents render from the Member, and later Member assignments attach
+    # back into the existing fact graph through context edges.
     assert 'id:"origin_ipc",source:"fact:origin",target:"ipc"' in body
-    assert 'source:"fact:"+s' not in body
+    assert "for(const a of d.agents)" in body
+    assert "memberForIntent(intent)" in body
+    assert "intentDisplaySources(intent)" in body
+    assert "memberContextSource" in body
+    assert 'etype:"context"' in body
+    assert '"start","assign","report","flag","wp","return"' in body
+    assert "source,target,etype:kind" in body
     assert 'etype:"producer"' not in body
     assert 'etype:kind' in body
     assert 'taxi-direction' not in body

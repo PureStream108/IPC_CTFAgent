@@ -58,7 +58,7 @@ class Diamond:
 
     # ---- reinforcements on report ----
 
-    def decide_reinforcements(self, project_id: str, report) -> list[Assignment]:
+    def decide_reinforcements(self, project_id: str, report, available_slots: int | None = None) -> list[Assignment]:
         """On a difficulty report, add 1..N idle members on fresh directions."""
         difficulty = normalize_difficulty(report.difficulty)
         want = extra_members_for_difficulty(difficulty)
@@ -69,6 +69,11 @@ class Diamond:
         if not idle:
             return []
         want = min(want, self.config.runtime.max_members_per_report, len(idle))
+        if available_slots is not None:
+            want = min(want, max(0, available_slots))
+            if want <= 0:
+                self.logger.project("diamond_no_reinforce", project_id, reason="project_member_cap")
+                return []
 
         directions = self._dedupe_directions(
             report.directions or [f"alternate approach to: {report.progress}"]

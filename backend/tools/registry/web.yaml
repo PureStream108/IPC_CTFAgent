@@ -1,0 +1,74 @@
+category: web
+tools:
+  - name: sqlmap
+    description: Automatic SQL injection detection and database takeover tool.
+    path: tools/sqlmap/sqlmapproject-sqlmap-03be590
+    exec: python sqlmap.py
+    tags: [sqli, injection, database, web]
+    when_to_use: Login bypass, data exfiltration, or any parameter suspected of SQL injection.
+  - name: dirsearch
+    description: Web path/directory brute-force scanner.
+    path: tools/dirsearch/dirsearch
+    exec: python dirsearch.py
+    tags: [recon, fuzzing, directory, web]
+    when_to_use: Discover hidden endpoints, backup files, admin panels.
+  - name: commix
+    description: Automated command injection exploitation tool.
+    path: tools/commix
+    exec: python commix.py
+    tags: [command-injection, rce, web]
+    when_to_use: Parameter reflected into a shell command; OS command injection.
+  - name: whatwaf
+    description: Detect and bypass web application firewalls.
+    path: tools/WhatWaf
+    exec: python -m whatwaf
+    tags: [waf, bypass, recon, web]
+    when_to_use: Payloads are being blocked; identify the WAF and find a bypass.
+  - name: fenjing
+    description: Jinja2/Flask SSTI automatic exploitation (中文 SSTI 工具).
+    path: tools/Fenjing
+    exec: python -m fenjing
+    tags: [ssti, jinja2, flask, template-injection, web]
+    when_to_use: Server-side template injection in Flask/Jinja2.
+  - name: typhonbreaker
+    description: Python pyjail/sandbox escape helper for restricted builtins, blacklist, and object-graph pivots.
+    path: ""
+    exec: typhonbreaker
+    tags: [python, pyjail, sandbox, jail, blacklist, flask, web]
+    when_to_use: Python exec/eval sandbox, pyjail, or restricted-builtins challenge where manual subclass traversal would be slow.
+  - name: flask-pin
+    description: Generate Werkzeug debugger PIN / forge Flask session from leaked data.
+    path: tools/Flask-cookie-generation-based-on-PIN-code-main
+    exec: python get_flask_pin_and_cookie.py
+    tags: [flask, werkzeug, pin, session, web]
+    when_to_use: Werkzeug console PIN bypass when machine-id and modules leak.
+  - name: flask-session-cookie
+    description: Decode and forge Flask session cookies given the secret key.
+    path: tools/flask-session-cookie/flask-session-cookie-manager-master
+    exec: python flask_session_cookie_manager3.py
+    tags: [flask, session, cookie, web]
+    when_to_use: Secret key known/guessed; tamper Flask session contents.
+  - name: php-filter-chain
+    description: Generate PHP filter chains to turn LFI into RCE/data leak.
+    path: tools/Php_chain/php_filter_chain_generator
+    exec: python php_filter_chain_generator.py
+    tags: [php, lfi, filter-chain, web]
+    when_to_use: php://filter LFI where you need arbitrary content/RCE.
+  - name: shiro550
+    description: Apache Shiro 550 deserialization RCE exploitation (GUI jar + helper).
+    path: tools/shiro550
+    exec: java -jar shiro_attack-5.1.1-zulu-8-jfx.jar
+    tags: [java, shiro, deserialization, rce, web]
+    when_to_use: rememberMe cookie present; Shiro deserialization with known/brute key.
+  - name: jndimap
+    description: JNDI injection exploit server (Log4Shell / JNDI).
+    path: tools/JNDIMap/JNDIMap-main
+    exec: java -jar JNDIMap.jar
+    tags: [java, jndi, log4j, log4shell, rce, web]
+    when_to_use: Log4j / JNDI lookup injection (${jndi:ldap://...}).
+  - name: antsword
+    description: WebShell management toolkit (wrapped as AntSword MCP, no GUI).
+    path: tools/Antsword/antSword-master
+    exec: mcp:antsword
+    tags: [webshell, php, management, web]
+    when_to_use: After uploading/obtaining a webshell; use the AntSword MCP tools.

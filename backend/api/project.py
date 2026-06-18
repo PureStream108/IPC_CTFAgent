@@ -5,19 +5,16 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from backend.api.deps import get_state
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.models import (
-    CompleteRequest,
     ConcludeRequest,
     ConcludeResponse,
     CreateHintRequest,
     CreateIntentRequest,
     CreateProjectRequest,
-    Fact,
     HeartbeatRequest,
     Hint,
     Intent,
     ProjectDetail,
     ProjectSummary,
-    ReportRequest,
     ReasonClaimRequest,
 )
 from backend.core.config import CATEGORIES

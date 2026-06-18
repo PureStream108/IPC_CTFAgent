@@ -9,11 +9,6 @@ ProjectStatus = Literal[
 ]
 
 
-class Settings(BaseModel):
-    intent_timeout: int = Field(ge=5)
-    reason_timeout: int = Field(ge=5)
-
-
 class Fact(BaseModel):
     id: str
     description: str
@@ -122,9 +117,6 @@ class ProjectDetail(BaseModel):
     agent_links: list[AgentLink]
     reports: list[Report]
     attachments: list[Attachment]
-
-
-# ---- request bodies ----
 
 
 def _non_empty(value: str | None) -> str | None:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from backend.core.config import LLMConfig
 from backend.members.adapters import BaseAdapter, MemberAction
 

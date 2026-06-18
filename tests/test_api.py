@@ -183,7 +183,7 @@ def test_report_submission(client):
     assert r.json()["difficulty"] == "high"
     # report drew a Member->Diamond link
     detail = client.get(f"/projects/{pid}").json()
-    assert any(l["src"] == "aventurine" and l["dst"] == "diamond" for l in detail["agent_links"])
+    assert any(link["src"] == "aventurine" and link["dst"] == "diamond" for link in detail["agent_links"])
 
 
 def test_complete_marks_flag(client):

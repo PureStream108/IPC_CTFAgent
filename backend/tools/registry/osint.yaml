@@ -1,0 +1,26 @@
+category: osint
+tools:
+  - name: curl
+    description: HTTP client for fetching pages/APIs.
+    path: system
+    exec: curl
+    tags: [http, recon, osint]
+    when_to_use: Pull public pages, APIs, archived content.
+  - name: nmap
+    description: Network/port scanner with service detection.
+    path: system
+    exec: nmap
+    tags: [recon, scan, osint]
+    when_to_use: Enumerate exposed services on a target.
+  - name: exiftool
+    description: Extract metadata that may reveal location/author.
+    path: system
+    exec: exiftool
+    tags: [metadata, osint]
+    when_to_use: Geolocation/author hints from media metadata.
+  - name: whatwaf
+    description: Identify front-facing WAF/CDN of a target.
+    path: tools/WhatWaf
+    exec: python -m whatwaf
+    tags: [recon, waf, osint]
+    when_to_use: Fingerprint defensive infrastructure.

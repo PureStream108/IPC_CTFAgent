@@ -3,7 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 Seed.md
-tools/
+/tools/
 .github/
 Interastral_Peace_Corporation_2.png
 backend/config/config.yaml

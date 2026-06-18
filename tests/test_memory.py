@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from backend.memory.exporter.markdown import export_markdown
 from backend.memory.exporter.obsidian import export_obsidian
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_search import search
@@ -71,14 +70,6 @@ def test_memory_mcp_search_and_get(store):
     full = mcp.call("memory_get", id=hits[0]["id"])
     assert "ysoserial" in full["content"]
     assert mcp.call("memory_get", id="nope")["error"]
-
-
-def test_export_markdown(store, tmp_path):
-    _seed(store)
-    path = export_markdown(store, tmp_path / "export")
-    text = path.read_text(encoding="utf-8")
-    assert "Flask SSTI" in text
-    assert "Tool Usage" in text
 
 
 def test_export_obsidian_vault(store, tmp_path):

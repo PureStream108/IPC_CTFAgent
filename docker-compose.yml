@@ -7,6 +7,25 @@ services:
     command: ["true"]
     restart: "no"
 
+  ipc-zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command:
+      - zap.sh
+      - -daemon
+      - -host
+      - 0.0.0.0
+      - -port
+      - "8080"
+      - -config
+      - api.disablekey=true
+      - -config
+      - api.addrs.addr.name=.*
+      - -config
+      - api.addrs.addr.regex=true
+    expose:
+      - "8080"
+    restart: unless-stopped
+
   ipc-app:
     build:
       context: .
@@ -20,6 +39,9 @@ services:
       - IPC_LOG_ENABLED=true
       - IPC_LOG_EXPORT_DIR=/app/exports/logs
       - IPC_WP_EXPORT_DIR=/app/exports/Wp
+      - IPC_CHROME_BIN=/usr/bin/chromium
+      - IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
+      - ZAP_API_URL=http://ipc-zap:8080
     volumes:
       - ipc_data:/app/data
       - ipc_memory:/app/memory
@@ -33,10 +55,11 @@ services:
     restart: unless-stopped
     depends_on:
       - ipc-member-image
+      - ipc-zap
 
-# Shared MCP services (Browser/Ghidra/ZAP) are integrated in-process as stubs in
-# this build; production deployments can add dedicated services here and point
-# the shared MCP clients at them.
+# Shared MCP runtime:
+# - Browser and Ghidra run from binaries bundled in the ipc-app image.
+# - ZAP runs as the shared ipc-zap service and is reached through ZAP_API_URL.
 
 volumes:
   ipc_data:

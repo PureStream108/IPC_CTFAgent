@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from backend.blackboard import edge_store, graph_store, node_store
@@ -20,6 +20,7 @@ from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import Sandbox
 from backend.tools.tool_mcp import build_category_tools_mcp
+from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
 from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
 
 
@@ -51,6 +52,7 @@ class SolveResult:
 class DispatchResult:
     result: SolveResult | None = None
     graph_action: str | None = None
+    invalid_action: bool = False
 
 
 class BaseMember:
@@ -75,10 +77,12 @@ class BaseMember:
         d = self.deps
         d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
         self._claim(project_id, intent_id)
+        self._seed_tool_inventory(project_id)
         step = 0
         task_budget = max(1, min(d.max_steps, d.max_actions_per_task))
         graph_actions: list[str] = []
         branch_intents = 0
+        invalid_actions = 0
         while step < task_budget and not self._stop.is_set():
             step += 1
             evaluate_now = step % d.eval_interval == 0
@@ -130,6 +134,28 @@ class BaseMember:
                 graph_actions.append(dispatched.graph_action)
                 if dispatched.graph_action == "intent":
                     branch_intents += 1
+            if dispatched.invalid_action:
+                invalid_actions += 1
+                if invalid_actions >= 2:
+                    self._submit_stall_report(
+                        project_id,
+                        intent_id,
+                        category,
+                        step,
+                        difficulty_hint="medium",
+                        extra_knowledge=["invalid_action_contract"],
+                    )
+                    self._release(project_id, intent_id)
+                    d.logger.project(
+                        "member_invalid_action_limit",
+                        project_id,
+                        member=self.name,
+                        intent=intent_id,
+                        steps=step,
+                    )
+                    return SolveResult(status="stalled", steps=step)
+            else:
+                invalid_actions = 0
             if dispatched.result is not None:
                 return dispatched.result
         if self._stop.is_set():
@@ -165,11 +191,17 @@ class BaseMember:
         d = self.deps
         kind = action.kind
         if kind == "bash":
-            cmd = action.args.get("command", "")
+            cmd = str(action.args.get("command", ""))
             if not cmd.strip():
-                d.logger.project("invalid_bash_action", project_id, member=self.name, intent=intent_id)
-                self._observe("[empty bash command omitted]")
-                return DispatchResult()
+                d.logger.project(
+                    "invalid_bash_action",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    keys=sorted(action.args),
+                )
+                self._observe("[invalid bash action omitted: missing non-empty `command`]")
+                return DispatchResult(invalid_action=True)
             res = d.sandbox.exec(cmd, timeout=60)
             self._observe(f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip())
             d.logger.tool(
@@ -186,6 +218,16 @@ class BaseMember:
             server = action.args.get("server", "")
             tool = action.args.get("tool", "")
             args = action.args.get("args", {})
+            if not str(server).strip() or not str(tool).strip():
+                d.logger.project(
+                    "invalid_tool_action",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    keys=sorted(action.args),
+                )
+                self._observe("[invalid tool action omitted: missing `server` or `tool`]")
+                return DispatchResult(invalid_action=True)
             try:
                 if server == "tools":
                     out = build_category_tools_mcp(d.registry, category).call(tool, **args)
@@ -248,6 +290,17 @@ class BaseMember:
             row = edge_store.get_intent(conn, project_id, intent_id)
             if row is not None and row["to_fact_id"] is None and row["worker"] == self.name:
                 edge_store.release_intent(conn, project_id, intent_id)
+
+    def _seed_tool_inventory(self, project_id: str) -> None:
+        try:
+            self.deps.sandbox.write_file("tools.txt", member_tool_inventory())
+        except Exception as exc:
+            self.deps.logger.project(
+                "member_tool_inventory_seed_failed",
+                project_id,
+                member=self.name,
+                error=str(exc),
+            )
 
     def _submit_report(self, project_id, intent_id, action: MemberAction):
         d = self.deps
@@ -353,9 +406,10 @@ class BaseMember:
             level = max_difficulty(level, "high" if prior_repeats else "medium")
             evidence.append("action_signature_repeat")
 
-        texts = [progress, *steps, *directions, *knowledge]
+        # Calibrate from observed evidence, not speculative next-step phrasing.
+        texts = [progress, *steps, *knowledge]
         for report in scoped[-5:]:
-            texts.extend([report.progress, *report.steps, *report.directions, *report.knowledge])
+            texts.extend([report.progress, *report.steps, *report.knowledge])
         exploit_classes = detect_exploit_classes(texts)
         if len(exploit_classes) >= 4:
             level = max_difficulty(level, "ex")
@@ -371,7 +425,6 @@ class BaseMember:
         surface_texts.extend(f.description for f in node_store.list_facts(conn, project_id))
         surface_texts.extend(h.content for h in graph_store.list_hints(conn, project_id))
         surface_texts.extend(a.filename for a in graph_store.list_attachments(conn, project_id))
-        surface_texts.extend(i.description for i in edge_store.list_intents(conn, project_id))
         surfaces = detect_attack_surfaces(surface_texts)
         if len(surfaces) >= 4:
             level = max_difficulty(level, "ex")
@@ -641,6 +694,7 @@ class BaseMember:
             "runtime_notes": [
                 "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
                 "If sandbox_backend is DockerSandbox, use Linux commands inside the container.",
+                "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
             ],
             "evaluate_now": evaluate_now,
             "eval_interval": d.eval_interval,
@@ -651,11 +705,22 @@ class BaseMember:
             "assigned_intent_sources": assigned.from_ if assigned else ["origin"],
             "latest_fact_id": detail.facts[-1].id if detail.facts else "origin",
             "facts": [{"id": f.id, "description": f.description} for f in detail.facts],
+            "hints": [
+                {"id": h.id, "content": h.content, "creator": h.creator, "created_at": h.created_at}
+                for h in detail.hints
+            ],
             "open_intents": [
                 {"id": i.id, "description": i.description}
                 for i in detail.intents if i.to is None
             ],
             "exposed_tools": exposed,
+            "member_tool_inventory": member_tool_inventory(),
+            "member_tool_inventory_source": {
+                "backend_path": member_tool_inventory_path(),
+                "workspace_path": "tools.txt",
+                "docker_path": "/tools.txt",
+                "note": "Use bash `cat tools.txt`; in Docker sandboxes, `/tools.txt` is also available.",
+            },
             "available_mcps": d.mcps.names(),
             "public_mcps": list(PUBLIC_MCPS),
             "available_languages": list(LANGUAGES),

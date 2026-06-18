@@ -1,0 +1,167 @@
+IPC_CTFAgent member sandbox tool inventory
+==========================================
+
+Purpose
+-------
+This file is the canonical quick reference for tools and libraries available to
+Member agents at the start of a solve. In Docker sandboxes the same file is
+available at /tools.txt. The local registry exposes category-focused subsets,
+but this file lists the broader base image so agents know what to reach for.
+
+Execution model
+---------------
+- Use action "bash" to run commands in the current Member sandbox.
+- In Docker mode the working directory is /workspace.
+- Extra cloned tools are under /workspace/tools, which points to
+  /opt/ipc-tools/tools.
+- Prefer creating scripts and temporary output under /workspace.
+- Use action "tool" for MCP helpers: memory, tool_search, browser, ghidra, zap,
+  antsword, or the virtual "tools" server with list_tools/get_tool.
+- Browser/Ghidra/ZAP are shared Docker-backed MCP runtimes, not tools installed
+  separately in each Member container.
+- Use action "tool_search" when the category-specific exposed tools do not show
+  what you need.
+
+Core shell and build utilities
+------------------------------
+- bash/sh: shell scripting and command chaining.
+- git: inspect repositories, diff source, clone public helper repos if needed.
+- curl/wget: HTTP probing, downloads, API calls, SSRF/web checks.
+- jq: inspect and transform JSON API responses.
+- zip/unzip: archive extraction and packaging.
+- openssl: hashes, base64, ciphers, RSA/key/certificate inspection, TLS probes.
+- file/strings/xxd/hexdump: first-pass file triage and binary inspection.
+- binutils: objdump, readelf, nm, strip, and related ELF utilities.
+- build-essential/gcc/g++/make: compile exploit helpers or challenge source.
+
+Languages and runtimes
+----------------------
+- python3/pip/venv: primary scripting environment for exploits and analysis.
+- Java 17/Javac/Maven: Java challenges, deserialization tooling, JAR projects.
+- Go: build or audit Go challenge code.
+- Rust/Cargo: build Rust challenge code and small helpers.
+- PHP CLI: run and inspect PHP challenge code locally.
+- Node.js/npm: JavaScript/Node challenge code and package inspection.
+- Ruby/gem: Ruby scripts and zsteg runtime.
+
+Network and web tools
+---------------------
+- nmap: port and service enumeration.
+- nc/netcat-openbsd: raw TCP interaction and quick listeners.
+- sqlmap: SQL injection testing and exploitation. Installed by apt and cloned at
+  /workspace/tools/sqlmap/sqlmapproject-sqlmap-03be590.
+- dirsearch: content/path discovery. Path:
+  /workspace/tools/dirsearch/dirsearch.
+- commix: command injection detection/exploitation. Path:
+  /workspace/tools/commix.
+- WhatWaf: WAF/CDN fingerprinting and simple bypass guidance. Path:
+  /workspace/tools/WhatWaf.
+- Fenjing: Jinja2/Flask SSTI exploitation helper. Path:
+  /workspace/tools/Fenjing, also installed as a Python package when build
+  succeeds.
+- TyphonBreaker: Python pyjail/sandbox escape helper for blacklist,
+  restricted-builtins, and object graph pivots.
+- Flask PIN helper: Werkzeug debugger PIN and Flask cookie helper. Path:
+  /workspace/tools/Flask-cookie-generation-based-on-PIN-code-main.
+- flask-session-cookie-manager: decode/sign Flask session cookies when a secret
+  key is known or guessed. Path:
+  /workspace/tools/flask-session-cookie/flask-session-cookie-manager-master.
+- php_filter_chain_generator: generate PHP filter chains for LFI-to-read/RCE
+  style attacks. Path:
+  /workspace/tools/Php_chain/php_filter_chain_generator.
+- AntSword assets: cloned under /workspace/tools/Antsword/antSword-master.
+  Prefer the safe in-process antsword MCP for payload encoding/upload helpers.
+
+Java and deserialization helpers
+--------------------------------
+- JNDIMap: JNDI/Log4Shell exploit server helper. Path:
+  /workspace/tools/JNDIMap/JNDIMap-main.
+- ysoserial: Java deserialization gadget payload generator. Path:
+  /workspace/tools/ysoserial-master. Build the JAR if the cloned repo does not
+  already contain one.
+- shiro550/ShiroAttack2: Apache Shiro rememberMe deserialization helper. Path:
+  /workspace/tools/shiro550/shiro_attack-5.1.1-zulu-8-jfx.jar.
+
+Pwn and binary exploitation
+---------------------------
+- gdb: dynamic debugging.
+- pwntools: exploit development, process/remote interaction, packing, ROP.
+- ROPgadget/ropgadget Python package: gadget discovery for ROP chains.
+- checksec: first-pass binary mitigation checks; pwntools ELF.checksec() and
+  readelf are useful fallbacks.
+- one_gadget: locate one-shot execve gadgets in libc.
+- radare2/r2: disassembly, patching, quick reverse engineering.
+- angr: symbolic execution and constraint solving for binaries.
+- capstone/unicorn: disassembly and emulation libraries.
+- objdump/readelf/nm/strings/file/xxd: static binary triage.
+- ltrace/strace may not be present in every build; use gdb or install if needed.
+
+Reverse engineering
+-------------------
+- radare2/r2: analyze binaries with aaa, afl, pdf, izz, and patch commands.
+- objdump/readelf/nm: ELF sections, symbols, relocations, and disassembly.
+- strings/file/xxd: quick embedded-string and format checks.
+- angr/capstone/unicorn: Python-based symbolic execution, disassembly, and
+  emulation.
+- ghidra MCP runs outside the Member sandbox through the shared Docker app
+  runtime, using the Ghidra headless binary bundled in the ipc-app image.
+
+Crypto and math
+---------------
+- RsaCtfTool: automated RSA attacks. Path: /opt/RsaCtfTool; usually run from
+  that directory or via its installed entry points.
+- rsa_sign2n: recover RSA modulus n from signatures/messages. Path:
+  /workspace/tools/RSASIGN/rsa_sign2n-release; run python sig2n.py.
+- SageMath: CAS for algebra, modular arithmetic, factoring, ECM, and lattices.
+- cado-nfs: number field sieve helper for larger factoring/DLP jobs.
+- pycryptodome: AES/RSA/number utilities and common crypto primitives.
+- sympy/gmpy2: modular arithmetic, factoring helpers, CRT, number theory.
+- z3-solver: SMT solving and constraint systems.
+- fpylll: lattice reduction for LLL/BKZ-style attacks when installation
+  succeeded.
+- numpy/scipy: numerical work, signal processing, and data analysis.
+- openssl: encoding, cert/key parsing, symmetric crypto checks.
+
+Forensics and steganography
+---------------------------
+- binwalk: extract embedded files from firmware/blobs/images.
+- foremost may not be present; use binwalk/dd/file/xxd if absent.
+- exiftool: metadata inspection for images, PDFs, Office files, and media.
+- steghide: extract hidden data from JPEG/BMP/WAV.
+- zsteg: PNG/BMP LSB and bit-plane stego detection.
+- pngcheck: PNG chunk validation and corruption triage.
+- ImageMagick: identify/convert/mogrify for image transformation.
+- ffmpeg/sox: audio/video extraction, channel splitting, spectrogram prep.
+- tesseract-ocr: OCR for images/screenshots.
+- BlindWaterMark: blind watermark extraction. Path:
+  /workspace/tools/BlindWaterMark.
+- Pillow/pytesseract: Python image processing and OCR integration.
+- volatility3: memory forensics, usually via vol or python -m volatility3.
+
+AI and data libraries
+---------------------
+- numpy/scipy: arrays, numerical transforms, signal processing.
+- Pillow: image loading and manipulation.
+- pytesseract: OCR bridge to tesseract.
+- requests/flask/pyjwt: HTTP clients, local web harnesses, JWT/session work.
+- torch/keras/h5py: ML model loading and CPU inference for AI challenges.
+
+Common first moves by challenge shape
+-------------------------------------
+- Unknown attachment: file, ls -la, strings, xxd/head, binwalk, exiftool.
+- Web URL/service: curl -i, nmap -sV, directory discovery, then targeted tools
+  such as sqlmap, Fenjing, commix, or WhatWaf only when evidence points there.
+- Python pyjail/sandbox: read source, run small probes, then try TyphonBreaker or
+  scripted object-graph exploration.
+- Flask/Werkzeug: inspect source/config, cookies/JWTs, session signing, SSTI,
+  debugger PIN evidence.
+- Java/JNDI/deser: inspect dependencies and cookies/headers, then JNDIMap or
+  ysoserial when evidence supports it.
+- Pwn: file/checksec/readelf/strings, run locally, crash under gdb, then build a
+  pwntools exploit.
+- Reverse: strings/file/r2/objdump first; use angr when the task is branch
+  constraint solving.
+- Crypto: identify primitive, collect parameters, script with Python crypto
+  libraries; use RsaCtfTool for weak RSA.
+- Stego/forensics: exiftool, binwalk, zsteg/steghide/pngcheck, OCR, audio/video
+  extraction.

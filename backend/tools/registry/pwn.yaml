@@ -1,0 +1,32 @@
+category: pwn
+tools:
+  - name: pwntools
+    description: CTF exploit development framework (remote/process, ROP, shellcraft).
+    path: system
+    exec: python
+    tags: [pwn, rop, shellcode, exploit]
+    when_to_use: Build/automate binary exploits, interact with remote services.
+  - name: gdb
+    description: GNU debugger (pwndbg/gef-style workflows).
+    path: system
+    exec: gdb
+    tags: [debug, pwn, dynamic-analysis]
+    when_to_use: Inspect crashes, set breakpoints, examine memory/registers.
+  - name: ropgadget
+    description: ROP gadget finder.
+    path: system
+    exec: ROPgadget
+    tags: [rop, gadget, pwn]
+    when_to_use: Building ROP chains for stack-based exploits.
+  - name: one_gadget
+    description: Find one-shot execve gadgets in libc.
+    path: system
+    exec: one_gadget
+    tags: [libc, one_gadget, pwn]
+    when_to_use: Need a single-call shell gadget given a libc.
+  - name: checksec
+    description: Show binary mitigations (NX, PIE, RELRO, canary).
+    path: system
+    exec: checksec
+    tags: [recon, mitigations, pwn]
+    when_to_use: First triage of a pwn binary.

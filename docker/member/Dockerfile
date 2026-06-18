@@ -1,7 +1,3 @@
-# Member sandbox image (Seed.md 独立 Docker 沙箱).
-# One per Member: languages + core CTF tooling. Extra tools are fetched during
-# image build, matching ctf-agent's Dockerfile style; the local tools/ tree is
-# not copied into the Docker build context or image.
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,12 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nmap netcat-openbsd binutils file binwalk steghide exiftool \
-        gdb sqlmap unzip zip jq openssl \
+        gdb sqlmap unzip zip jq openssl checksec \
         xxd bsdmainutils pngcheck imagemagick ffmpeg sox \
         tesseract-ocr tesseract-ocr-eng \
+        sagemath cmake pkg-config python3-dev libhwloc-dev \
         libgmp-dev libmpfr-dev libfplll-dev libeigen3-dev libz3-dev \
         libmhash-dev libmcrypt-dev libjpeg-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    mkdir -p /opt/cado-nfs; \
+    curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/cado-nfs.tar.gz https://codeload.github.com/sethtroisi/cado-nfs/tar.gz/refs/heads/master; \
+    tar -xzf /tmp/cado-nfs.tar.gz -C /opt/cado-nfs --strip-components=1; \
+    rm -f /tmp/cado-nfs.tar.gz; \
+    grep -rl -- '-Werror' /opt/cado-nfs | xargs -r sed -i 's/-Werror//g'; \
+    sed -i '/#pragma GCC diagnostic error/d' /opt/cado-nfs/cado.h; \
+    sed -i '1i #include <limits>' /opt/cado-nfs/sieve/logapprox.cpp; \
+    cd /opt/cado-nfs \
+    && CFLAGS="-O2 -fcommon -Wno-array-parameter -Wno-error=array-parameter -Wno-error" CXXFLAGS="-O2 -Wno-array-parameter -Wno-error=array-parameter -Wno-error" make -j2 \
+    && printf '#!/bin/sh\nexec python3 /opt/cado-nfs/cado-nfs.py "$@"\n' > /usr/local/bin/cado-nfs \
+    && chmod +x /usr/local/bin/cado-nfs
 
 # radare2 is not consistently available from Ubuntu 22.04 apt repos.
 RUN git clone --depth=1 https://github.com/radareorg/radare2 /tmp/r2 \
@@ -31,11 +41,15 @@ RUN git clone --depth=1 https://github.com/radareorg/radare2 /tmp/r2 \
     && ldconfig \
     && rm -rf /tmp/r2
 
-# Python CTF libraries.
+ENV PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
+    PIP_ROOT_USER_ACTION=ignore
+
 RUN pip3 install --no-cache-dir \
         TyphonBreaker pwntools pycryptodome sympy gmpy2 requests flask pyjwt z3-solver \
         Pillow pytesseract scipy numpy angr capstone unicorn ropgadget tqdm \
         fpylll volatility3 || true
+
+RUN pip3 install --no-cache-dir torch keras h5py
 
 # Extra CTF tools. These are intentionally cloned here instead of copied from
 # IPC_CTFAgent/tools, so Docker builds do not upload the local tools directory.
@@ -45,6 +59,9 @@ RUN mkdir -p /opt/ipc-tools/tools \
     && git clone --depth=1 https://github.com/commixproject/commix.git /opt/ipc-tools/tools/commix \
     && git clone --depth=1 https://github.com/Ekultek/WhatWaf.git /opt/ipc-tools/tools/WhatWaf \
     && git clone --depth=1 https://github.com/Marven11/Fenjing.git /opt/ipc-tools/tools/Fenjing \
+    && mkdir -p /opt/ipc-tools/tools/RSASIGN /opt/ipc-tools/tools/shiro550 \
+    && git clone --depth=1 --branch release https://github.com/silentsignal/rsa_sign2n.git /opt/ipc-tools/tools/RSASIGN/rsa_sign2n-release \
+    && git clone --depth=1 https://github.com/WiIs0n/Flask-cookie-generation-based-on-PIN-code.git /opt/ipc-tools/tools/Flask-cookie-generation-based-on-PIN-code-main \
     && git clone --depth=1 https://github.com/noraj/flask-session-cookie-manager.git /opt/ipc-tools/tools/flask-session-cookie/flask-session-cookie-manager-master \
     && git clone --depth=1 https://github.com/synacktiv/php_filter_chain_generator.git /opt/ipc-tools/tools/Php_chain/php_filter_chain_generator \
     && git clone --depth=1 https://github.com/chishaxie/BlindWaterMark.git /opt/ipc-tools/tools/BlindWaterMark \
@@ -52,11 +69,20 @@ RUN mkdir -p /opt/ipc-tools/tools \
     && git clone --depth=1 https://github.com/X1r0z/JNDIMap.git /opt/ipc-tools/tools/JNDIMap/JNDIMap-main \
     && git clone --depth=1 https://github.com/frohoff/ysoserial.git /opt/ipc-tools/tools/ysoserial-master \
     && git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool.git /opt/RsaCtfTool \
-    && pip3 install --no-cache-dir /opt/ipc-tools/tools/Fenjing /opt/RsaCtfTool || true \
-    && pip3 install --no-cache-dir -r /opt/ipc-tools/tools/dirsearch/dirsearch/requirements.txt || true \
-    && gem install zsteg || true \
+    && wget -q -O /opt/ipc-tools/tools/shiro550/shiro_attack-5.1.1-zulu-8-jfx.jar https://github.com/SummerSec/ShiroAttack2/releases/download/v5.1.1/shiro_attack-5.1.1-zulu-8-jfx.jar \
+    && (pip3 install --no-cache-dir /opt/ipc-tools/tools/Fenjing /opt/RsaCtfTool || true) \
+    && (pip3 install --no-cache-dir -r /opt/ipc-tools/tools/dirsearch/dirsearch/requirements.txt || true) \
+    && gem install --no-document one_gadget \
+    && (gem install zsteg || true) \
     && mkdir -p /workspace \
     && ln -s /opt/ipc-tools/tools /workspace/tools
+
+COPY backend/tools/member_tools.txt /tools.txt
+
+RUN sed -i 's/from fractions import gcd/from math import gcd/' /opt/cado-nfs/scripts/cadofactor/cadotask.py \
+    && sed -i 's/origin is "localhost"/origin == "localhost"/' /opt/cado-nfs/scripts/cadofactor/wuserver.py \
+    && printf '#!/bin/sh\nexport PYTHONPATH=/opt/cado-nfs/scripts/cadofactor${PYTHONPATH:+:$PYTHONPATH}\nexec python3 /opt/cado-nfs/cado-nfs.py "$@"\n' > /usr/local/bin/cado-nfs \
+    && chmod +x /usr/local/bin/cado-nfs
 
 WORKDIR /workspace
 
