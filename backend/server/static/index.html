@@ -803,23 +803,24 @@
             edges.push({data:{id:contextEdge,source:contextSource,target:a.name,etype:"context",label:"context"}});
           }
         }
-        const addDerivation=(intent, target, kind)=>{
+        const addDerivation=(intent, target, kind, label="")=>{
           for(const source of this.intentDisplaySources(intent)){
             if(have.has(source)){
-              edges.push({data:{id:this.derivationEdgeId(intent,source),source,target,etype:kind,intentId:intent.id,label:intent.description||kind}});
+              edges.push({data:{id:this.derivationEdgeId(intent,source),source,target,etype:kind,intentId:intent.id,label}});
             }
           }
         };
         for(const i of d.intents){
-          if(i.to){
-            addDerivation(i,"fact:"+i.to,"create");
-          } else {
-            const ph="ph:"+i.id;
-            add(ph,{label:"?",ntype:i.worker?"in_progress":"unclaimed",kind:"intent",intentId:i.id,description:i.description});
-            addDerivation(i,ph,"explore");
+          const intentNode=this.intentNodeId(i);
+          const ntype=i.to ? "intent_done" : (i.worker ? "in_progress" : "unclaimed");
+          const label=i.to ? `${i.id}: ${this.truncate(i.description,36)}` : "?";
+          add(intentNode,{label,ntype,kind:"intent",intentId:i.id,description:i.description});
+          addDerivation(i,intentNode,i.to ? "derive" : "explore",i.to ? "" : (i.description||"explore"));
+          if(i.to&&have.has("fact:"+i.to)){
+            edges.push({data:{id:this.intentResultEdgeId(i),source:intentNode,target:"fact:"+i.to,etype:"create",intentId:i.id,label:""}});
           }
         }
-        const resolve=(ref)=>{ if(ref.startsWith("fact:"))return ref; if(ref.startsWith("intent:")){const iid=ref.slice(7); const it=d.intents.find(x=>x.id===iid); return it&&it.to?("fact:"+it.to):("ph:"+iid);}
+        const resolve=(ref)=>{ if(ref.startsWith("fact:"))return ref; if(ref.startsWith("intent:"))return ref;
           if(ref==="flag"){add("flag",{label:"FLAG",ntype:"flag",kind:"special",specialId:"flag"});return "flag";}
           if(ref==="wp"){add("wp",{label:"WP",ntype:"wp",kind:"special",specialId:"wp"});return "wp";}
           return ref; };
@@ -830,7 +831,10 @@
       truncate(text,n){ text=(text||"").trim(); return text.length>n ? text.slice(0,n-1)+"..." : text; },
       agentRecord(name){ return this.current ? this.current.agents.find(a=>a.name===name) || null : null; },
       agentRole(name){ return this.agentRecord(name)?.role || ""; },
+      originDisplaySource(fallback=null){ return this.agentRecord("aventurine") ? "aventurine" : fallback; },
+      intentNodeId(intent){ const id=typeof intent==="string" ? intent : intent?.id; return "intent:"+id; },
       derivationEdgeId(intent,source){ return `P${intent.id}_${source.replace(/[^A-Za-z0-9_-]/g,"_")}`; },
+      intentResultEdgeId(intent){ return `R${intent.id}_${String(intent.to||"open").replace(/[^A-Za-z0-9_-]/g,"_")}`; },
       memberContextSource(name){
         const agent=this.agentRecord(name);
         if(!agent||agent.role!=="member"||!agent.start_fact_id||agent.start_fact_id==="origin") return null;
@@ -850,14 +854,13 @@
       intentDisplaySources(intent){
         const owner=this.memberForIntent(intent);
         const from=Array.isArray(intent?.from) ? intent.from : [];
-        if(owner){
-          const starts=new Set(["origin"]);
-          const agent=this.agentRecord(owner);
-          if(agent?.start_fact_id) starts.add(agent.start_fact_id);
-          if(from.length===0 || from.some(fid=>starts.has(fid))) return [owner];
+        const facts=from.filter(fid=>fid&&fid!=="origin").map(fid=>"fact:"+fid);
+        if(facts.length) return facts;
+        if(from.includes("origin")){
+          const originSource=this.originDisplaySource(owner);
+          return originSource ? [originSource] : [];
         }
-        const facts=from.map(fid=>"fact:"+fid);
-        return facts.length ? facts : (owner ? [owner] : []);
+        return owner ? [owner] : [];
       },
       graphStyles(){ const common={'text-valign':'center','text-halign':'center','font-family':'-apple-system,BlinkMacSystemFont,Inter,sans-serif'};
         return [
@@ -869,10 +872,12 @@
           {selector:'node[ntype="member"]',style:{'background-color':'#0ea5e9','shape':'ellipse','text-max-width':'88px'}},
           {selector:'node[ntype="flag"]',style:{'background-color':'#10b981','shape':'diamond','width':52,'height':52}},
           {selector:'node[ntype="wp"]',style:{'background-color':'#38bdf8'}},
+          {selector:'node[ntype="intent_done"]',style:{'background-color':'#7c3aed','font-size':'10px','text-max-width':'112px'}},
           {selector:'node[ntype="in_progress"]',style:{'background-color':'#f59e0b','background-opacity':0.85,'shape':'ellipse','label':'?','width':22,'height':22,'border-width':2,'border-color':'#d97706','font-size':'11px'}},
           {selector:'node[ntype="unclaimed"]',style:{'background-color':'#cbd5e1','background-opacity':0.55,'shape':'ellipse','label':'?','color':'#94a3b8','width':20,'height':20,'border-width':1.5,'border-color':'#94a3b8','border-style':'dashed','font-size':'11px'}},
           {selector:'edge',style:{'width':1.6,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier','font-size':'7px','color':'#94a3b8','label':'data(label)','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'86px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.88,'text-background-padding':'2px','arrow-scale':0.85}},
           {selector:'edge[etype="create"]',style:{'line-color':'#10b981','target-arrow-color':'#10b981','width':2.1,'color':'#047857','text-background-color':'#ecfdf5'}},
+          {selector:'edge[etype="derive"]',style:{'line-color':'#a78bfa','target-arrow-color':'#a78bfa','width':1.8,'color':'#6d28d9','text-background-color':'#f5f3ff'}},
           {selector:'edge[etype="explore"]',style:{'line-color':'#fbbf24','target-arrow-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'width':1.8,'color':'#b45309','text-background-color':'#fffbeb'}},
           {selector:'edge[etype="context"]',style:{'line-color':'#94a3b8','target-arrow-color':'#0ea5e9','line-style':'dashed','line-dash-pattern':[4,4],'width':1.7,'color':'#475569','text-background-color':'#f8fafc'}},
           {selector:'edge[etype="orch"]',style:{'line-color':'#818cf8','target-arrow-color':'#818cf8','line-style':'dotted','line-dash-pattern':[2,5],'width':2,'color':'#6366f1'}},
@@ -946,9 +951,10 @@
         if(nodeData.kind==="fact"){
           const intent=this.current.intents.find(i=>i.to===nodeData.factId);
           if(!intent) return null;
-          const placeholder=previousPositions.get("ph:"+intent.id);
-          if(placeholder) return placeholder;
-          return this.anchorPositionFromIds(this.intentDisplaySources(intent),previousPositions,44);
+          const intentPosition=previousPositions.get(this.intentNodeId(intent))||previousPositions.get("ph:"+intent.id);
+          if(intentPosition) return intentPosition;
+          return this.anchorPositionFromIds([this.intentNodeId(intent)],previousPositions,44)
+            || this.anchorPositionFromIds(this.intentDisplaySources(intent),previousPositions,44);
         }
         return null;
       },
@@ -1040,7 +1046,12 @@
         this.cy.elements().not(visible).addClass('faded');
       },
       collectIntentElements(intent,nodeIds,edgeIds){
-        if(intent.to) nodeIds.add("fact:"+intent.to); else nodeIds.add("ph:"+intent.id);
+        const intentNode=this.intentNodeId(intent);
+        nodeIds.add(intentNode);
+        if(intent.to){
+          nodeIds.add("fact:"+intent.to);
+          edgeIds.add(this.intentResultEdgeId(intent));
+        }
         for(const source of this.intentDisplaySources(intent)){
           nodeIds.add(source); edgeIds.add(this.derivationEdgeId(intent,source));
           if(this.agentRole(source)==="member"){
@@ -1054,7 +1065,7 @@
       collectFactLineage(fid){
         const facts=new Set(), intents=new Set();
         const walkFact=(id)=>{ if(facts.has(id)||!this.current)return; facts.add(id); for(const i of this.current.intents){ if(i.to===id) walkIntent(i.id); } };
-        const walkIntent=(id)=>{ if(intents.has(id)||!this.current)return; intents.add(id); const i=this.current.intents.find(x=>x.id===id); if(!i)return; for(const s of i.from) walkFact(s); };
+        const walkIntent=(id)=>{ if(intents.has(id)||!this.current)return; intents.add(id); const i=this.current.intents.find(x=>x.id===id); if(!i)return; for(const s of i.from){ if(s!=="origin") walkFact(s); } };
         walkFact(fid); return {facts,intents};
       },
       applyLineageHighlightForIntent(iid){

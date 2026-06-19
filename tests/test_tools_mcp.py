@@ -26,6 +26,10 @@ def test_exposed_for_category(registry):
     names = {t.name for t in web}
     assert "sqlmap" in names
     assert "typhonbreaker" in names
+    typhon = registry.get("typhonbreaker")
+    assert typhon is not None
+    assert "from Typhon import bypassREAD, bypassRCE" in typhon.exec
+    assert "do not run `typhonbreaker <url>`" in typhon.when_to_use
     assert "ghidra" not in names  # reverse-only
 
 

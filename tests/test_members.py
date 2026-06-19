@@ -13,6 +13,7 @@ from backend.mcp.base import MCPRegistry
 from backend.mcp.shared import build_browser_mcp
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
+from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.sandbox import LocalSandbox
 from backend.tools.tool_registry import ToolRegistry
 
@@ -119,6 +120,46 @@ def test_scripted_member_tool_and_done(deps):
     assert any("mcp:browser.navigate" in o for o in member.observations)
 
 
+def test_member_observes_shared_webui_proxy(tmp_path):
+    class WebUISandbox(LocalSandbox):
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            return ExecResult(0, "Running on http://127.0.0.1:7860", "")
+
+        def expose_webui(self, project_id: str, member: str, port: int) -> str:
+            assert project_id == "proj_001"
+            assert member == "jade"
+            assert port == 7860
+            return "http://127.0.0.1:41001"
+
+    db = Database(tmp_path / "g.db").configure()
+    mem = MemoryStore(tmp_path / "m.db").configure()
+    reg = ToolRegistry(cache_db=tmp_path / "tc.db").load()
+    mcps = MCPRegistry()
+    mcps.register(build_memory_mcp(mem))
+    mcps.register(build_browser_mcp())
+    sb = WebUISandbox("test", tmp_path / "ws")
+    sb.start()
+    deps = MemberDeps(
+        db=db,
+        logger=IPCLogger(tmp_path / "logs", enabled=True),
+        sandbox=sb,
+        mcps=mcps,
+        registry=reg,
+        memory=mem,
+    )
+    pid, iid = _project(db)
+    script = [
+        {"action": "bash", "command": "typhonbreaker webui --port 7860"},
+        {"action": "done", "reason": "stop"},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), deps, script=script)
+
+    result = member.solve(pid, iid, "web", is_initial=False)
+
+    assert result.status == "done"
+    assert any("Shared browser URL: http://127.0.0.1:41001/" in o for o in member.observations)
+
+
 def test_member_stalls_after_repeated_invalid_bash(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -157,7 +198,9 @@ def test_scripted_member_category_tools_mcp(deps):
     assert context["hints"][0]["content"] == "check /flag before deeper recon"
     assert "member_tool_inventory" in context
     assert "TyphonBreaker" in context["member_tool_inventory"]
+    assert "from Typhon import bypassREAD, bypassRCE" in context["member_tool_inventory"]
     assert "TyphonBreaker" in (d.sandbox.read_file("tools.txt") or "")
+    assert "from Typhon import bypassREAD, bypassRCE" in (d.sandbox.read_file("tools.txt") or "")
     assert context["member_tool_inventory_source"]["workspace_path"] == "tools.txt"
     assert context["member_tool_inventory_source"]["docker_path"] == "/tools.txt"
 

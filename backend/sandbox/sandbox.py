@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from backend.sandbox.webui_proxy import webui_proxy_manager
+
 
 @dataclass(slots=True)
 class ExecResult:
@@ -44,6 +46,7 @@ class LocalSandbox:
         self.env = env or {}
         self._lock = threading.Lock()
         self._started = False
+        self._webui_keys: set[tuple[str, str]] = set()
 
     def start(self) -> None:
         with self._lock:
@@ -86,7 +89,15 @@ class LocalSandbox:
         return target.read_text(encoding="utf-8", errors="replace")
 
     def stop(self) -> None:
+        for project_id, member in list(self._webui_keys):
+            webui_proxy_manager.close_member(project_id, member)
+        self._webui_keys.clear()
         self._started = False
+
+    def expose_webui(self, project_id: str, member: str, port: int) -> str:
+        handle = webui_proxy_manager.register(project_id, member, "127.0.0.1", port)
+        self._webui_keys.add((project_id, member))
+        return handle.url
 
     def _safe_path(self, rel_path: str) -> Path:
         p = (self.workspace / rel_path).resolve()

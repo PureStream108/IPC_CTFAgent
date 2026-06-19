@@ -2,8 +2,71 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN set -eux; \
+    cp /etc/apt/sources.list /etc/apt/sources.list.orig; \
+    rm -f /etc/apt/apt.conf.d/docker-clean; \
+    printf '%s\n' \
+      'Acquire::Retries "1";' \
+      'Acquire::http::Timeout "20";' \
+      'Acquire::https::Timeout "20";' \
+      'Acquire::http::Pipeline-Depth "0";' \
+      'Acquire::http::No-Cache "true";' \
+      'Acquire::BrokenProxy "true";' \
+      'Acquire::ForceIPv4 "true";' \
+      > /etc/apt/apt.conf.d/80-ipc-retries; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'set -u' \
+      '' \
+      'if [ "$#" -eq 0 ]; then' \
+      '  echo "apt-install-retry: no packages specified" >&2' \
+      '  exit 2' \
+      'fi' \
+      '' \
+      'mirrors="${APT_MIRRORS:-http://mirrors.ustc.edu.cn/ubuntu http://mirrors.aliyun.com/ubuntu http://mirrors.tuna.tsinghua.edu.cn/ubuntu http://archive.ubuntu.com/ubuntu}"' \
+      'attempt=1' \
+      '' \
+      'set_mirror() {' \
+      '  mirror="$1"' \
+      '  cp /etc/apt/sources.list.orig /etc/apt/sources.list' \
+      '  sed -i \' \
+      '    -e "s|http://archive.ubuntu.com/ubuntu|${mirror}|g" \' \
+      '    -e "s|http://security.ubuntu.com/ubuntu|${mirror}|g" \' \
+      '    /etc/apt/sources.list' \
+      '}' \
+      '' \
+      'for mirror in $mirrors; do' \
+      '  set_mirror "$mirror"' \
+      '  for retry in 1 2; do' \
+      '    echo "apt attempt ${attempt}: ${mirror}" >&2' \
+      '    rm -rf /var/lib/apt/lists/*' \
+      '    if apt-get update; then' \
+      '      if apt-get install -y --no-install-recommends --fix-missing "$@"; then' \
+      '        apt-get clean' \
+      '        rm -rf /var/lib/apt/lists/*' \
+      '        exit 0' \
+      '      fi' \
+      '      echo "apt attempt ${attempt}: running apt-get -f install" >&2' \
+      '      apt-get install -y --no-install-recommends -f || true' \
+      '      if apt-get install -y --no-install-recommends "$@"; then' \
+      '        apt-get clean' \
+      '        rm -rf /var/lib/apt/lists/*' \
+      '        exit 0' \
+      '      fi' \
+      '    fi' \
+      '    delay=$((retry * 5))' \
+      '    echo "apt attempt ${attempt} failed; retrying in ${delay}s" >&2' \
+      '    sleep "${delay}"' \
+      '    attempt=$((attempt + 1))' \
+      '  done' \
+      'done' \
+      '' \
+      'exit 1' \
+      > /usr/local/bin/apt-install-retry; \
+    chmod +x /usr/local/bin/apt-install-retry
+
 # Languages/runtimes (Seed.md: Java/Python/Go/Rust/PHP/Nodejs/Maven).
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         ca-certificates curl wget git build-essential \
         python3 python3-pip python3-venv \
         openjdk-17-jdk maven \
@@ -12,7 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs npm ruby ruby-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         nmap netcat-openbsd binutils file binwalk steghide exiftool \
         gdb sqlmap unzip zip jq openssl checksec \
         xxd bsdmainutils pngcheck imagemagick ffmpeg sox \
@@ -49,7 +112,12 @@ RUN pip3 install --no-cache-dir \
         Pillow pytesseract scipy numpy angr capstone unicorn ropgadget tqdm \
         fpylll volatility3 || true
 
-RUN pip3 install --no-cache-dir torch keras h5py
+RUN pip3 install --no-cache-dir \
+        filelock fsspec jinja2 networkx sympy typing-extensions \
+    && pip3 install --no-cache-dir --no-deps \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch \
+    && pip3 install --no-cache-dir keras h5py
 
 # Extra CTF tools. These are intentionally cloned here instead of copied from
 # IPC_CTFAgent/tools, so Docker builds do not upload the local tools directory.

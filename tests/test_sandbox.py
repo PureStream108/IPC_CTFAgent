@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import sys
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 
 import pytest
+import requests
 
 from backend.sandbox import docker_manager
 from backend.core.resource_manager import ResourceManager
@@ -43,6 +46,37 @@ def test_local_sandbox_timeout(tmp_path):
     res = sb.exec(f'"{sys.executable}" -c "import time; time.sleep(5)"', timeout=1)
     assert res.timed_out
     assert res.exit_code == 124
+
+
+def test_local_sandbox_exposes_webui_via_proxy(tmp_path):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = f"origin {self.path}".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+
+    sb = LocalSandbox("m1", tmp_path / "ws")
+    sb.start()
+    proxy_url = sb.expose_webui("proj_001", "aventurine", upstream.server_address[1])
+    resp = requests.get(f"{proxy_url}/hello?x=1", timeout=5)
+
+    assert resp.status_code == 200
+    assert resp.text == "origin /hello?x=1"
+
+    sb.stop()
+    upstream.shutdown()
+    upstream.server_close()
+    thread.join(timeout=1)
 
 
 def test_resource_limiter_per_agent_cap():

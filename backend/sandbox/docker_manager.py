@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import os
 import shlex
 import sys
 import tarfile
@@ -10,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from backend.sandbox.resource_limiter import ResourceLimiter
 from backend.sandbox.sandbox import ExecResult
+from backend.sandbox.webui_proxy import webui_proxy_manager
 
 
 def _project_root() -> Path:
@@ -132,12 +134,34 @@ class DockerSandbox:
         self.workdir = workdir
         self._container = None
         self._client = None
+        self._container_name = f"ipc-member-{self.name}"
+        self._shared_network: str | None = None
+        self._webui_keys: set[tuple[str, str]] = set()
 
     def _docker(self):
         if self._client is None:
             docker = _load_docker_sdk()
             self._client = docker.from_env()
         return self._client
+
+    def _shared_network_name(self) -> str | None:
+        configured = os.environ.get("IPC_MEMBER_DOCKER_NETWORK", "").strip()
+        if configured:
+            return configured
+        hostname = os.environ.get("HOSTNAME", "").strip()
+        if not hostname:
+            return None
+        try:
+            current = self._docker().containers.get(hostname)
+        except Exception:
+            return None
+        networks = current.attrs.get("NetworkSettings", {}).get("Networks", {})
+        if not networks:
+            return None
+        for name in networks:
+            if name != "bridge":
+                return name
+        return next(iter(networks), None)
 
     def start(self) -> None:
         if self._container is not None:
@@ -150,9 +174,8 @@ class DockerSandbox:
             client = self._docker()
             from docker.errors import NotFound
 
-            cname = f"ipc-member-{self.name}"
             try:
-                existing = client.containers.get(cname)
+                existing = client.containers.get(self._container_name)
                 existing.remove(force=True)
             except NotFound:
                 pass
@@ -160,12 +183,19 @@ class DockerSandbox:
                 "image": self.image,
                 "command": ["sleep", "infinity"],
                 "detach": True,
-                "name": cname,
+                "name": self._container_name,
                 "working_dir": "/",
                 "mem_limit": f"{int(self.memory_gb)}g",
-                "network_mode": "bridge" if self.network else "none",
                 "extra_hosts": {"host.docker.internal": "host-gateway"},
             }
+            if self.network:
+                self._shared_network = self._shared_network_name()
+                if self._shared_network:
+                    run_kwargs["network"] = self._shared_network
+                else:
+                    run_kwargs["network_mode"] = "bridge"
+            else:
+                run_kwargs["network_mode"] = "none"
             self._container = client.containers.run(**run_kwargs)
             quoted_workdir = shlex.quote(self.workdir)
             setup = (
@@ -231,6 +261,9 @@ class DockerSandbox:
         return res.stdout
 
     def stop(self) -> None:
+        for project_id, member in list(self._webui_keys):
+            webui_proxy_manager.close_member(project_id, member)
+        self._webui_keys.clear()
         if self._container is not None:
             try:
                 self._container.remove(force=True)
@@ -239,3 +272,23 @@ class DockerSandbox:
             self._container = None
         if self.limiter is not None:
             self.limiter.release(self.name)
+
+    def expose_webui(self, project_id: str, member: str, port: int) -> str:
+        if self._container is None:
+            self.start()
+        target_host = self._proxy_target_host()
+        handle = webui_proxy_manager.register(project_id, member, target_host, port)
+        self._webui_keys.add((project_id, member))
+        return handle.url
+
+    def _proxy_target_host(self) -> str:
+        if self._container is None:
+            raise RuntimeError("sandbox container is not running")
+        if self._shared_network:
+            return self._container_name
+        networks = self._container.attrs.get("NetworkSettings", {}).get("Networks", {})
+        for data in networks.values():
+            ip = data.get("IPAddress", "")
+            if ip:
+                return ip
+        return self._container_name

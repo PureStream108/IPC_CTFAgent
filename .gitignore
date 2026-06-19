@@ -13,6 +13,7 @@ memory/
 projects/
 Wp/
 exports/
+examples/
 
 # C extensions
 *.so

@@ -50,6 +50,8 @@ def test_index_served(client):
     assert "for(const a of d.agents)" in body
     assert "memberForIntent(intent)" in body
     assert "intentDisplaySources(intent)" in body
+    assert 'originDisplaySource' in body
+    assert 'fid&&fid!=="origin"' in body
     assert "memberContextSource" in body
     assert 'etype:"context"' in body
     assert '"start","assign","report","flag","wp","return"' in body

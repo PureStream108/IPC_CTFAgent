@@ -8,6 +8,14 @@ ARG GHIDRA_DATE=20260605
 ARG GHIDRA_TAG=Ghidra_12.1.2_build
 
 RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "30";' \
+        'Acquire::https::Timeout "30";' \
+        'Acquire::http::Pipeline-Depth "0";' \
+        'Acquire::http::No-Cache "true";' \
+        'Acquire::BrokenProxy "true";' \
+        > /etc/apt/apt.conf.d/80-ipc-retries \
     && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git docker.io unzip binutils chromium \
     && rm -rf /var/lib/apt/lists/*

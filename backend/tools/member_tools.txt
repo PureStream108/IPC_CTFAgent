@@ -1,5 +1,4 @@
-IPC_CTFAgent member sandbox tool inventory
-==========================================
+tool inventory
 
 Purpose
 -------
@@ -19,6 +18,9 @@ Execution model
   antsword, or the virtual "tools" server with list_tools/get_tool.
 - Browser/Ghidra/ZAP are shared Docker-backed MCP runtimes, not tools installed
   separately in each Member container.
+- If a sandbox command starts a localhost web UI, look for the observed
+  `[webui:PORT] Shared browser URL: ...` note and open that URL with the
+  browser MCP instead of raw `127.0.0.1:PORT`.
 - Use action "tool_search" when the category-specific exposed tools do not show
   what you need.
 
@@ -59,8 +61,12 @@ Network and web tools
 - Fenjing: Jinja2/Flask SSTI exploitation helper. Path:
   /workspace/tools/Fenjing, also installed as a Python package when build
   succeeds.
-- TyphonBreaker: Python pyjail/sandbox escape helper for blacklist,
-  restricted-builtins, and object graph pivots.
+- TyphonBreaker: Python pyjail/sandbox payload generator for blacklist,
+  restricted-builtins, and object graph pivots. For headless use, import the
+  Python API with `from Typhon import bypassREAD, bypassRCE` (capitalized
+  module name). Use bypassREAD/bypassRCE with local_scope and banned_chr to
+  generate candidate payloads, then POST/GET the chosen payload to the target
+  endpoint yourself with curl/requests.
 - Flask PIN helper: Werkzeug debugger PIN and Flask cookie helper. Path:
   /workspace/tools/Flask-cookie-generation-based-on-PIN-code-main.
 - flask-session-cookie-manager: decode/sign Flask session cookies when a secret
@@ -151,7 +157,8 @@ Common first moves by challenge shape
 - Unknown attachment: file, ls -la, strings, xxd/head, binwalk, exiftool.
 - Web URL/service: curl -i, nmap -sV, directory discovery, then targeted tools
   such as sqlmap, Fenjing, commix, or WhatWaf only when evidence points there.
-- Python pyjail/sandbox: read source, run small probes, then try TyphonBreaker or
+- Python pyjail/sandbox: read source, run small probes, then use
+  `from Typhon import bypassREAD, bypassRCE` to generate payloads or continue
   scripted object-graph exploration.
 - Flask/Werkzeug: inspect source/config, cookies/JWTs, session signing, SSTI,
   debugger PIN evidence.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,10 @@ from backend.sandbox.sandbox import Sandbox
 from backend.tools.tool_mcp import build_category_tools_mcp
 from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
 from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
+
+_LOCAL_WEBUI_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})\b")
+_PORT_FLAG_RE = re.compile(r"(?:^|\s)(?:--port|-p)\s+(\d{2,5})(?:\s|$)")
+_WEBUI_HINT_RE = re.compile(r"\b(webui|gradio|streamlit|jupyter|flask|uvicorn)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -204,6 +209,7 @@ class BaseMember:
                 return DispatchResult(invalid_action=True)
             res = d.sandbox.exec(cmd, timeout=60)
             self._observe(f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip())
+            self._observe_webui_links(project_id, cmd, res.stdout, res.stderr)
             d.logger.tool(
                 "bash",
                 project_id,
@@ -738,6 +744,33 @@ class BaseMember:
             "pending_bumps": pending_bumps,
             "bump_insights": sibling_insights,
             "previous_attempts": previous_attempts[-5:],
+        }
+
+    def _observe_webui_links(self, project_id: str, command: str, stdout: str, stderr: str) -> None:
+        expose = getattr(self.deps.sandbox, "expose_webui", None)
+        if not callable(expose):
+            return
+        ports = self._discover_webui_ports(command, stdout, stderr)
+        for port in sorted(ports):
+            try:
+                url = expose(project_id, self.name, port)
+            except Exception:
+                continue
+            self._observe(
+                f"[webui:{port}] Shared browser URL: {url}/ "
+                f"(open with MCP browser.navigate or browser.screenshot)"
+            )
+
+    def _discover_webui_ports(self, command: str, stdout: str, stderr: str) -> set[int]:
+        ports = {int(match.group(1)) for match in _LOCAL_WEBUI_URL_RE.finditer(f"{stdout}\n{stderr}\n{command}")}
+        if ports:
+            return {port for port in ports if 1 <= port <= 65535}
+        if not _WEBUI_HINT_RE.search(command):
+            return set()
+        return {
+            int(match.group(1))
+            for match in _PORT_FLAG_RE.finditer(command)
+            if 1 <= int(match.group(1)) <= 65535
         }
 
     def _observe(self, text: str) -> None:

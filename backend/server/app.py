@@ -16,6 +16,7 @@ from backend.api import project as project_router
 from backend.api import solve as solve_router
 from backend.api import wp as wp_router
 from backend.core.state import AppState
+from backend.sandbox.webui_proxy import webui_proxy_manager
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -38,6 +39,8 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         yield
         if state.orchestrator is not None:
             state.orchestrator.shutdown()
+        state.pool.stop_all()
+        webui_proxy_manager.close_all()
 
     app = FastAPI(title="IPC_CTFAgent", description="Multi-agent CTF solver", lifespan=lifespan)
 

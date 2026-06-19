@@ -31,11 +31,16 @@ tools:
     tags: [ssti, jinja2, flask, template-injection, web]
     when_to_use: Server-side template injection in Flask/Jinja2.
   - name: typhonbreaker
-    description: Python pyjail/sandbox escape helper for restricted builtins, blacklist, and object-graph pivots.
+    description: Python pyjail/sandbox payload generator for restricted builtins, blacklist, and object-graph pivots.
     path: ""
-    exec: typhonbreaker
+    exec: python3 -c "from Typhon import bypassREAD, bypassRCE; print('Use bypassREAD/bypassRCE to generate payloads, then POST/GET them yourself')"
     tags: [python, pyjail, sandbox, jail, blacklist, flask, web]
-    when_to_use: Python exec/eval sandbox, pyjail, or restricted-builtins challenge where manual subclass traversal would be slow.
+    when_to_use: >
+      Python exec/eval sandbox, pyjail, or restricted-builtins challenge where
+      manual subclass traversal would be slow. Headless use is via Python API:
+      `from Typhon import bypassREAD, bypassRCE`; call bypassREAD(...)/bypassRCE(...)
+      with local_scope and banned_chr to generate payloads, then POST/GET the chosen
+      payload to the target endpoint yourself with curl/requests. 
   - name: flask-pin
     description: Generate Werkzeug debugger PIN / forge Flask session from leaked data.
     path: tools/Flask-cookie-generation-based-on-PIN-code-main
