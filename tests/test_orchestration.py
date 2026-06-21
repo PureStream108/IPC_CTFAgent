@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -226,7 +227,7 @@ def test_reinforcement_pipeline_with_scripts(state):
     orch.shutdown()
 
 
-def test_orchestrator_prefers_newest_unclaimed_intent(state):
+def test_orchestrator_dispatches_multiple_unclaimed_intents(state):
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "web")
@@ -239,11 +240,74 @@ def test_orchestrator_prefers_newest_unclaimed_intent(state):
 
     def capture_launch(project_id, member_name, intent_id, category, is_initial):
         launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
 
     orch._launch_member = capture_launch
     orch._dispatch_project(pid)
-    assert launched == [(pid, "aventurine", newest.id, "web", False)]
+    assert launched == [
+        (pid, "aventurine", newest.id, "web", False),
+        (pid, "pearl", old.id, "web", False),
+    ]
     assert old.id != newest.id
+    orch.shutdown()
+
+
+def test_orchestrator_dispatches_unclaimed_while_member_is_running(state):
+    from backend.core.orchestrator import Orchestrator
+
+    class RunningMember:
+        def stop(self):
+            pass
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        running = edge_store.create_intent(conn, pid, ["origin"], "running branch", "diamond", worker="aventurine")
+        waiting = edge_store.create_intent(conn, pid, ["origin"], "parallel branch", "diamond")
+        graph_store.add_agent(conn, pid, "aventurine", "member", state="active", start_fact_id="origin")
+
+    orch = Orchestrator(state, max_workers=3)
+    future = Future()
+    with orch._lock:
+        orch._members[pid] = {"aventurine": RunningMember()}
+        orch._task_index[(pid, running.id)] = future
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    assert launched == [(pid, "pearl", waiting.id, "web", False)]
+    with orch._lock:
+        orch._members.pop(pid, None)
+        orch._task_index.clear()
+    orch.shutdown()
+
+
+def test_orchestrator_prefers_creator_and_explore_member_for_new_intents(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.add_agent(conn, pid, "pearl", "member", state="idle", start_fact_id="origin")
+        graph_store.add_agent(conn, pid, "jade", "member", state="idle", start_fact_id="origin")
+        pearl_intent = edge_store.create_intent(conn, pid, ["origin"], "pearl follow-up", "pearl")
+        jade_intent = edge_store.create_intent(conn, pid, ["origin"], "jade assigned branch", "diamond")
+        graph_store.add_link(conn, pid, "jade", f"intent:{jade_intent.id}", "explore")
+
+    orch = Orchestrator(state, max_workers=3)
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    by_intent = {intent_id: member_name for _, member_name, intent_id, _, _ in launched}
+    assert by_intent[jade_intent.id] == "jade"
+    assert by_intent[pearl_intent.id] == "pearl"
     orch.shutdown()
 
 
@@ -261,8 +325,10 @@ def test_member_assignment_records_graph_entry_fact(state):
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
     topaz = next(agent for agent in detail.agents if agent.name == "topaz")
+    assigned = next(i for i in detail.intents if i.id == intent.id)
     assert topaz.start_fact_id == fact.id
     assert topaz.state == "active"
+    assert assigned.worker == "topaz"
     assert any(link.src == "diamond" and link.dst == "topaz" and link.kind == "assign" for link in detail.agent_links)
     assert any(link.src == "topaz" and link.dst == f"intent:{intent.id}" and link.kind == "explore" for link in detail.agent_links)
     orch.shutdown()

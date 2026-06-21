@@ -56,7 +56,6 @@ def stop_solving(project_id: str, state: AppState = Depends(get_state)):
         if row["status"] == "completed":
             raise HTTPException(409, "Completed projects cannot be stopped")
         graph_store.set_status(conn, project_id, "stopped")
-        # release open claims + reason lease
         conn.execute(
             "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
             (project_id,),

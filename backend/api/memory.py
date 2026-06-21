@@ -47,6 +47,5 @@ def search_memory(q: str, category: str | None = None, limit: int = 5, state: Ap
 
 @router.post("/memory/derive")
 def derive_memory(state: AppState = Depends(get_state)):
-    """Export the whole memory as an Obsidian Vault (+ Derive button)."""
     vault = export_obsidian(state.memory, state.root / "memory" / "export" / "vault")
     return {"vault": str(vault)}

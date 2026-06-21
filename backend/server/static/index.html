@@ -98,7 +98,7 @@
     </button>
     <button class="btn h-7 px-2.5 rounded-lg text-xs inline-flex items-center gap-1.5" @click="showNewProject=true">
       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-      + New Project
+      New Project
     </button>
     <div class="flex-1"></div>
     <template x-if="current">
@@ -260,6 +260,7 @@
                 <div class="pt-4 border-t border-slate-100 space-y-3 text-xs">
                   <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">From</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedIntentRecord().from.join(', ')"></span></div>
                   <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">To</span><span class="font-mono text-slate-600 text-right break-all" x-text="selectedIntentRecord().to || '-'"></span></div>
+                  <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Display Source</span><span class="text-slate-600 text-right break-all" x-text="intentDisplayOwner(selectedIntentRecord()) || '-'"></span></div>
                   <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Creator</span><span class="text-slate-600 text-right break-all" x-text="selectedIntentRecord().creator"></span></div>
                   <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Worker</span><span class="text-slate-600 text-right break-all" x-text="selectedIntentRecord().worker || '-'"></span></div>
                   <div class="flex items-start justify-between gap-3"><span class="text-slate-400 shrink-0">Heartbeat</span><span class="text-slate-600 text-right break-words" x-text="selectedIntentRecord().last_heartbeat_at ? formatTime(selectedIntentRecord().last_heartbeat_at) : '-'"></span></div>
@@ -813,8 +814,8 @@
         for(const i of d.intents){
           const intentNode=this.intentNodeId(i);
           const ntype=i.to ? "intent_done" : (i.worker ? "in_progress" : "unclaimed");
-          const label=i.to ? `${i.id}: ${this.truncate(i.description,36)}` : "?";
-          add(intentNode,{label,ntype,kind:"intent",intentId:i.id,description:i.description});
+          const label=this.intentGraphLabel(i);
+          add(intentNode,{label,ntype,kind:"intent",intentId:i.id,description:i.description,creator:i.creator,worker:i.worker});
           addDerivation(i,intentNode,i.to ? "derive" : "explore",i.to ? "" : (i.description||"explore"));
           if(i.to&&have.has("fact:"+i.to)){
             edges.push({data:{id:this.intentResultEdgeId(i),source:intentNode,target:"fact:"+i.to,etype:"create",intentId:i.id,label:""}});
@@ -831,10 +832,16 @@
       truncate(text,n){ text=(text||"").trim(); return text.length>n ? text.slice(0,n-1)+"..." : text; },
       agentRecord(name){ return this.current ? this.current.agents.find(a=>a.name===name) || null : null; },
       agentRole(name){ return this.agentRecord(name)?.role || ""; },
-      originDisplaySource(fallback=null){ return this.agentRecord("aventurine") ? "aventurine" : fallback; },
+      originDisplaySource(owner=null){ return owner || (this.agentRecord("aventurine") ? "aventurine" : null); },
       intentNodeId(intent){ const id=typeof intent==="string" ? intent : intent?.id; return "intent:"+id; },
       derivationEdgeId(intent,source){ return `P${intent.id}_${source.replace(/[^A-Za-z0-9_-]/g,"_")}`; },
       intentResultEdgeId(intent){ return `R${intent.id}_${String(intent.to||"open").replace(/[^A-Za-z0-9_-]/g,"_")}`; },
+      intentGraphLabel(intent){
+        const desc=this.truncate(intent?.description || "explore", intent?.to ? 34 : 28);
+        const creator=intent?.creator || "-";
+        const worker=intent?.worker || "-";
+        return `${intent?.id || "intent"}: ${desc}\nC: ${creator}\nW: ${worker}`;
+      },
       memberContextSource(name){
         const agent=this.agentRecord(name);
         if(!agent||agent.role!=="member"||!agent.start_fact_id||agent.start_fact_id==="origin") return null;
@@ -846,11 +853,13 @@
       },
       memberForIntent(intent){
         if(!this.current||!intent) return null;
+        if(intent.creator && this.agentRole(intent.creator)==="member") return intent.creator;
         const linked=this.current.agent_links.find(l=>l.kind==="explore" && l.dst===`intent:${intent.id}` && this.agentRole(l.src)==="member");
         if(linked) return linked.src;
         if(intent.worker && this.agentRole(intent.worker)==="member") return intent.worker;
         return null;
       },
+      intentDisplayOwner(intent){ return this.memberForIntent(intent); },
       intentDisplaySources(intent){
         const owner=this.memberForIntent(intent);
         const from=Array.isArray(intent?.from) ? intent.from : [];
@@ -873,8 +882,8 @@
           {selector:'node[ntype="flag"]',style:{'background-color':'#10b981','shape':'diamond','width':52,'height':52}},
           {selector:'node[ntype="wp"]',style:{'background-color':'#38bdf8'}},
           {selector:'node[ntype="intent_done"]',style:{'background-color':'#7c3aed','font-size':'10px','text-max-width':'112px'}},
-          {selector:'node[ntype="in_progress"]',style:{'background-color':'#f59e0b','background-opacity':0.85,'shape':'ellipse','label':'?','width':22,'height':22,'border-width':2,'border-color':'#d97706','font-size':'11px'}},
-          {selector:'node[ntype="unclaimed"]',style:{'background-color':'#cbd5e1','background-opacity':0.55,'shape':'ellipse','label':'?','color':'#94a3b8','width':20,'height':20,'border-width':1.5,'border-color':'#94a3b8','border-style':'dashed','font-size':'11px'}},
+          {selector:'node[ntype="in_progress"]',style:{'background-color':'#f59e0b','background-opacity':0.9,'shape':'round-rectangle','border-width':2,'border-color':'#d97706','font-size':'9px','text-max-width':'108px'}},
+          {selector:'node[ntype="unclaimed"]',style:{'background-color':'#cbd5e1','background-opacity':0.72,'shape':'round-rectangle','color':'#475569','border-width':1.5,'border-color':'#94a3b8','border-style':'dashed','font-size':'9px','text-max-width':'108px'}},
           {selector:'edge',style:{'width':1.6,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier','font-size':'7px','color':'#94a3b8','label':'data(label)','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'86px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.88,'text-background-padding':'2px','arrow-scale':0.85}},
           {selector:'edge[etype="create"]',style:{'line-color':'#10b981','target-arrow-color':'#10b981','width':2.1,'color':'#047857','text-background-color':'#ecfdf5'}},
           {selector:'edge[etype="derive"]',style:{'line-color':'#a78bfa','target-arrow-color':'#a78bfa','width':1.8,'color':'#6d28d9','text-background-color':'#f5f3ff'}},
@@ -889,11 +898,12 @@
         ]; },
       layoutOpts(fit=true, animate=true){ return {name:'dagre',rankDir:'TB',ranker:'longest-path',nodeSep:70,rankSep:90,edgeSep:22,padding:50,fit,animate,animationDuration:400,animationEasing:'ease-in-out-cubic'}; },
       nodeSize(label,ntype){
-        if(ntype==="in_progress"||ntype==="unclaimed") return {width:22,height:22};
         if(ntype==="flag") return {width:52,height:52};
-        const preset=["origin","goal"].includes(ntype)
-          ? {fontSize:11,maxTextWidth:92,minWidth:58,minHeight:38,paddingX:10,paddingY:10}
-          : {fontSize:10,maxTextWidth:116,minWidth:52,minHeight:34,paddingX:10,paddingY:10};
+        const preset=ntype==="in_progress"||ntype==="unclaimed"
+          ? {fontSize:9,maxTextWidth:108,minWidth:76,minHeight:50,paddingX:8,paddingY:8}
+          : ["origin","goal"].includes(ntype)
+            ? {fontSize:11,maxTextWidth:92,minWidth:58,minHeight:38,paddingX:10,paddingY:10}
+            : {fontSize:10,maxTextWidth:116,minWidth:52,minHeight:34,paddingX:10,paddingY:10};
         const measured=this.measureWrappedText(label,preset.maxTextWidth,preset.fontSize);
         return {
           width:Math.max(preset.minWidth,Math.ceil(measured.width+preset.paddingX*2)),

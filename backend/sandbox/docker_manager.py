@@ -124,6 +124,7 @@ class DockerSandbox:
         network: bool = True,
         limiter: ResourceLimiter | None = None,
         workdir: str = "/workspace",
+        attachments_dir: str | Path | None = None,
     ):
         self.name = name
         self.image = image
@@ -132,6 +133,8 @@ class DockerSandbox:
         self.network = network
         self.limiter = limiter
         self.workdir = workdir
+        self.attachments_dir = Path(attachments_dir) if attachments_dir is not None else None
+        self.attachment_mount_path = str(PurePosixPath(self.workdir).parent / "attachments")
         self._container = None
         self._client = None
         self._container_name = f"ipc-member-{self.name}"
@@ -214,6 +217,7 @@ class DockerSandbox:
                 else:
                     detail = str(output)
                 raise RuntimeError(f"failed to initialize sandbox workspace {self.workdir}: {detail.strip()}")
+            self._copy_attachments()
         except Exception:
             if self._container is not None:
                 try:
@@ -224,6 +228,30 @@ class DockerSandbox:
             if reserved and self.limiter is not None:
                 self.limiter.release(self.name)
             raise
+
+    def visible_attachment_path(self, filename: str, original_path: str | None = None) -> str:
+        safe_name = PurePosixPath(filename).name
+        return str(PurePosixPath(self.attachment_mount_path) / safe_name)
+
+    def _copy_attachments(self) -> None:
+        if self._container is None or self.attachments_dir is None:
+            return
+        src = self.attachments_dir
+        if not src.exists() or not src.is_dir():
+            return
+        project_root = str(PurePosixPath(self.workdir).parent)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as tar:
+            root_info = tarfile.TarInfo("attachments")
+            root_info.type = tarfile.DIRTYPE
+            root_info.mode = 0o755
+            tar.addfile(root_info)
+            for path in sorted(src.rglob("*"), key=lambda p: str(p.relative_to(src))):
+                rel = path.relative_to(src)
+                arcname = PurePosixPath("attachments", *rel.parts).as_posix()
+                tar.add(path, arcname=arcname, recursive=False)
+        stream.seek(0)
+        self._container.put_archive(project_root, stream.getvalue())
 
     def exec(self, command: str, timeout: int = 60) -> ExecResult:
         if self._container is None:

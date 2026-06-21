@@ -66,9 +66,6 @@ def derive_project_logs(state: AppState = Depends(get_state)):
     for kind, _ in LOG_GROUPS:
         folder = target / state.logger.KINDS[kind]
         folder.mkdir(parents=True, exist_ok=True)
-        for pattern in ("*.jsonl", "*.json"):
-            for stale in folder.glob(pattern):
-                stale.unlink()
         files[state.logger.KINDS[kind]] = []
         for project in projects:
             filename = project.log_filename or f"{project.id}.jsonl"

@@ -203,6 +203,36 @@ def test_scripted_member_category_tools_mcp(deps):
     assert "from Typhon import bypassREAD, bypassRCE" in (d.sandbox.read_file("tools.txt") or "")
     assert context["member_tool_inventory_source"]["workspace_path"] == "tools.txt"
     assert context["member_tool_inventory_source"]["docker_path"] == "/tools.txt"
+    assert context["attachment_true"] is False
+    assert context["attachments"] == []
+
+
+def test_member_context_uses_sandbox_visible_attachment_paths(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    with db.connect() as conn:
+        graph_store.create_attachment(
+            conn,
+            pid,
+            "chal.zip",
+            "/app/projects/proj_001/attachments/chal.zip",
+        )
+    d.sandbox.visible_attachment_path = (
+        lambda filename, original_path: f"/workspace/proj_001/attachments/{filename}"
+    )
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d)
+
+    context = member._build_context(pid, iid, "web", 1, False, False)
+
+    assert context["attachment_true"] is True
+    assert context["attachments"] == [
+        {
+            "id": "a001",
+            "filename": "chal.zip",
+            "path": "/workspace/proj_001/attachments/chal.zip",
+            "created_at": context["attachments"][0]["created_at"],
+        }
+    ]
 
 
 def test_member_report_defaults_to_low_when_unspecified(deps):

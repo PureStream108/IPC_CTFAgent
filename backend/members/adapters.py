@@ -92,6 +92,7 @@ _SYSTEM_PROMPT = (
     "Never claim a fake flag; use the flag action only for a confirmed real flag. "
     "Always inspect attachments and other provided materials first if they exist, because they may contain "
     "the real foothold or clue. If the current path is not moving, switch angle instead of repeating the same recon. "
+    "If context attachment_true is false, no attachment was uploaded for the project; do not search for or read attachment files. "
     "Read the member_tool_inventory in your context before choosing tools; it summarizes installed CLI tools, "
     "Python libraries, MCP helpers, and when to use them. Check exposed tools or use tool_search for pyjail/sandbox "
     "helpers before spending many steps on manual subclass enumeration. "

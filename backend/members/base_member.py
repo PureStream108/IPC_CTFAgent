@@ -76,8 +76,6 @@ class BaseMember:
     def stop(self) -> None:
         self._stop.set()
 
-    # ---- main loop ----
-
     def solve(self, project_id: str, intent_id: str, category: str, is_initial: bool = False) -> SolveResult:
         d = self.deps
         d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
@@ -683,6 +681,15 @@ class BaseMember:
             for r in reports
             if r.member == self.name or (assigned and r.node_id in (None, assigned.to))
         ]
+        attachments = [
+            {"id": a.id, "filename": a.filename, "path": a.path, "created_at": a.created_at}
+            for a in detail.attachments
+        ]
+        attachment_true = bool(attachments)
+        attachment_path = getattr(d.sandbox, "visible_attachment_path", None)
+        if callable(attachment_path):
+            for attachment in attachments:
+                attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
@@ -701,6 +708,7 @@ class BaseMember:
                 "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
                 "If sandbox_backend is DockerSandbox, use Linux commands inside the container.",
                 "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
+                "If attachment_true is true, inspect the listed attachments before blind target probing.",
             ],
             "evaluate_now": evaluate_now,
             "eval_interval": d.eval_interval,
@@ -730,10 +738,8 @@ class BaseMember:
             "available_mcps": d.mcps.names(),
             "public_mcps": list(PUBLIC_MCPS),
             "available_languages": list(LANGUAGES),
-            "attachments": [
-                {"id": a.id, "filename": a.filename, "path": a.path, "created_at": a.created_at}
-                for a in detail.attachments
-            ],
+            "attachment_true": attachment_true,
+            "attachments": attachments,
             "recent_observations": self.observations[-6:],
             "stuckness_state": {
                 "recent_action_signatures": len(self._recent_action_sigs),

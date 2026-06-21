@@ -123,7 +123,6 @@ CREATE TABLE IF NOT EXISTS attachments (
     PRIMARY KEY (id, project_id)
 );
 
--- Global completion announcements (题目名称 + FLAG) for the broadcast bar.
 CREATE TABLE IF NOT EXISTS broadcasts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT,

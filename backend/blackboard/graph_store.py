@@ -142,7 +142,6 @@ def create_project(
     category: str,
     hints: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Create a project with origin/goal facts and the IPC + Diamond agents."""
     pid = next_project_id(conn)
     now = utcnow()
     used = [
@@ -232,9 +231,6 @@ def list_hints(conn: sqlite3.Connection, project_id: str) -> list[Hint]:
         "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at, rowid", (project_id,)
     ).fetchall()
     return [Hint(id=r["id"], content=r["content"], creator=r["creator"], created_at=r["created_at"]) for r in rows]
-
-
-# ---------- agents + links (orchestration overlay) ----------
 
 
 def add_agent(

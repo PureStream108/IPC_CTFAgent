@@ -149,11 +149,11 @@ def test_container_pool_isolated_workspaces(tmp_path):
     assert pool.get("proj_001", "aventurine") is sb1
 
 
-def test_container_pool_docker_isolates_member_containers_and_workdirs(monkeypatch):
+def test_container_pool_docker_isolates_member_containers_and_workdirs(tmp_path, monkeypatch):
     created = []
 
     class FakeDockerSandbox:
-        def __init__(self, name, image, env, memory_gb, network, limiter, workdir):
+        def __init__(self, name, image, env, memory_gb, network, limiter, workdir, attachments_dir=None):
             self.name = name
             self.image = image
             self.env = env
@@ -161,6 +161,7 @@ def test_container_pool_docker_isolates_member_containers_and_workdirs(monkeypat
             self.network = network
             self.limiter = limiter
             self.workdir = workdir
+            self.attachments_dir = attachments_dir
             self.started = False
             created.append(self)
 
@@ -172,7 +173,12 @@ def test_container_pool_docker_isolates_member_containers_and_workdirs(monkeypat
 
     monkeypatch.setattr(docker_manager, "DockerSandbox", FakeDockerSandbox)
 
-    pool = ContainerPool(backend="docker", image="ipc-member:latest", limiter=ResourceLimiter())
+    pool = ContainerPool(
+        backend="docker",
+        image="ipc-member:latest",
+        limiter=ResourceLimiter(),
+        workspace_root=tmp_path / "projects",
+    )
     sb1 = pool.get("proj_001", "aventurine")
     sb2 = pool.get("proj_001", "pearl")
 
@@ -181,6 +187,8 @@ def test_container_pool_docker_isolates_member_containers_and_workdirs(monkeypat
     assert sb2.name == "proj_001-pearl"
     assert sb1.workdir == "/workspace/proj_001/aventurine"
     assert sb2.workdir == "/workspace/proj_001/pearl"
+    assert sb1.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
+    assert sb2.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
     assert sb1.started is True
     assert sb2.started is True
     assert pool.get("proj_001", "aventurine") is sb1

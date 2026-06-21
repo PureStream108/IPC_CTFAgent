@@ -67,6 +67,7 @@ class ContainerPool:
                 network=self.network,
                 limiter=self.limiter,
                 workdir=f"/workspace/{_safe_segment(project_id)}/{_safe_segment(member)}",
+                attachments_dir=self.workspace_root / project_id / "attachments",
             )
         ws = self.workspace_root / project_id / "sandbox" / member
         return LocalSandbox(name=name, workspace=ws, env=env)

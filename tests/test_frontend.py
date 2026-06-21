@@ -37,7 +37,7 @@ def test_index_served(client):
     assert "project_log" in body
     assert "llm_log" in body
     assert "memory_log" in body
-    assert "+ New Project" in body
+    assert "New Project" in body
     assert "Memory" in body
     assert "Add Hint" in body
     # dagre remains the hidden graph layout engine
@@ -51,6 +51,10 @@ def test_index_served(client):
     assert "memberForIntent(intent)" in body
     assert "intentDisplaySources(intent)" in body
     assert 'originDisplaySource' in body
+    assert 'originDisplaySource(owner=null){ return owner || (this.agentRecord("aventurine") ? "aventurine" : null); }' in body
+    assert 'intent.creator && this.agentRole(intent.creator)==="member"' in body
+    assert 'Display Source' in body
+    assert 'C: ${creator}\\nW: ${worker}' in body
     assert 'fid&&fid!=="origin"' in body
     assert "memberContextSource" in body
     assert 'etype:"context"' in body

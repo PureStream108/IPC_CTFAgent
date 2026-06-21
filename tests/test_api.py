@@ -172,6 +172,29 @@ def test_project_logs_list_and_derive(client):
     assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.jsonl").exists()
 
 
+def test_delete_project_preserves_derived_logs(client):
+    detail = client.post(
+        "/projects",
+        json={"title": "Archived", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()
+    pid = detail["project"]["id"]
+
+    r = client.post("/logs/derive")
+    assert r.status_code == 200
+    export = client.app.state.ipc.log_export_dir / "project_logs" / "Archived.jsonl"
+    assert export.exists()
+    exported_text = export.read_text(encoding="utf-8")
+
+    r = client.delete(f"/projects/{pid}")
+    assert r.status_code == 204
+    assert export.exists()
+
+    r = client.post("/logs/derive")
+    assert r.status_code == 200
+    assert export.exists()
+    assert export.read_text(encoding="utf-8") == exported_text
+
+
 def test_report_submission(client):
     pid = client.post("/projects", json={"title": "A", "origin": "o", "goal": "g", "category": "web"}).json()["project"]["id"]
     r = client.post(f"/projects/{pid}/reports", json={

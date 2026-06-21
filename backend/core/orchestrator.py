@@ -220,10 +220,10 @@ class Orchestrator:
                 return m
         return None
 
-    def _launch_member(self, project_id, member_name, intent_id, category, is_initial) -> None:
+    def _launch_member(self, project_id, member_name, intent_id, category, is_initial) -> bool:
         cfg = self._member_config(member_name)
         if cfg is None:
-            return
+            return False
         if not self.resources.can_admit_member():
             self.state.logger.project(
                 "member_admission_denied",
@@ -232,7 +232,7 @@ class Orchestrator:
                 reserved_memory_gb=self.state.limiter.reserved_memory_gb,
                 active_sandboxes=self.state.pool.active_keys(),
             )
-            return
+            return False
         sandbox = self.resources.sandbox_for(project_id, member_name)
         self._record_member_assignment(project_id, member_name, intent_id)
         deps = MemberDeps(
@@ -256,6 +256,7 @@ class Orchestrator:
         with self._lock:
             self._futures.setdefault(project_id, []).append(future)
             self._task_index[(project_id, intent_id)] = future
+        return True
 
     def _record_member_assignment(self, project_id: str, member_name: str, intent_id: str) -> None:
         with self.state.db.connect() as conn:
@@ -281,6 +282,7 @@ class Orchestrator:
                 "WHERE project_id = ? AND name = ?",
                 (start_fact_id, project_id, member_name),
             )
+            edge_store.claim_intent(conn, project_id, intent_id, member_name)
             if not graph_store.link_exists(conn, project_id, "diamond", member_name, "assign"):
                 graph_store.add_link(conn, project_id, "diamond", member_name, "assign")
             if not graph_store.link_exists(conn, project_id, member_name, f"intent:{intent_id}", "explore"):
@@ -403,7 +405,10 @@ class Orchestrator:
     def _dispatch_project(self, project_id: str) -> None:
         with self._lock:
             project_tasks = {k: f for k, f in self._task_index.items() if k[0] == project_id and not f.done()}
-        if len(project_tasks) >= self.state.config.runtime.max_members_per_report:
+            active_members = set(self._members.get(project_id, {}).keys())
+        max_running = self.state.config.runtime.max_members_per_report
+        available_slots = max_running - len(project_tasks)
+        if available_slots <= 0:
             return
         with self.state.db.connect() as conn:
             detail = graph_store.project_detail(conn, project_id)
@@ -412,11 +417,10 @@ class Orchestrator:
         running = {intent_id for (pid, intent_id), fut in project_tasks.items() if pid == project_id and not fut.done()}
         open_intents = [i for i in detail.intents if i.to is None]
         category = detail.project.category
-        active_members = self._members.get(project_id, {})
         claimable = [i for i in open_intents if i.id not in running]
         claimed = [
             i for i in claimable
-            if i.worker is not None and i.worker in active_members
+            if i.worker is not None and i.worker not in active_members
         ]
         unclaimed = [i for i in claimable if i.worker is None]
         if not claimed and not unclaimed:
@@ -447,17 +451,27 @@ class Orchestrator:
             + sorted(unclaimed, key=lambda i: (i.created_at, i.id), reverse=True)
         )
         for intent in ordered:
+            if available_slots <= 0:
+                break
             if intent.id in running:
                 continue
-            if intent.worker is not None and intent.worker not in active_members:
+            if intent.worker is not None and intent.worker in active_members:
                 continue
-            if intent.worker is None and project_tasks:
-                continue
-            member_name = intent.worker or self._pick_idle_member(project_id)
+            member_name = self._select_member_for_intent(project_id, detail, intent, active_members)
             if member_name is None:
                 continue
-            self._launch_member(project_id, member_name, intent.id, category, intent.description.startswith("bootstrap"))
-            return
+            launched = self._launch_member(
+                project_id,
+                member_name,
+                intent.id,
+                category,
+                intent.description.startswith("bootstrap"),
+            )
+            if launched is False:
+                continue
+            running.add(intent.id)
+            active_members.add(member_name)
+            available_slots -= 1
 
     def _reconcile_resources(self) -> None:
         with self.state.db.connect() as conn:
@@ -475,13 +489,68 @@ class Orchestrator:
                 projects=reclaimed,
             )
 
-    def _pick_idle_member(self, project_id: str) -> str | None:
-        with self._lock:
-            active = set(self._members.get(project_id, {}).keys())
-        for member in self.state.config.available_members():
-            if member.name not in active:
-                return member.name
-        return None
+    def _select_member_for_intent(self, project_id: str, detail, intent, active: set[str]) -> str | None:
+        preferred = self._intent_member_candidates(detail, intent)
+        return self._pick_idle_member(project_id, detail=detail, active=active, preferred=preferred)
+
+    def _intent_member_candidates(self, detail, intent) -> list[str]:
+        roles = {agent.name: agent.role for agent in detail.agents}
+        candidates: list[str] = []
+
+        def add(name: str | None) -> None:
+            if name and roles.get(name) == "member" and name not in candidates:
+                candidates.append(name)
+
+        add(intent.worker)
+        add(intent.creator)
+        intent_ref = f"intent:{intent.id}"
+        for link in detail.agent_links:
+            if link.kind == "explore" and link.dst == intent_ref:
+                add(link.src)
+        return candidates
+
+    def _pick_idle_member(
+        self,
+        project_id: str,
+        detail=None,
+        active: set[str] | None = None,
+        preferred: list[str] | None = None,
+    ) -> str | None:
+        if active is None:
+            with self._lock:
+                active = set(self._members.get(project_id, {}).keys())
+        idle = [member.name for member in self.state.config.available_members() if member.name not in active]
+        if not idle:
+            return None
+        preferred = preferred or []
+        for name in preferred:
+            if name in idle:
+                return name
+        if detail is None:
+            with self.state.db.connect() as conn:
+                detail = graph_store.project_detail(conn, project_id)
+        if detail is None:
+            return idle[0]
+        project_members = {agent.name for agent in detail.agents if agent.role == "member"}
+        candidates = [name for name in idle if name in project_members] or idle
+        config_order = {member.name: idx for idx, member in enumerate(self.state.config.available_members())}
+        return min(candidates, key=lambda name: self._member_dispatch_score(detail, name, config_order.get(name, 10_000)))
+
+    def _member_dispatch_score(self, detail, name: str, config_index: int) -> tuple[int, int, int]:
+        load = 0
+        last_link_id = 0
+        for intent in detail.intents:
+            if intent.worker == name:
+                load += 2
+            if intent.creator == name:
+                load += 1
+        for link in detail.agent_links:
+            if link.kind == "explore" and link.src == name:
+                load += 1
+                last_link_id = max(last_link_id, link.id)
+            elif link.kind == "assign" and link.dst == name:
+                last_link_id = max(last_link_id, link.id)
+        return (load, last_link_id, config_index)
 
     def _project_running_future_count(self, project_id: str) -> int:
         with self._lock:
