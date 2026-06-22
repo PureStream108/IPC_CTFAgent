@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.server.app import create_app
+from tests.helpers import write_mock_config
 
 
 @pytest.fixture
 def client(tmp_path):
-    cfgdir = tmp_path / "config"
-    cfgdir.mkdir()
-    src = Path(__file__).resolve().parent.parent / "backend" / "config"
-    for name in ("config.yaml", "models.yaml", "limits.yaml"):
-        shutil.copy(src / name, cfgdir / name)
+    cfgdir = write_mock_config(tmp_path / "config")
     app = create_app(root=tmp_path)
     with TestClient(app) as c:
         c.app.state.ipc.config_dir = cfgdir

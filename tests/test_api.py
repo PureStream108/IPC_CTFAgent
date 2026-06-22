@@ -7,20 +7,13 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
 from backend.server.app import create_app
+from tests.helpers import write_mock_config
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     # isolated root + config dir so tests don't touch the repo's data/
-    cfgdir = tmp_path / "config"
-    cfgdir.mkdir()
-    # copy the default config files
-    import shutil
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parent.parent / "backend" / "config"
-    for name in ("config.yaml", "models.yaml", "limits.yaml"):
-        shutil.copy(src / name, cfgdir / name)
+    cfgdir = write_mock_config(tmp_path / "config")
     monkeypatch.setenv("IPC_ROOT", str(tmp_path))
 
     app = create_app(root=tmp_path)

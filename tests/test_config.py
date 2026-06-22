@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 
 from backend.core.config import AppConfig, LLMConfig, MemberConfig, load_config, save_config
+from tests.helpers import write_mock_config
 
 
-def test_default_config_loads_and_starts():
-    cfg = load_config()
-    # Default config.yaml uses mock format, so it should boot.
+def test_mock_config_loads_and_starts(tmp_path: Path):
+    cfg = load_config(write_mock_config(tmp_path / "config"))
     assert cfg.startup_errors() == []
     assert len(cfg.members) == 4
     assert {m.name for m in cfg.members} == {"aventurine", "pearl", "jade", "topaz"}
@@ -65,12 +65,13 @@ def test_duplicate_member_names_rejected():
 
 
 def test_save_and_reload_roundtrip(tmp_path: Path):
-    cfg = load_config()
+    cfg = load_config(write_mock_config(tmp_path / "source"))
     cfg.diamond.api_format = "openai"
     cfg.diamond.api_key = "secret"
     cfg.diamond.base_url = "https://example.test/v1"
-    save_config(cfg, tmp_path)
-    reloaded = load_config(tmp_path)
+    out_dir = tmp_path / "saved"
+    save_config(cfg, out_dir)
+    reloaded = load_config(out_dir)
     assert reloaded.diamond.api_key == "secret"
     assert reloaded.diamond.base_url == "https://example.test/v1"
     assert reloaded.diamond.api_format == "openai"
@@ -78,7 +79,7 @@ def test_save_and_reload_roundtrip(tmp_path: Path):
 
 def test_models_yaml_fills_empty_model(tmp_path: Path):
     # An empty `model` field must be filled from models.yaml defaults, keyed by
-    # api_format. Build an isolated config so this never depends on the shipped
+    # api_format. Build an isolated config so this never depends on the repo
     # config.yaml (which may carry real credentials + explicit models).
     src = Path(__file__).resolve().parent.parent / "backend" / "config"
     (tmp_path / "models.yaml").write_text((src / "models.yaml").read_text(encoding="utf-8"), encoding="utf-8")

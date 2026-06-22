@@ -10,24 +10,13 @@ from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.diamond import Diamond
 from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.state import AppState
+from tests.helpers import write_mock_config
 
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
-    import shutil
-
-    cfgdir = tmp_path / "config"
-    cfgdir.mkdir()
-    src = Path(__file__).resolve().parent.parent / "backend" / "config"
-    for name in ("config.yaml", "models.yaml", "limits.yaml"):
-        shutil.copy(src / name, cfgdir / name)
+    cfgdir = write_mock_config(tmp_path / "config")
     st = AppState(root=tmp_path, config_dir=cfgdir)
-    # Force deterministic mock LLMs so tests never depend on real credentials
-    # that may live in the shipped config.yaml.
-    st.config.diamond.api_format = "mock"
-    for m in st.config.members:
-        m.api_format = "mock"
-    st.config.runtime.sandbox_backend = "local"
     st.pool.backend = "local"
     st.network.backend = "local"
     return st
@@ -40,13 +29,7 @@ def _make_project(state, category="web"):
 
 
 def test_app_state_clean_start_wipes_runtime_state(tmp_path, monkeypatch):
-    import shutil
-
-    cfgdir = tmp_path / "config"
-    cfgdir.mkdir()
-    src = Path(__file__).resolve().parent.parent / "backend" / "config"
-    for name in ("config.yaml", "models.yaml", "limits.yaml"):
-        shutil.copy(src / name, cfgdir / name)
+    cfgdir = write_mock_config(tmp_path / "config")
 
     data_dir = tmp_path / "data"
     st = AppState(root=tmp_path, config_dir=cfgdir)
