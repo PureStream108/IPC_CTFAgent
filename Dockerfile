@@ -17,7 +17,7 @@ RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/
         'Acquire::BrokenProxy "true";' \
         > /etc/apt/apt.conf.d/80-ipc-retries \
     && apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget git docker.io unzip binutils chromium \
+        ca-certificates curl wget git docker.io unzip binutils ripgrep chromium \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/java \

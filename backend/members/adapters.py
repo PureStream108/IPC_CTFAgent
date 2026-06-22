@@ -28,7 +28,10 @@ class MemberAction:
 
     @classmethod
     def from_obj(cls, obj: dict[str, Any]) -> "MemberAction":
-        kind = obj.get("action") or obj.get("kind")
+        if not isinstance(obj, dict):
+            raise ValueError(f"model action must be a JSON object, got {type(obj).__name__}")
+        raw_kind = obj.get("action") or obj.get("kind")
+        kind = raw_kind.strip() if isinstance(raw_kind, str) else raw_kind
         if kind not in ACTION_KINDS:
             raise ValueError(f"invalid action kind: {kind!r}")
         args = {k: v for k, v in obj.items() if k not in ("action", "kind", "thought")}
@@ -41,9 +44,10 @@ class MemberAction:
         if kind == "tool":
             if "tool" not in args and "name" in args:
                 args["tool"] = args.pop("name")
-            if "args" not in args:
+            if not isinstance(args.get("args"), dict):
                 args["args"] = {}
-        return cls(kind=kind, args=args, thought=obj.get("thought", ""))
+        thought = obj.get("thought", "")
+        return cls(kind=kind, args=args, thought=thought if isinstance(thought, str) else "")
 
 
 class BaseAdapter:
@@ -213,8 +217,16 @@ class PiAdapter(OpenAICompatibleAdapter):
         return result
 
 
-def _extract_json(text: str) -> dict:
+def _extract_json(text: Any) -> dict:
+    if text is None:
+        raise ValueError("empty model output: response content is null")
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str):
+        text = str(text)
     text = text.strip()
+    if not text:
+        raise ValueError("empty model output")
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):

@@ -36,6 +36,9 @@ def test_index_served(client):
     assert "Derive" in body
     assert "project_log" in body
     assert "llm_log" in body
+    assert "globalLogKind==='llm_log'" in body
+    assert "'member: ' + logEntryMember(entry)" in body
+    assert 'logEntryMember(entry){ return entry?.member || entry?.worker || entry?.agent || "unknown"; }' in body
     assert "memory_log" in body
     assert "New Project" in body
     assert "Memory" in body

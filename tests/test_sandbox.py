@@ -113,6 +113,27 @@ def test_resource_manager_resets_leaked_reservations_when_no_sandboxes(tmp_path)
     assert rl.reserved_memory_gb == 0
 
 
+def test_resource_manager_allows_reusing_existing_sandbox_when_memory_full():
+    class FakePool:
+        def active_keys(self):
+            return [
+                ("proj_001", "aventurine"),
+                ("proj_001", "pearl"),
+                ("proj_001", "jade"),
+                ("proj_001", "topaz"),
+            ]
+
+    rl = ResourceLimiter(total_memory_gb=20, per_agent_memory_gb=5)
+    for member in ("aventurine", "pearl", "jade", "topaz"):
+        assert rl.reserve(f"proj_001-{member}", 5) is True
+    manager = ResourceManager(rl, FakePool())
+
+    assert rl.reserved_memory_gb == 20
+    assert manager.can_admit_member("proj_001", "jade") is True
+    assert manager.can_admit_member("proj_001", "pearl") is True
+    assert manager.can_admit_member("proj_001", "sapphire") is False
+
+
 def test_resource_manager_reclaims_orphaned_projects():
     class FakePool:
         def __init__(self):

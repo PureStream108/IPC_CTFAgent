@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections import deque
@@ -27,6 +28,15 @@ from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
 _LOCAL_WEBUI_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})\b")
 _PORT_FLAG_RE = re.compile(r"(?:^|\s)(?:--port|-p)\s+(\d{2,5})(?:\s|$)")
 _WEBUI_HINT_RE = re.compile(r"\b(webui|gradio|streamlit|jupyter|flask|uvicorn)\b", re.IGNORECASE)
+_COMMAND_NOT_FOUND_RE = re.compile(
+    r"(?m)(?:^|: )([A-Za-z0-9_.+-]+): (?:command not found|not found)\b"
+)
+_WINDOWS_COMMAND_NOT_FOUND_RE = re.compile(r"'([^']+)' is not recognized", re.IGNORECASE)
+_CLI_PROBE_TOOLS = (
+    "rg", "grep", "find", "git", "curl", "wget", "jq", "python3", "python",
+    "file", "strings", "xxd", "unzip", "zip", "openssl", "nmap", "gdb",
+    "sqlmap", "sage", "node", "npm", "php", "ruby",
+)
 
 
 @dataclass
@@ -58,6 +68,7 @@ class DispatchResult:
     result: SolveResult | None = None
     graph_action: str | None = None
     invalid_action: bool = False
+    invalid_knowledge: list[str] | None = None
 
 
 class BaseMember:
@@ -71,6 +82,8 @@ class BaseMember:
         self.observations: list[str] = []
         self._recent_action_sigs: deque[str] = deque(maxlen=12)
         self._pending_bumps: list[str] = []
+        self._tool_availability: dict[str, bool] | None = None
+        self._missing_tool_counts: dict[str, int] = {}
         self._state_lock = threading.Lock()
 
     def stop(self) -> None:
@@ -81,6 +94,7 @@ class BaseMember:
         d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
         self._claim(project_id, intent_id)
         self._seed_tool_inventory(project_id)
+        self._prime_tool_context(project_id, intent_id, category)
         step = 0
         task_budget = max(1, min(d.max_steps, d.max_actions_per_task))
         graph_actions: list[str] = []
@@ -140,13 +154,14 @@ class BaseMember:
             if dispatched.invalid_action:
                 invalid_actions += 1
                 if invalid_actions >= 2:
+                    invalid_knowledge = dispatched.invalid_knowledge or []
                     self._submit_stall_report(
                         project_id,
                         intent_id,
                         category,
                         step,
                         difficulty_hint="medium",
-                        extra_knowledge=["invalid_action_contract"],
+                        extra_knowledge=["invalid_action_contract", *invalid_knowledge],
                     )
                     self._release(project_id, intent_id)
                     d.logger.project(
@@ -194,7 +209,7 @@ class BaseMember:
         d = self.deps
         kind = action.kind
         if kind == "bash":
-            cmd = str(action.args.get("command", ""))
+            cmd = self._string_arg(action.args.get("command", ""))
             if not cmd.strip():
                 d.logger.project(
                     "invalid_bash_action",
@@ -217,11 +232,17 @@ class BaseMember:
                 stdout=res.stdout[:4000],
                 stderr=res.stderr[:4000],
             )
+            missing_command = self._missing_command_from_result(cmd, res.stderr)
+            if missing_command:
+                knowledge = self._record_unavailable_cli(project_id, intent_id, missing_command)
+                return DispatchResult(invalid_action=True, invalid_knowledge=knowledge)
             return DispatchResult()
         if kind == "tool":
-            server = action.args.get("server", "")
-            tool = action.args.get("tool", "")
+            server = self._string_arg(action.args.get("server", ""))
+            tool = self._string_arg(action.args.get("tool", ""))
             args = action.args.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
             if not str(server).strip() or not str(tool).strip():
                 d.logger.project(
                     "invalid_tool_action",
@@ -243,13 +264,13 @@ class BaseMember:
             d.logger.tool("mcp_call", project_id, member=self.name, server=server, tool=tool)
             return DispatchResult()
         if kind == "memory":
-            query = action.args.get("query", "")
+            query = self._string_arg(action.args.get("query", ""))
             hits = mem_search(d.memory, query, limit=5)
             self._observe(f"[memory:{query}] " + "; ".join(f"{m.title}" for m, _ in hits))
             d.logger.memory("search", project_id, member=self.name, query=query, hits=len(hits))
             return DispatchResult()
         if kind == "tool_search":
-            query = action.args.get("query", "")
+            query = self._string_arg(action.args.get("query", ""))
             tools = d.registry.search(query)
             self._observe(f"[tool_search:{query}] " + ", ".join(t.name for t in tools))
             d.logger.tool("tool_search", project_id, member=self.name, query=query)
@@ -297,7 +318,10 @@ class BaseMember:
 
     def _seed_tool_inventory(self, project_id: str) -> None:
         try:
-            self.deps.sandbox.write_file("tools.txt", member_tool_inventory())
+            self.deps.sandbox.write_file(
+                "tools.txt",
+                member_tool_inventory().rstrip() + "\n\n" + self._runtime_tool_inventory_note(),
+            )
         except Exception as exc:
             self.deps.logger.project(
                 "member_tool_inventory_seed_failed",
@@ -305,6 +329,121 @@ class BaseMember:
                 member=self.name,
                 error=str(exc),
             )
+
+    def _prime_tool_context(self, project_id: str, intent_id: str, category: str) -> None:
+        try:
+            with self.deps.db.connect() as conn:
+                row = edge_store.get_intent(conn, project_id, intent_id)
+                goal = next(
+                    (fact.description for fact in node_store.list_facts(conn, project_id) if fact.id == "goal"),
+                    "",
+                )
+            intent_desc = row["description"] if row is not None else ""
+            query = " ".join(part for part in (category, intent_desc, goal) if part).strip()
+            if not query:
+                return
+            tools = self.deps.registry.search(query)[:5]
+        except Exception as exc:
+            self.deps.logger.project(
+                "member_tool_context_prime_failed",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                error=str(exc),
+            )
+            return
+        summary = ", ".join(
+            f"{tool.name}({tool.category})" for tool in tools
+        ) or "no matching registered tools"
+        self._observe(f"[tool_search:auto:{query[:120]}] {summary}")
+        self.deps.logger.tool(
+            "tool_search",
+            project_id,
+            member=self.name,
+            query=query,
+            hits=[tool.name for tool in tools],
+            automatic=True,
+        )
+
+    def _probe_cli_tools(self) -> dict[str, bool]:
+        if self._tool_availability is not None:
+            return self._tool_availability
+        names_json = json.dumps(list(_CLI_PROBE_TOOLS))
+        code = (
+            "import json, shutil; "
+            f"names=json.loads('{names_json}'); "
+            "print(json.dumps({n: bool(shutil.which(n)) for n in names}, sort_keys=True))"
+        )
+        command = f'python3 -c "{code}" || python -c "{code}"'
+        availability: dict[str, bool] = {}
+        try:
+            res = self.deps.sandbox.exec(command, timeout=10)
+            for line in reversed(res.stdout.splitlines()):
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    availability = {str(k): bool(v) for k, v in parsed.items()}
+                    break
+        except Exception:
+            availability = {}
+        self._tool_availability = availability
+        return availability
+
+    def _runtime_tool_inventory_note(self) -> str:
+        availability = self._probe_cli_tools()
+        if not availability:
+            return (
+                "Runtime tool availability\n"
+                "-------------------------\n"
+                "- probe: unavailable; trust the static inventory only after checking commands with `command -v` or `which`."
+            )
+        available = ", ".join(name for name, ok in availability.items() if ok) or "none"
+        missing = ", ".join(name for name, ok in availability.items() if not ok) or "none"
+        return (
+            "Runtime tool availability\n"
+            "-------------------------\n"
+            f"- available now: {available}\n"
+            f"- missing now: {missing}\n"
+            "- If a command is missing, switch to an available fallback or call tool_search/MCP instead of retrying it."
+        )
+
+    def _record_unavailable_cli(self, project_id: str, intent_id: str, command_name: str) -> list[str]:
+        command_name = command_name.strip()
+        if not command_name:
+            return []
+        availability = self._probe_cli_tools()
+        availability[command_name] = False
+        self._tool_availability = availability
+        count = self._missing_tool_counts.get(command_name, 0) + 1
+        self._missing_tool_counts[command_name] = count
+        self._observe(
+            f"[tool unavailable:{command_name}] This command is missing in the sandbox. "
+            "Use `cat tools.txt` to choose an installed fallback, or call tool_search/MCP."
+        )
+        self.deps.logger.project(
+            "sandbox_tool_unavailable",
+            project_id,
+            member=self.name,
+            intent=intent_id,
+            command=command_name,
+            count=count,
+        )
+        return [f"unavailable_cli_tool:{command_name}"]
+
+    def _missing_command_from_result(self, command: str, stderr: str) -> str | None:
+        text = stderr or ""
+        for match in _WINDOWS_COMMAND_NOT_FOUND_RE.finditer(text):
+            return match.group(1)
+        for match in _COMMAND_NOT_FOUND_RE.finditer(text):
+            candidate = match.group(1)
+            if candidate not in {"line", "bash", "sh"}:
+                return candidate
+        if "not found" in text.lower() or "command not found" in text.lower():
+            first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+            return first or None
+        return None
 
     def _submit_report(self, project_id, intent_id, action: MemberAction):
         d = self.deps
@@ -315,7 +454,7 @@ class BaseMember:
             if node_id is None and row is not None:
                 sources = self._intent_source_ids(conn, project_id, intent_id)
                 node_id = sources[-1] if sources else None
-            progress = a.get("progress", "")
+            progress = self._string_arg(a.get("progress", ""))
             steps = self._list_arg(a.get("steps", []))
             directions = self._list_arg(a.get("directions", []))
             knowledge = self._list_arg(a.get("knowledge", []))
@@ -328,7 +467,7 @@ class BaseMember:
                 intent_id,
                 node_id,
                 progress,
-                a.get("difficulty", "low"),
+                self._string_arg(a.get("difficulty", "low")) or "low",
                 steps,
                 directions,
                 knowledge,
@@ -482,10 +621,10 @@ class BaseMember:
     def _declare_intent(self, project_id, current_intent_id, action: MemberAction):
         a = action.args
         requested_from = a.get("from")
-        description = a.get("description", "explore")
+        description = self._string_arg(a.get("description", "explore")) or "explore"
         with self.deps.db.connect() as conn:
             if requested_from:
-                from_ids = list(requested_from)
+                from_ids = self._list_arg(requested_from)
                 for fid in from_ids:
                     if not node_store.fact_exists(conn, project_id, fid):
                         from_ids = ["origin"]
@@ -576,8 +715,6 @@ class BaseMember:
         )
 
     def _record_action_signature(self, action: MemberAction) -> str | None:
-        import json
-
         if action.kind not in {"bash", "tool", "tool_search", "memory"}:
             return None
         sig = action.kind + ":" + json.dumps(action.args, sort_keys=True, ensure_ascii=False)
@@ -608,7 +745,7 @@ class BaseMember:
         return bumps
 
     def _conclude(self, project_id, intent_id, action: MemberAction) -> SolveResult:
-        desc = action.args.get("description", "confirmed result")
+        desc = self._string_arg(action.args.get("description", "confirmed result")) or "confirmed result"
         with self.deps.db.connect() as conn:
             row = edge_store.get_intent(conn, project_id, intent_id)
             if row is None or row["to_fact_id"] is not None:
@@ -622,8 +759,8 @@ class BaseMember:
 
     def _raise_flag(self, project_id, intent_id, action: MemberAction, step) -> SolveResult:
         d = self.deps
-        flag = action.args.get("flag", "")
-        desc = action.args.get("description", "flag captured")
+        flag = self._string_arg(action.args.get("flag", ""))
+        desc = self._string_arg(action.args.get("description", "flag captured")) or "flag captured"
         with d.db.connect() as conn:
             row = edge_store.get_intent(conn, project_id, intent_id)
             # ensure the assigned intent is concluded into a fact first
@@ -658,6 +795,7 @@ class BaseMember:
             raise RuntimeError(f"project {project_id} not found")
         assigned = next((i for i in detail.intents if i.id == intent_id), None)
         exposed = [t.to_dict() for t in d.registry.exposed_for(category)]
+        cli_availability = self._probe_cli_tools()
         reports = detail.reports[-8:]
         sibling_insights = [
             {
@@ -735,6 +873,10 @@ class BaseMember:
                 "docker_path": "/tools.txt",
                 "note": "Use bash `cat tools.txt`; in Docker sandboxes, `/tools.txt` is also available.",
             },
+            "runtime_cli_tools": {
+                "available": [name for name, ok in cli_availability.items() if ok],
+                "missing": [name for name, ok in cli_availability.items() if not ok],
+            },
             "available_mcps": d.mcps.names(),
             "public_mcps": list(PUBLIC_MCPS),
             "available_languages": list(LANGUAGES),
@@ -781,3 +923,10 @@ class BaseMember:
 
     def _observe(self, text: str) -> None:
         self.observations.append(text[:2000])
+
+    def _string_arg(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)

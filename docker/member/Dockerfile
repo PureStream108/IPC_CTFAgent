@@ -78,7 +78,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         nmap netcat-openbsd binutils file binwalk steghide exiftool \
         gdb sqlmap unzip zip jq openssl checksec \
-        xxd bsdmainutils pngcheck imagemagick ffmpeg sox \
+        ripgrep xxd bsdmainutils pngcheck imagemagick ffmpeg sox \
         tesseract-ocr tesseract-ocr-eng \
         sagemath cmake pkg-config python3-dev libhwloc-dev \
         libgmp-dev libmpfr-dev libfplll-dev libeigen3-dev libz3-dev \

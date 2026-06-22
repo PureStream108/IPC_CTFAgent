@@ -6,7 +6,7 @@ from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.db import Database
 from backend.core.config import LLMConfig, MemberConfig
 from backend.core.logging_util import IPCLogger
-from backend.members.adapters import MemberAction, make_adapter
+from backend.members.adapters import MemberAction, _extract_json, make_adapter
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
 from backend.mcp.base import MCPRegistry
@@ -58,8 +58,17 @@ def test_member_action_parsing():
     assert act.args["command"] == "ls"
     alias = MemberAction.from_obj({"action": "bash", "cmd": "whoami"})
     assert alias.args["command"] == "whoami"
+    null_thought = MemberAction.from_obj({"action": "done", "thought": None, "reason": "ok"})
+    assert null_thought.thought == ""
     with pytest.raises(ValueError):
         MemberAction.from_obj({"action": "nonsense"})
+
+
+def test_adapter_rejects_empty_model_output_cleanly():
+    with pytest.raises(ValueError, match="empty model output"):
+        _extract_json(None)
+    with pytest.raises(ValueError, match="empty model output"):
+        _extract_json("")
 
 
 def test_initial_member_solves_to_flag(deps):
@@ -177,6 +186,36 @@ def test_member_stalls_after_repeated_invalid_bash(deps):
     assert "invalid_action_contract" in reports[0].knowledge
 
 
+def test_member_stalls_after_repeated_unavailable_cli_tool(deps, tmp_path):
+    class MissingRgSandbox(LocalSandbox):
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            if command.strip().startswith("rg "):
+                return ExecResult(127, "", "bash: line 1: rg: command not found")
+            return super().exec(command, timeout=timeout)
+
+    db, d, reports, flags = deps
+    sandbox = MissingRgSandbox("missing-rg", tmp_path / "missing-rg")
+    sandbox.start()
+    d.sandbox = sandbox
+    d.max_actions_per_task = 5
+    pid, iid = _project(db)
+    script = [
+        {"action": "bash", "command": "rg flag ."},
+        {"action": "bash", "command": "rg secret ."},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    result = member.solve(pid, iid, "web", is_initial=False)
+
+    assert result.status == "stalled"
+    assert result.steps == 2
+    assert len(reports) == 1
+    assert "invalid_action_contract" in reports[0].knowledge
+    assert "unavailable_cli_tool:rg" in reports[0].knowledge
+    entries = d.logger.read_log("project", pid, None)
+    assert sum(1 for entry in entries if entry["event"] == "sandbox_tool_unavailable") == 2
+
+
 def test_scripted_member_category_tools_mcp(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -190,6 +229,9 @@ def test_scripted_member_category_tools_mcp(deps):
 
     assert result.status == "done"
     assert any("mcp:tools.get_tool" in o and "sqlmap" in o for o in member.observations)
+    assert any("[tool_search:auto:" in o for o in member.observations)
+    tool_entries = d.logger.read_log("tool", pid, None)
+    assert any(entry["event"] == "tool_search" and entry.get("automatic") for entry in tool_entries)
     with db.connect() as conn:
         graph_store.create_hint(conn, pid, "check /flag before deeper recon", "human")
     context = member._build_context(pid, iid, "web", 1, False, False)
@@ -197,12 +239,15 @@ def test_scripted_member_category_tools_mcp(deps):
     assert "python" in context["available_languages"]
     assert context["hints"][0]["content"] == "check /flag before deeper recon"
     assert "member_tool_inventory" in context
+    assert "rg/ripgrep" in context["member_tool_inventory"]
     assert "TyphonBreaker" in context["member_tool_inventory"]
     assert "from Typhon import bypassREAD, bypassRCE" in context["member_tool_inventory"]
     assert "TyphonBreaker" in (d.sandbox.read_file("tools.txt") or "")
     assert "from Typhon import bypassREAD, bypassRCE" in (d.sandbox.read_file("tools.txt") or "")
+    assert "Runtime tool availability" in (d.sandbox.read_file("tools.txt") or "")
     assert context["member_tool_inventory_source"]["workspace_path"] == "tools.txt"
     assert context["member_tool_inventory_source"]["docker_path"] == "/tools.txt"
+    assert "runtime_cli_tools" in context
     assert context["attachment_true"] is False
     assert context["attachments"] == []
 

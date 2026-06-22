@@ -572,6 +572,7 @@
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="text-[11px] text-slate-400 tabular-nums" x-text="formatTime(entry.ts)"></span>
                     <span class="px-2 py-0.5 rounded-md bg-white text-[10px] font-semibold uppercase tracking-wide text-slate-500" x-text="entry.event"></span>
+                    <span x-show="globalLogKind==='llm_log'" class="px-2 py-0.5 rounded-md bg-sky-50 text-[10px] font-semibold text-sky-700" x-text="'member: ' + logEntryMember(entry)"></span>
                   </div>
                   <pre class="text-[11px] text-slate-500 mt-2 whitespace-pre-wrap break-words" x-text="globalLogDetail(entry)"></pre>
                 </div>
@@ -748,6 +749,7 @@
         this.logEntries=p.entries||[]; this.llmEntries=l.entries||[];
       },
       logSummary(e){ const k=Object.keys(e).filter(x=>!["ts","event","project_id"].includes(x)); return k.map(x=>x+"="+JSON.stringify(e[x])).join(" ").slice(0,160); },
+      logEntryMember(entry){ return entry?.member || entry?.worker || entry?.agent || "unknown"; },
       async openGlobalLogs(){
         const r=await this.api("GET","/logs/projects?limit=500");
         this.globalLogs=r.logs||[];

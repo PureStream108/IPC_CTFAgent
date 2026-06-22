@@ -30,7 +30,7 @@ runtime:
   interval: 2
   intent_timeout: 30
   reason_timeout: 30
-  max_members_per_report: 3
+  max_members_per_report: 4
   sandbox_backend: docker
   max_member_steps: 60
   max_member_actions_per_task: 20

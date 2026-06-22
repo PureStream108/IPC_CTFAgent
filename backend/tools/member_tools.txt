@@ -27,6 +27,9 @@ Execution model
 Core shell and build utilities
 ------------------------------
 - bash/sh: shell scripting and command chaining.
+- rg/ripgrep: fast recursive text search across source trees. Prefer `rg`
+  for source audit when available; if runtime availability says it is missing,
+  switch to grep/find instead of retrying `rg`.
 - git: inspect repositories, diff source, clone public helper repos if needed.
 - curl/wget: HTTP probing, downloads, API calls, SSRF/web checks.
 - jq: inspect and transform JSON API responses.

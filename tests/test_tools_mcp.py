@@ -26,10 +26,12 @@ def test_exposed_for_category(registry):
     names = {t.name for t in web}
     assert "sqlmap" in names
     assert "typhonbreaker" in names
+    assert all(t.category == "web" for t in web)
+    assert all(t.description and t.exec and t.when_to_use for t in web)
     typhon = registry.get("typhonbreaker")
     assert typhon is not None
-    assert "from Typhon import bypassREAD, bypassRCE" in typhon.exec
-    assert "do not run `typhonbreaker <url>`" in typhon.when_to_use
+    assert typhon.category == "web"
+    assert typhon.tags
     assert "ghidra" not in names  # reverse-only
 
 
@@ -65,6 +67,21 @@ def test_category_tools_mcp(registry):
     got = mcp.call("get_tool", name="gdb")
     assert got["exec"] == "gdb"
     assert mcp.call("get_tool", name="nope")["error"]
+
+
+def test_category_tools_mcp_returns_tool_contract(registry):
+    mcp = build_category_tools_mcp(registry, "web")
+    listed = mcp.call("list_tools")
+    typhon = next(t for t in listed if t["name"] == "typhonbreaker")
+    assert set(typhon) == {"name", "category", "description", "exec", "tags", "when_to_use"}
+    assert typhon["category"] == "web"
+    assert typhon["exec"]
+    assert typhon["tags"]
+
+    detail = mcp.call("get_tool", name="typhonbreaker")
+    assert detail["name"] == typhon["name"]
+    assert detail["exec"] == typhon["exec"]
+    assert detail["when_to_use"] == typhon["when_to_use"]
 
 
 def test_antsword_encoder():

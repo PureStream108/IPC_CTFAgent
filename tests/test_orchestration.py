@@ -334,6 +334,42 @@ def test_member_assignment_records_graph_entry_fact(state):
     orch.shutdown()
 
 
+def test_orchestrator_reuses_existing_member_sandbox_when_memory_full(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        intent = edge_store.create_intent(conn, pid, ["origin"], "reuse jade sandbox", "diamond")
+
+    state.config.runtime.sandbox_backend = "local"
+    state.config.runtime.max_member_actions_per_task = 1
+    state.limiter.total_memory_gb = 20
+    state.limiter.per_agent_memory_gb = 5
+    for member in ("aventurine", "pearl", "jade", "topaz"):
+        assert state.limiter.reserve(f"proj_001-{member}", 5) is True
+        state.pool.get(pid, member)
+
+    orch = Orchestrator(
+        state,
+        max_workers=1,
+        scripts={"jade": [{"action": "done", "reason": "reuse ok"}]},
+    )
+    launched = orch._launch_member(pid, "jade", intent.id, "web", False)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with orch._lock:
+            futures = list(orch._futures.get(pid, []))
+        if futures and all(future.done() for future in futures):
+            break
+        time.sleep(0.05)
+
+    assert launched is True
+    entries = state.logger.read_log("project", pid, None)
+    assert not any(entry["event"] == "member_admission_denied" for entry in entries)
+    assert any(entry["event"] == "member_done" and entry["member"] == "jade" for entry in entries)
+    orch.shutdown()
+
+
 def test_reason_checkpoint_ignores_intent_created_by_reason(state):
     from backend.core.orchestrator import Orchestrator
 
@@ -357,4 +393,64 @@ def test_reason_checkpoint_ignores_intent_created_by_reason(state):
         edge_store.conclude_intent(conn, pid, created.id, "aventurine", fact.id)
         changed = graph_store.project_detail(conn, pid)
     assert orch._reason_trigger(changed).startswith("facts:")
+    orch.shutdown()
+
+
+def test_reason_checkpoint_stable_state_does_not_log_skipped_noise(state):
+    from backend.core.orchestrator import Orchestrator, ReasonCheckpoint
+
+    class RunningMember:
+        def stop(self):
+            pass
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        intent = edge_store.create_intent(
+            conn,
+            pid,
+            ["origin"],
+            "active branch",
+            "diamond",
+            worker="aventurine",
+        )
+        graph_store.add_agent(conn, pid, "aventurine", "member", state="active", start_fact_id="origin")
+        detail = graph_store.project_detail(conn, pid)
+
+    orch = Orchestrator(state, max_workers=3)
+    orch._reason_checkpoints[pid] = ReasonCheckpoint(
+        fact_count=len(detail.facts),
+        hint_count=len(detail.hints),
+        open_intent_count=1,
+    )
+    with orch._lock:
+        orch._members[pid] = {"aventurine": RunningMember()}
+
+    orch._dispatch_project(pid)
+    orch._dispatch_project(pid)
+
+    entries = state.logger.read_log("project", pid, None)
+    assert not any(entry["event"] == "diamond_reason_skipped" for entry in entries)
+    with orch._lock:
+        orch._members.pop(pid, None)
+    assert intent.id
+    orch.shutdown()
+
+
+def test_reap_finished_future_removes_crashed_task_index(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    future = Future()
+    future.set_exception(RuntimeError("boom"))
+    orch = Orchestrator(state, max_workers=1)
+    with orch._lock:
+        orch._task_index[(pid, "i999")] = future
+
+    orch._reap_finished_futures()
+
+    with orch._lock:
+        assert (pid, "i999") not in orch._task_index
+    entries = state.logger.read_log("project", pid, None)
+    assert any(entry["event"] == "member_task_crash" and entry["intent"] == "i999" for entry in entries)
     orch.shutdown()

@@ -224,7 +224,7 @@ class Orchestrator:
         cfg = self._member_config(member_name)
         if cfg is None:
             return False
-        if not self.resources.can_admit_member():
+        if not self.resources.can_admit_member(project_id, member_name):
             self.state.logger.project(
                 "member_admission_denied",
                 project_id,
@@ -426,14 +426,6 @@ class Orchestrator:
         if not claimed and not unclaimed:
             reason_trigger = self._reason_trigger(detail)
             if reason_trigger is None:
-                self.state.logger.project(
-                    "diamond_reason_skipped",
-                    project_id,
-                    reason="graph_checkpoint_unchanged",
-                    facts=len(detail.facts),
-                    hints=len(detail.hints),
-                    open_intents=len(open_intents),
-                )
                 return
             reason_snapshot = detail
             created = self.diamond.plan_next_intent(project_id, reason_snapshot, reason_trigger)
@@ -630,16 +622,20 @@ class Orchestrator:
                 if future.done():
                     done.append((project_id, intent_id, future))
         for project_id, intent_id, future in done:
+            crashed = False
             try:
                 result = future.result()
             except Exception as exc:
+                crashed = True
                 self.state.logger.project("member_task_crash", project_id, intent=intent_id, error=str(exc))
-                continue
-            if result is None:
-                self.state.logger.project("member_task_failed", project_id, intent=intent_id)
+                result = None
+            finally:
                 with self._lock:
                     if self._task_index.get((project_id, intent_id)) is future:
                         self._task_index.pop((project_id, intent_id), None)
+            if result is None:
+                if not crashed:
+                    self.state.logger.project("member_task_failed", project_id, intent=intent_id)
                 continue
             if result.status == "stalled":
                 self.state.logger.project("member_task_stalled", project_id, intent=intent_id, steps=result.steps)
@@ -651,9 +647,6 @@ class Orchestrator:
                     self._broadcast_fact(project_id, result.fact_id, self._intent_worker(project_id, intent_id))
             elif result.status == "flag":
                 self.state.logger.project("member_task_flag", project_id, intent=intent_id, flag=result.flag)
-            with self._lock:
-                if self._task_index.get((project_id, intent_id)) is future:
-                    self._task_index.pop((project_id, intent_id), None)
 
     def _intent_worker(self, project_id: str, intent_id: str) -> str | None:
         with self.state.db.connect() as conn:

@@ -20,3 +20,13 @@ def test_compose_persists_runtime_state_in_named_volumes():
         if ":" in entry and not entry.startswith(".") and not entry.startswith("/")
     }
     assert named_sources <= set(compose["volumes"])
+
+
+def test_member_image_and_inventory_include_ripgrep():
+    member_dockerfile = Path("docker/member/Dockerfile").read_text(encoding="utf-8")
+    app_dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    inventory = Path("backend/tools/member_tools.txt").read_text(encoding="utf-8")
+
+    assert "ripgrep" in member_dockerfile
+    assert "ripgrep" in app_dockerfile
+    assert "rg/ripgrep" in inventory
