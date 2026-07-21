@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from collections.abc import Generator
 
 PROJECT_STATES = (
     "created",
@@ -153,7 +153,7 @@ class Database:
         self._lock = threading.Lock()
         self._configured = False
 
-    def configure(self) -> "Database":
+    def configure(self) -> Database:
         with self._lock:
             if self._configured:
                 return self

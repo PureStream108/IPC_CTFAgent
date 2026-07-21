@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from backend.mcp.mcp_client import MCPClient
 from backend.memory.exporter.obsidian import export_obsidian
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_search import search
@@ -64,12 +67,21 @@ def test_disk_mirror_written(store, tmp_path):
 def test_memory_mcp_search_and_get(store):
     _seed(store)
     mcp = build_memory_mcp(store)
-    hits = mcp.call("memory_search", query="shiro deserialization java")
-    assert hits
+
+    async def run():
+        async with MCPClient.in_process(mcp) as client:
+            hits = await client.call_tool(
+                "memory_search", {"query": "shiro deserialization java"}
+            )
+            assert hits
+            full = await client.call_tool("memory_get", {"id": hits[0]["id"]})
+            missing = await client.call_tool("memory_get", {"id": "nope"})
+            return hits, full, missing
+
+    hits, full, missing = asyncio.run(run())
     assert hits[0]["title"] == "Shiro 550"
-    full = mcp.call("memory_get", id=hits[0]["id"])
     assert "ysoserial" in full["content"]
-    assert mcp.call("memory_get", id="nope")["error"]
+    assert missing["error"]
 
 
 def test_export_obsidian_vault(store, tmp_path):

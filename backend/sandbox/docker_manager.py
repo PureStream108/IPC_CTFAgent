@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 
+from contextlib import suppress
 import importlib
 import io
 import os
@@ -39,8 +40,7 @@ def _is_repo_local_docker_module(module, project_root: Path | None = None) -> bo
 
     module_paths = getattr(module, "__path__", None)
     if module_paths:
-        for entry in module_paths:
-            candidates.append(Path(entry))
+        candidates.extend(Path(entry) for entry in module_paths)
 
     for candidate in candidates:
         try:
@@ -220,10 +220,8 @@ class DockerSandbox:
             self._copy_attachments()
         except Exception:
             if self._container is not None:
-                try:
+                with suppress(Exception):
                     self._container.remove(force=True)
-                except Exception:
-                    pass
                 self._container = None
             if reserved and self.limiter is not None:
                 self.limiter.release(self.name)
@@ -293,10 +291,8 @@ class DockerSandbox:
             webui_proxy_manager.close_member(project_id, member)
         self._webui_keys.clear()
         if self._container is not None:
-            try:
+            with suppress(Exception):
                 self._container.remove(force=True)
-            except Exception:
-                pass
             self._container = None
         if self.limiter is not None:
             self.limiter.release(self.name)

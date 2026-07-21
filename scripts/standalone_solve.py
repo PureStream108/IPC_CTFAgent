@@ -96,12 +96,12 @@ def main() -> int:
     print(f"PID={project_id}", flush=True)
     orch.start_project(project_id)
 
-    deadline = time.time() + TIMEOUT
+    deadline = time.monotonic() + TIMEOUT
     last_snapshot: dict | None = None
     followup_seeds = 0
     consecutive_db_errors = 0
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             try:
                 snap = project_snapshot(state, project_id)
                 consecutive_db_errors = 0

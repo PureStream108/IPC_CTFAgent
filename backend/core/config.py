@@ -91,7 +91,7 @@ class AppConfig(BaseModel):
         return members
 
     @model_validator(mode="after")
-    def _check_unique(self) -> "AppConfig":
+    def _check_unique(self) -> AppConfig:
         return self
 
     # --- startup validation (Seed.md launch rules) ---

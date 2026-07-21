@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -80,10 +82,8 @@ class Orchestrator:
             return
         self.projects.ensure_dirs(project_id)
         self.projects.start_challenge_env(project_id)
-        try:
+        with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "running")
-        except LifecycleError:
-            pass
         assignment = self.diamond.assign_initial(project_id)
         if assignment is None:
             self.state.logger.project("no_members_available", project_id)
@@ -290,7 +290,9 @@ class Orchestrator:
 
     def _run_member(self, project_id, member, intent_id, category, is_initial):
         try:
-            return member.solve(project_id, intent_id, category, is_initial=is_initial)
+            return asyncio.run(
+                member.solve_async(project_id, intent_id, category, is_initial=is_initial)
+            )
         except Exception as exc:
             self.state.logger.project("member_crash", project_id, member=member.name, error=str(exc))
         finally:
@@ -334,24 +336,18 @@ class Orchestrator:
 
         # status should be flag_found (member set it); ensure it
         if self.lifecycle.status(project_id) == "running":
-            try:
+            with suppress(LifecycleError):
                 self.lifecycle.transition(project_id, "flag_found")
-            except LifecycleError:
-                pass
 
         # WP_WRITING
-        try:
+        with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "wp_writing")
-        except LifecycleError:
-            pass
         wp_path = self.diamond.write_wp(project_id, state.wp_dir)
         state.logger.project("wp_written", project_id, path=wp_path)
 
         # MEMORY_WRITING
-        try:
+        with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "memory_writing")
-        except LifecycleError:
-            pass
         written = write_memory(state.db, project_id, state.memory)
         state.logger.memory("experience_written", project_id, count=len(written))
 
@@ -363,10 +359,8 @@ class Orchestrator:
 
         # COMPLETED
         self.diamond.draw_completion(project_id)
-        try:
+        with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "completed")
-        except LifecycleError:
-            pass
 
         # broadcast + release resources
         with state.db.connect() as conn:
@@ -656,16 +650,18 @@ class Orchestrator:
     # ---- test helper ----
 
     def wait(self, project_id: str, timeout: float = 30.0) -> None:
-        import time
+        from time import monotonic, sleep
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
             with self._lock:
                 futures = list(self._futures.get(project_id, []))
             pending = [f for f in futures if not f.done()]
             status = self.lifecycle.status(project_id)
-            if not pending and status in ("completed", "stopped", "flag_found"):
-                # allow finalize to settle
-                if status == "completed" or self._completing == set():
-                    return
-            time.sleep(0.05)
+            if (
+                not pending
+                and status in ("completed", "stopped", "flag_found")
+                and (status == "completed" or self._completing == set())
+            ):
+                return
+            sleep(0.05)

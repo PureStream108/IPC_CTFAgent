@@ -9,7 +9,7 @@ from backend.core.logging_util import IPCLogger
 from backend.members.adapters import MemberAction, _extract_json, make_adapter
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
-from backend.mcp.base import MCPRegistry
+from backend.mcp.mcp_client import MCPRegistry
 from backend.mcp.shared import build_browser_mcp
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore

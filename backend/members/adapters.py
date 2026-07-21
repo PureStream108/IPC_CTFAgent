@@ -27,7 +27,7 @@ class MemberAction:
     thought: str = ""
 
     @classmethod
-    def from_obj(cls, obj: dict[str, Any]) -> "MemberAction":
+    def from_obj(cls, obj: dict[str, Any]) -> MemberAction:
         if not isinstance(obj, dict):
             raise ValueError(f"model action must be a JSON object, got {type(obj).__name__}")
         raw_kind = obj.get("action") or obj.get("kind")

@@ -45,8 +45,7 @@ def create_project(body: CreateProjectRequest, state: AppState = Depends(get_sta
         pid = graph_store.create_project(conn, body.title, body.origin, body.goal, body.category, hints)
     state.logger.project("project_created", pid, title=body.title, category=body.category)
     with state.db.connect() as conn:
-        detail = graph_store.project_detail(conn, pid)
-    return detail
+        return graph_store.project_detail(conn, pid)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)

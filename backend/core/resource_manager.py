@@ -10,9 +10,12 @@ class ResourceManager:
         self.pool = pool
 
     def can_admit_member(self, project_id: str | None = None, member: str | None = None) -> bool:
-        if project_id is not None and member is not None:
-            if (project_id, member) in self.pool.active_keys():
-                return True
+        if (
+            project_id is not None
+            and member is not None
+            and (project_id, member) in self.pool.active_keys()
+        ):
+            return True
         if self.limiter.can_admit():
             return True
         if not self.pool.active_keys():

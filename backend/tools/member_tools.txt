@@ -15,7 +15,7 @@ Execution model
   /opt/ipc-tools/tools.
 - Prefer creating scripts and temporary output under /workspace.
 - Use action "tool" for MCP helpers: memory, tool_search, browser, ghidra, zap,
-  antsword, or the virtual "tools" server with list_tools/get_tool.
+  or the virtual "tools" server with list_tools/get_tool.
 - Browser/Ghidra/ZAP are shared Docker-backed MCP runtimes, not tools installed
   separately in each Member container.
 - If a sandbox command starts a localhost web UI, look for the observed
@@ -78,9 +78,6 @@ Network and web tools
 - php_filter_chain_generator: generate PHP filter chains for LFI-to-read/RCE
   style attacks. Path:
   /workspace/tools/Php_chain/php_filter_chain_generator.
-- AntSword assets: cloned under /workspace/tools/Antsword/antSword-master.
-  Prefer the safe in-process antsword MCP for payload encoding/upload helpers.
-
 Java and deserialization helpers
 --------------------------------
 - JNDIMap: JNDI/Log4Shell exploit server helper. Path:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.difficulty import (
@@ -16,7 +18,7 @@ from backend.core.difficulty import (
     normalize_difficulty,
 )
 from backend.core.logging_util import IPCLogger
-from backend.mcp.base import MCPRegistry
+from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession
 from backend.members.adapters import BaseAdapter, MemberAction
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
@@ -90,6 +92,39 @@ class BaseMember:
         self._stop.set()
 
     def solve(self, project_id: str, intent_id: str, category: str, is_initial: bool = False) -> SolveResult:
+        """Synchronous compatibility entry point for non-async callers."""
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.solve_async(project_id, intent_id, category, is_initial))
+        raise RuntimeError("solve() cannot run inside an event loop; await solve_async() instead")
+
+    async def solve_async(
+        self,
+        project_id: str,
+        intent_id: str,
+        category: str,
+        is_initial: bool = False,
+    ) -> SolveResult:
+        category_tools = build_category_tools_mcp(self.deps.registry, category)
+        async with self.deps.mcps.session({"tools": category_tools}) as mcp_session:
+            return await self._solve_with_mcp(
+                project_id,
+                intent_id,
+                category,
+                is_initial,
+                mcp_session,
+            )
+
+    async def _solve_with_mcp(
+        self,
+        project_id: str,
+        intent_id: str,
+        category: str,
+        is_initial: bool,
+        mcp_session: MCPRegistrySession,
+    ) -> SolveResult:
         d = self.deps
         d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
         self._claim(project_id, intent_id)
@@ -139,12 +174,13 @@ class BaseMember:
                 d.logger.project("member_loop_detected", project_id, member=self.name, intent=intent_id, steps=step)
                 return SolveResult(status="stalled", steps=step)
 
-            dispatched = self._dispatch(
+            dispatched = await self._dispatch(
                 project_id,
                 intent_id,
                 category,
                 action,
                 step,
+                mcp_session,
                 allow_intent=branch_intents < 1,
             )
             if dispatched.graph_action is not None:
@@ -196,13 +232,14 @@ class BaseMember:
         )
         return SolveResult(status=status, steps=step)
 
-    def _dispatch(
+    async def _dispatch(
         self,
         project_id,
         intent_id,
         category,
         action: MemberAction,
         step,
+        mcp_session: MCPRegistrySession,
         *,
         allow_intent: bool,
     ) -> DispatchResult:
@@ -254,10 +291,7 @@ class BaseMember:
                 self._observe("[invalid tool action omitted: missing `server` or `tool`]")
                 return DispatchResult(invalid_action=True)
             try:
-                if server == "tools":
-                    out = build_category_tools_mcp(d.registry, category).call(tool, **args)
-                else:
-                    out = d.mcps.call(server, tool, **args)
+                out = await mcp_session.call_tool(server, tool, args)
             except Exception as exc:
                 out = {"error": str(exc)}
             self._observe(f"[mcp:{server}.{tool}] {out}")

@@ -4,12 +4,12 @@ import json
 import shutil
 import threading
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class IPCLogger:
@@ -42,10 +42,7 @@ class IPCLogger:
         sub = self.KINDS.get(kind, "project_logs")
         folder = self.root / sub
         folder.mkdir(parents=True, exist_ok=True)
-        if project_id:
-            name = self._project_filename(project_id)
-        else:
-            name = "global.jsonl"
+        name = self._project_filename(project_id) if project_id else "global.jsonl"
         return folder / name
 
     def _project_filename(self, project_id: str) -> str:

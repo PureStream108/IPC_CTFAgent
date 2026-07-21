@@ -38,10 +38,12 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
 
     facts_by_id = {f.id: f.description for f in detail.facts}
 
-    for a in detail.agents:
-        if a.role == "member" and a.created_at:
-            events.append({"ts": a.created_at, "kind": "member_joined",
-                           "label": a.name, "detail": f"start={a.start_fact_id or 'origin'}", "order": 1})
+    events.extend(
+        {"ts": a.created_at, "kind": "member_joined",
+         "label": a.name, "detail": f"start={a.start_fact_id or 'origin'}", "order": 1}
+        for a in detail.agents
+        if a.role == "member" and a.created_at
+    )
 
     for i in detail.intents:
         events.append({"ts": i.created_at, "kind": "intent_declared",
@@ -54,9 +56,11 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
                 events.append({"ts": i.concluded_at, "kind": "intent_concluded",
                                "label": i.id, "detail": facts_by_id.get(i.to, ""), "order": 3})
 
-    for r in detail.reports:
-        events.append({"ts": r.created_at, "kind": "difficulty_report",
-                       "label": r.member, "detail": f"{r.difficulty}: {r.progress}", "order": 2})
+    events.extend(
+        {"ts": r.created_at, "kind": "difficulty_report",
+         "label": r.member, "detail": f"{r.difficulty}: {r.progress}", "order": 2}
+        for r in detail.reports
+    )
 
     if p.wp_path:
         events.append({"ts": p.updated_at, "kind": "wp_written", "label": p.wp_path, "detail": "", "order": 4})

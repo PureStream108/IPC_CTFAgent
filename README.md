@@ -8,7 +8,7 @@ Based on https://github.com/oritera/Cairn & https://github.com/verialabs/ctf-age
 - 基于 Cairn 信息共享机制与 CTF-Agent 智能体动态分配机制，新增动态难度反馈机制，优化单、多 Agent 之间的协同通信，实现交互流程流畅化、交互信息可视化清晰化
 
 - 增加了通用性，并不局限于 CTFD 平台的 CTF 挑战
-- 内置 Browser/Ghidra/ZAP MCP 适配器：解决LLM缺少真实浏览器环境/逆向不出完整逻辑的问题
+- 基于 Python 官方 `mcp` SDK 的异步 MCP client/server，内置 Browser/Ghidra/ZAP 等适配器
 - 初始将多种常用工具包装成 MCP 内置进容器，支持运行中动态安装新工具
 - 支持运行过程中动态输出日志（思考/工具调用/协同过程），支持针对日志对 Agent 进行优化
 - 支持 Memory 功能，包含Exp、涉及知识、试错点、工具调用
@@ -31,6 +31,49 @@ Based on https://github.com/oritera/Cairn & https://github.com/verialabs/ctf-age
 ```python
 docker compose up -d
 ```
+
+## 异步 MCP Client / Server
+
+MCP 服务由 `FastMCP` 定义，工具处理器使用异步函数；IPC Member 通过 `ClientSession`
+异步调用工具，并在一次任务中复用同一会话。支持进程内、stdio 和 Streamable HTTP
+传输。
+
+启动一个独立的 stdio MCP server：
+
+```bash
+python -m backend.mcp.mcp_server browser
+```
+
+使用独立 client 建立异步 stdio 会话并调用工具：
+
+```bash
+python -m backend.mcp.mcp_client browser navigate \
+  --arguments '{"url":"https://example.com"}'
+```
+
+启动 Streamable HTTP server：
+
+```bash
+python -m backend.mcp.mcp_server browser \
+  --transport streamable-http --host 0.0.0.0 --port 8100
+```
+
+Python 中可复用异步会话：
+
+```python
+from backend.mcp.shared import build_browser_mcp
+from backend.mcp.mcp_client import MCPClient
+
+async with MCPClient.in_process(build_browser_mcp()) as client:
+    tools = await client.list_tools()
+    result = await client.call_tool(
+        "navigate", {"url": "https://example.com"}
+    )
+```
+
+可用 server 名称：`memory`、`tool_search`、`tools`、`browser`、`ghidra`、
+`zap`。`memory`、`tool_search` 与 `tools` 可通过 `--root` 指定
+IPC 数据目录；`tools` 还可通过 `--category` 指定题目类别。
 
 ## About
 

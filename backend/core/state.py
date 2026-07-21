@@ -8,8 +8,7 @@ from backend.blackboard import graph_store
 from backend.core.config import AppConfig, load_config, save_config
 from backend.core.logging_util import IPCLogger
 from backend.blackboard.db import Database
-from backend.mcp.antsword import build_antsword_mcp
-from backend.mcp.base import MCPRegistry
+from backend.mcp.mcp_client import MCPRegistry
 from backend.mcp.shared import build_browser_mcp, build_ghidra_mcp, build_zap_mcp
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
@@ -67,14 +66,13 @@ class AppState:
         )
         self.network = NetworkManager(backend=self.config.runtime.sandbox_backend)
 
-        # Shared MCP servers (memory + tool_search + browser/ghidra/zap + antsword).
+        # Shared MCP servers (memory + tool_search + browser/ghidra/zap).
         self.mcps = MCPRegistry()
         self.mcps.register(build_memory_mcp(self.memory))
         self.mcps.register(build_tool_search_mcp(self.registry))
         self.mcps.register(build_browser_mcp())
         self.mcps.register(build_ghidra_mcp())
         self.mcps.register(build_zap_mcp())
-        self.mcps.register(build_antsword_mcp())
 
         self.projects_dir = self.root / "projects"
         self.wp_dir = self.root / "wp"

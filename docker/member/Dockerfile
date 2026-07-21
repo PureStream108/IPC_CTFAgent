@@ -133,7 +133,6 @@ RUN mkdir -p /opt/ipc-tools/tools \
     && git clone --depth=1 https://github.com/noraj/flask-session-cookie-manager.git /opt/ipc-tools/tools/flask-session-cookie/flask-session-cookie-manager-master \
     && git clone --depth=1 https://github.com/synacktiv/php_filter_chain_generator.git /opt/ipc-tools/tools/Php_chain/php_filter_chain_generator \
     && git clone --depth=1 https://github.com/chishaxie/BlindWaterMark.git /opt/ipc-tools/tools/BlindWaterMark \
-    && git clone --depth=1 https://github.com/AntSwordProject/AntSword.git /opt/ipc-tools/tools/Antsword/antSword-master \
     && git clone --depth=1 https://github.com/X1r0z/JNDIMap.git /opt/ipc-tools/tools/JNDIMap/JNDIMap-main \
     && git clone --depth=1 https://github.com/frohoff/ysoserial.git /opt/ipc-tools/tools/ysoserial-master \
     && git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool.git /opt/RsaCtfTool \

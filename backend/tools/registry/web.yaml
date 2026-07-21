@@ -71,9 +71,3 @@ tools:
     exec: java -jar JNDIMap.jar
     tags: [java, jndi, log4j, log4shell, rce, web]
     when_to_use: Log4j / JNDI lookup injection (${jndi:ldap://...}).
-  - name: antsword
-    description: WebShell management toolkit (wrapped as AntSword MCP, no GUI).
-    path: tools/Antsword/antSword-master
-    exec: mcp:antsword
-    tags: [webshell, php, management, web]
-    when_to_use: After uploading/obtaining a webshell; use the AntSword MCP tools.

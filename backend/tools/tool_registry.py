@@ -42,7 +42,7 @@ class ToolRegistry:
         self._tools: list[Tool] = []
         self._loaded = False
 
-    def load(self) -> "ToolRegistry":
+    def load(self) -> ToolRegistry:
         if self._loaded:
             return self
         self._tools = []
@@ -132,13 +132,13 @@ class ToolRegistry:
 
     def _cache_results(self, query: str, names: list[str]) -> None:
         import json
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
 
         conn = self._conn()
         try:
             conn.execute(
                 "INSERT OR REPLACE INTO tool_search_cache (query, results, created_at) VALUES (?, ?, ?)",
-                (query, json.dumps(names), datetime.now(timezone.utc).isoformat()),
+                (query, json.dumps(names), datetime.now(UTC).isoformat()),
             )
             conn.commit()
         finally:
