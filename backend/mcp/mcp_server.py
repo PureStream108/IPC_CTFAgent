@@ -11,7 +11,7 @@ MCPTransport = Literal["stdio", "sse", "streamable-http"]
 
 SERVER_NAMES = (
     "browser",
-    "ghidra",
+    "reverse",
     "memory",
     "tool_search",
     "tools",
@@ -32,10 +32,10 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
         from backend.mcp.shared import build_browser_mcp
 
         return build_browser_mcp()
-    if name == "ghidra":
-        from backend.mcp.shared import build_ghidra_mcp
+    if name == "reverse":
+        from backend.mcp.reverse_mcp import build_reverse_mcp
 
-        return build_ghidra_mcp()
+        return build_reverse_mcp()
     if name == "zap":
         from backend.mcp.shared import build_zap_mcp
 

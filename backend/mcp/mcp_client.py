@@ -167,10 +167,13 @@ class MCPClient:
         return _decode_tool_result(await self.call_tool_result(name, arguments))
 
 
+MCPRegistryTarget = MCPClientTarget | MCPClient
+
+
 class MCPRegistrySession:
     """Opens and reuses one async client session per named server."""
 
-    def __init__(self, targets: Mapping[str, MCPClientTarget]) -> None:
+    def __init__(self, targets: Mapping[str, MCPRegistryTarget]) -> None:
         self._targets = dict(targets)
         self._stack = AsyncExitStack()
         self._clients: dict[str, MCPClient] = {}
@@ -181,7 +184,8 @@ class MCPRegistrySession:
         self._open = True
         try:
             for name, target in self._targets.items():
-                self._clients[name] = await self._stack.enter_async_context(MCPClient(target))
+                client = target if isinstance(target, MCPClient) else MCPClient(target)
+                self._clients[name] = await self._stack.enter_async_context(client)
             return self
         except BaseException:
             self._open = False
@@ -224,15 +228,15 @@ class MCPRegistry:
     """Registry of MCP server definitions or remote transport targets."""
 
     def __init__(self) -> None:
-        self._targets: dict[str, MCPClientTarget] = {}
+        self._targets: dict[str, MCPRegistryTarget] = {}
 
     def register(self, server: FastMCP, name: str | None = None) -> None:
         self.register_target(name or server.name, server)
 
-    def register_target(self, name: str, target: MCPClientTarget) -> None:
+    def register_target(self, name: str, target: MCPRegistryTarget) -> None:
         self._targets[name] = target
 
-    def get(self, name: str) -> MCPClientTarget | None:
+    def get(self, name: str) -> MCPRegistryTarget | None:
         return self._targets.get(name)
 
     def names(self) -> list[str]:
@@ -241,7 +245,7 @@ class MCPRegistry:
     @asynccontextmanager
     async def session(
         self,
-        extra_servers: Mapping[str, MCPClientTarget] | None = None,
+        extra_servers: Mapping[str, MCPRegistryTarget] | None = None,
     ) -> AsyncIterator[MCPRegistrySession]:
         targets = {**self._targets, **dict(extra_servers or {})}
         async with MCPRegistrySession(targets) as session:
@@ -284,7 +288,7 @@ async def _run_cli(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Call an IPC MCP server through an async stdio session")
-    parser.add_argument("server", choices=("browser", "ghidra", "memory", "tool_search", "tools", "zap"))
+    parser.add_argument("server", choices=("browser", "reverse", "memory", "tool_search", "tools", "zap"))
     parser.add_argument("tool", nargs="?")
     parser.add_argument("--arguments", default="{}", help="JSON object passed to the tool")
     parser.add_argument("--root", default=".")

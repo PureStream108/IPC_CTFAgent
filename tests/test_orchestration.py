@@ -317,20 +317,18 @@ def test_member_assignment_records_graph_entry_fact(state):
     orch.shutdown()
 
 
-def test_orchestrator_reuses_existing_member_sandbox_when_memory_full(state):
+def test_orchestrator_adds_members_without_per_member_admission(state):
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "web")
     with state.db.connect() as conn:
-        intent = edge_store.create_intent(conn, pid, ["origin"], "reuse jade sandbox", "diamond")
+        intent = edge_store.create_intent(conn, pid, ["origin"], "launch jade", "diamond")
 
     state.config.runtime.sandbox_backend = "local"
     state.config.runtime.max_member_actions_per_task = 1
-    state.limiter.total_memory_gb = 20
-    state.limiter.per_agent_memory_gb = 5
-    for member in ("aventurine", "pearl", "jade", "topaz"):
-        assert state.limiter.reserve(f"proj_001-{member}", 5) is True
-        state.pool.get(pid, member)
+    state.limiter.max_concurrent_tasks = 1
+    assert state.limiter.acquire(pid) is True
+    state.pool.get(pid, "jade")
 
     orch = Orchestrator(
         state,
@@ -350,6 +348,51 @@ def test_orchestrator_reuses_existing_member_sandbox_when_memory_full(state):
     entries = state.logger.read_log("project", pid, None)
     assert not any(entry["event"] == "member_admission_denied" for entry in entries)
     assert any(entry["event"] == "member_done" and entry["member"] == "jade" for entry in entries)
+    orch.shutdown()
+
+
+def test_task_slot_queue_starts_next_project_after_release(state):
+    from backend.core.orchestrator import Orchestrator
+
+    project_ids = [_make_project(state, "web") for _ in range(3)]
+    state.limiter.max_concurrent_tasks = 2
+    orch = Orchestrator(state, max_workers=1)
+    orch._launch_member = lambda *args, **kwargs: True
+
+    for project_id in project_ids:
+        orch.start_project(project_id)
+
+    assert Lifecycle(state.db).status(project_ids[0]) == "running"
+    assert Lifecycle(state.db).status(project_ids[1]) == "running"
+    assert Lifecycle(state.db).status(project_ids[2]) == "created"
+    assert list(orch._pending_projects) == [project_ids[2]]
+
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, project_ids[0], "stopped")
+    orch.stop_project(project_ids[0])
+    orch._tick()
+
+    assert Lifecycle(state.db).status(project_ids[2]) == "running"
+    assert state.limiter.active_tasks() == sorted(project_ids[1:])
+    assert list(orch._pending_projects) == []
+    orch.shutdown()
+
+
+def test_orchestrator_builds_task_container_mcp_targets(state):
+    from backend.core.orchestrator import Orchestrator
+
+    state.pool.backend = "docker"
+    orch = Orchestrator(state, max_workers=1)
+    targets = orch._container_mcps("proj_001", "aventurine")
+
+    assert set(targets) == {"browser", "reverse", "zap"}
+    reverse_args = targets["reverse"].target.args
+    assert reverse_args == [
+        "exec", "-i", "-w", "/workspace/aventurine", "ipc-task-proj_001",
+        "python3", "-m", "backend.mcp.mcp_server", "reverse",
+    ]
+    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
+    assert targets["reverse"].read_timeout == 600
     orch.shutdown()
 
 

@@ -84,8 +84,8 @@ def get_runtime_config(state: AppState = Depends(get_state)):
         "runtime": state.config.runtime.model_dump(),
         "limits": state.config.limits.model_dump(),
         "limiter": {
-            "reserved_memory_gb": state.limiter.reserved_memory_gb,
-            "reservations": dict(state.limiter._reserved),
+            "max_concurrent_tasks": state.limiter.max_concurrent_tasks,
+            "active_tasks": state.limiter.active_tasks(),
         },
         "pool": {
             "active_keys": state.pool.active_keys(),

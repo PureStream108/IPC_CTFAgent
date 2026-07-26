@@ -25,6 +25,7 @@ INSERT OR IGNORE INTO settings (rowid, intent_timeout, reason_timeout) VALUES (1
 
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
+    external_id TEXT,
     title TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT 'misc',
     status TEXT NOT NULL DEFAULT 'created',
@@ -160,6 +161,11 @@ class Database:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.connect() as conn:
                 conn.executescript(SCHEMA)
+                columns = {
+                    row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+                }
+                if "external_id" not in columns:
+                    conn.execute("ALTER TABLE projects ADD COLUMN external_id TEXT")
             self._configured = True
         return self
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import re
-import subprocess
-import tempfile
 import time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -13,24 +12,6 @@ from typing import Any
 import requests
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
-
-_BUNDLED_CHROME_PATHS = (
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome",
-)
-_BUNDLED_GHIDRA_HEADLESS_PATHS = (
-    "/opt/ghidra/support/analyzeHeadless",
-)
-_BUNDLED_NM_PATHS = (
-    "/usr/bin/nm",
-    "/bin/nm",
-)
-_BUNDLED_OBJDUMP_PATHS = (
-    "/usr/bin/objdump",
-    "/bin/objdump",
-)
-
 
 class _TitleAndTextParser(HTMLParser):
     def __init__(self) -> None:
@@ -74,185 +55,206 @@ def _tool_unavailable(tool: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"available": False, "tool": tool, "error": detail, **extra}
 
 
-def _first_existing_path(paths: tuple[str, ...]) -> str | None:
-    for path in paths:
-        if path and Path(path).exists():
-            return path
-    return None
+class _BrowserSession:
+    def __init__(self) -> None:
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._lock = asyncio.Lock()
+
+    async def page(self):
+        async with self._lock:
+            if self._page is not None:
+                return self._page
+            from playwright.async_api import async_playwright
+
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=["--no-sandbox"],
+            )
+            self._context = await self._browser.new_context()
+            self._page = await self._context.new_page()
+            return self._page
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._browser is not None:
+                await self._browser.close()
+            if self._playwright is not None:
+                await self._playwright.stop()
+            self._playwright = self._browser = self._context = self._page = None
+
+    async def context(self):
+        await self.page()
+        return self._context
 
 
-def _configured_or_bundled(env_name: str, bundled_paths: tuple[str, ...]) -> str | None:
-    configured = os.environ.get(env_name, "").strip()
-    candidates = (configured, *bundled_paths) if configured else bundled_paths
-    return _first_existing_path(candidates)
+async def _page_snapshot(page) -> dict[str, Any]:
+    title = await page.title()
+    text = await page.locator("body").inner_text()
+    return {"final_url": page.url, "title": title, "text": text[:20000]}
 
 
-def _chrome_bin() -> str | None:
-    return _configured_or_bundled("IPC_CHROME_BIN", _BUNDLED_CHROME_PATHS)
-
-
-def _navigate(url: str, timeout: float) -> dict[str, Any]:
+def _close_browser_at_exit(browser: _BrowserSession) -> None:
+    if browser._playwright is None:
+        return
     try:
-        resp = requests.get(
-            url,
-            timeout=timeout,
-            allow_redirects=True,
-            headers={"User-Agent": "IPC_CTFAgent/1.0"},
-        )
-    except requests.RequestException as exc:
-        return _tool_unavailable("browser.navigate", str(exc), url=url)
-    content_type = resp.headers.get("content-type", "")
-    body = resp.text if "text" in content_type or "html" in content_type or not content_type else ""
-    title, text = _html_summary(body)
-    return {
-        "available": True,
-        "url": url,
-        "final_url": resp.url,
-        "status": resp.status_code,
-        "title": title,
-        "text": text,
-        "content_type": content_type,
-    }
+        asyncio.run(browser.close())
+    except Exception:
+        pass
 
 
-def _screenshot(url: str, path: str | None, timeout_ms: int) -> dict[str, Any]:
-    out = Path(path) if path else Path(tempfile.gettempdir()) / f"ipc_browser_{int(time.time()*1000)}.png"
-    chrome = _chrome_bin()
-    if not chrome:
-        return _tool_unavailable(
-            "browser.screenshot",
-            "Docker-bundled Chromium not found; rebuild ipc-app or set IPC_CHROME_BIN to an in-container path.",
-            url=url,
-            path=str(out),
-        )
-    cmd = [
-        chrome,
-        "--headless=new",
-        "--disable-gpu",
-        "--no-sandbox",
-        f"--screenshot={out}",
-        "--window-size=1365,900",
-        url,
-    ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=max(1, timeout_ms / 1000))
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return _tool_unavailable("browser.screenshot", str(exc), url=url, path=str(out))
-    if proc.returncode != 0 or not out.exists():
-        return _tool_unavailable(
-            "browser.screenshot",
-            (proc.stderr or proc.stdout or "Chrome did not create a screenshot").strip(),
-            url=url,
-            path=str(out),
-        )
-    return {"available": True, "url": url, "path": str(out)}
-
-
-def build_browser_mcp() -> MCPServer:
-    server = create_mcp_server("browser", "Real browser/HTTP verification tools")
+def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
+    server = create_mcp_server("browser", "Stateful Playwright browser tools")
+    browser = browser or _BrowserSession()
+    atexit.register(_close_browser_at_exit, browser)
 
     @server.tool(
         name="navigate",
-        description="Fetch a URL and return status, final URL, title, and visible text.",
+        description="Render a URL and return status, final URL, title, and visible text.",
     )
-    async def navigate(url: str, timeout: float = 12) -> dict[str, Any]:
-        return await asyncio.to_thread(_navigate, url, timeout)
+    async def navigate(
+        url: str,
+        wait_until: str = "load",
+        timeout_ms: int = 30000,
+    ) -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+            snapshot = await _page_snapshot(page)
+            content_type = ""
+            status = None
+            javascript_redirect = False
+            if response is not None:
+                status = response.status
+                content_type = (await response.all_headers()).get("content-type", "")
+                javascript_redirect = page.url != url and response.request.redirected_from is None
+                if content_type and "html" not in content_type and "text" not in content_type:
+                    body = (await response.body()).decode(errors="replace")
+                    title, text = _html_summary(body)
+                    snapshot.update({"title": title, "text": text or body[:20000]})
+            return {
+                "available": True,
+                "url": url,
+                "status": status,
+                "content_type": content_type,
+                "javascript_redirect": javascript_redirect,
+                **snapshot,
+            }
+        except Exception as exc:
+            return _tool_unavailable("browser.navigate", str(exc), url=url)
+
+    @server.tool(name="click", description="Click an element and return the resulting page state.")
+    async def click(selector: str) -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            await page.click(selector)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            return {"available": True, "selector": selector, **await _page_snapshot(page)}
+        except Exception as exc:
+            return _tool_unavailable("browser.click", str(exc), selector=selector)
+
+    @server.tool(name="fill", description="Fill an input or textarea without submitting it.")
+    async def fill(selector: str, value: str) -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            await page.fill(selector, value)
+            return {"available": True, "selector": selector, "value": value, "url": page.url}
+        except Exception as exc:
+            return _tool_unavailable("browser.fill", str(exc), selector=selector)
+
+    @server.tool(name="press", description="Press a keyboard key on the current page.")
+    async def press(key: str) -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            await page.keyboard.press(key)
+            return {"available": True, "key": key, **await _page_snapshot(page)}
+        except Exception as exc:
+            return _tool_unavailable("browser.press", str(exc), key=key)
+
+    @server.tool(name="eval_js", description="Evaluate JavaScript in the current page context.")
+    async def eval_js(script: str) -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            return {"available": True, "result": await page.evaluate(script), "url": page.url}
+        except Exception as exc:
+            return _tool_unavailable("browser.eval_js", str(exc))
+
+    @server.tool(name="get_content", description="Return rendered HTML and visible text for the current page.")
+    async def get_content() -> dict[str, Any]:
+        try:
+            page = await browser.page()
+            return {
+                "available": True,
+                "url": page.url,
+                "html": await page.content(),
+                "text": await page.locator("body").inner_text(),
+            }
+        except Exception as exc:
+            return _tool_unavailable("browser.get_content", str(exc))
 
     @server.tool(
         name="screenshot",
-        description="Capture a screenshot using Playwright or a Chrome/Chromium CLI if installed.",
+        description="Capture the current rendered page with Playwright.",
     )
     async def screenshot(
-        url: str,
         path: str | None = None,
-        timeout_ms: int = 15000,
+        full_page: bool = True,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(_screenshot, url, path, timeout_ms)
+        out = Path(path) if path else Path.cwd() / f"browser_{int(time.time() * 1000)}.png"
+        try:
+            page = await browser.page()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(out), full_page=full_page)
+            return {"available": True, "url": page.url, "path": str(out)}
+        except Exception as exc:
+            return _tool_unavailable("browser.screenshot", str(exc), path=str(out))
 
-    return server
+    @server.tool(name="cookies", description="Return cookies from the persistent browser context.")
+    async def cookies() -> dict[str, Any]:
+        try:
+            context = await browser.context()
+            return {"available": True, "cookies": await context.cookies()}
+        except Exception as exc:
+            return _tool_unavailable("browser.cookies", str(exc))
 
-
-def _ghidra_headless() -> str | None:
-    configured = os.environ.get("IPC_GHIDRA_HEADLESS") or os.environ.get("GHIDRA_ANALYZE_HEADLESS")
-    candidates = (configured, *_BUNDLED_GHIDRA_HEADLESS_PATHS) if configured else _BUNDLED_GHIDRA_HEADLESS_PATHS
-    return _first_existing_path(candidates)
-
-
-def _run_command(cmd: list[str], timeout: int = 60) -> tuple[bool, str]:
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc)
-    output = "\n".join(part for part in (proc.stdout, proc.stderr) if part).strip()
-    return proc.returncode == 0, output
-
-
-def _decompile(binary: str, function: str, timeout: int) -> dict[str, Any]:
-    binary_path = Path(binary)
-    if not binary_path.exists():
-        return _tool_unavailable("ghidra.decompile", f"binary not found: {binary}", binary=binary, function=function)
-    headless = _ghidra_headless()
-    if not headless:
-        return _tool_unavailable(
-            "ghidra.decompile",
-            "Docker-bundled Ghidra analyzeHeadless not found; rebuild ipc-app or set IPC_GHIDRA_HEADLESS to an in-container path.",
-            binary=binary,
-            function=function,
-        )
-    with tempfile.TemporaryDirectory(prefix="ipc_ghidra_") as tmp:
-        cmd = [headless, tmp, "ipc_project", "-import", str(binary_path), "-deleteProject"]
-        ok, output = _run_command(cmd, timeout=timeout)
-    return {
-        "available": ok,
-        "binary": binary,
-        "function": function,
-        "pseudocode": "" if ok else None,
-        "analysis_log": output[-12000:],
-    }
-
-
-def _list_functions(binary: str) -> dict[str, Any]:
-    binary_path = Path(binary)
-    if not binary_path.exists():
-        return _tool_unavailable("ghidra.list_functions", f"binary not found: {binary}", binary=binary)
-    cmd = None
-    nm = _configured_or_bundled("IPC_NM_BIN", _BUNDLED_NM_PATHS)
-    objdump = _configured_or_bundled("IPC_OBJDUMP_BIN", _BUNDLED_OBJDUMP_PATHS)
-    if nm:
-        cmd = [nm, "-C", str(binary_path)]
-    elif objdump:
-        cmd = [objdump, "-t", str(binary_path)]
-    if not cmd:
-        return _tool_unavailable("ghidra.list_functions", "Neither nm nor objdump is available.", binary=binary)
-    ok, output = _run_command(cmd, timeout=30)
-    names: list[str] = []
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[-2].upper() in {"T", "W", "FUNC", "F"}:
-            names.append(parts[-1])
-    return {"available": ok, "binary": binary, "functions": names[:500], "raw": output[-4000:] if not ok else ""}
-
-
-def build_ghidra_mcp() -> MCPServer:
-    server = create_mcp_server("ghidra", "Ghidra headless analysis adapter")
-
-    @server.tool(
-        name="decompile",
-        description="Run Ghidra headless analysis for a binary and return the analysis log.",
-    )
-    async def decompile(
-        binary: str,
-        function: str = "main",
-        timeout: int = 120,
+    @server.tool(name="set_cookie", description="Add or replace a cookie in the persistent browser context.")
+    async def set_cookie(
+        name: str,
+        value: str,
+        url: str | None = None,
+        domain: str | None = None,
+        path: str = "/",
+        http_only: bool = False,
+        secure: bool = False,
+        same_site: str = "Lax",
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(_decompile, binary, function, timeout)
-
-    @server.tool(
-        name="list_functions",
-        description="List symbols/functions with nm/objdump as a lightweight binary-analysis adapter.",
-    )
-    async def list_functions(binary: str) -> dict[str, Any]:
-        return await asyncio.to_thread(_list_functions, binary)
+        try:
+            context = await browser.context()
+            cookie: dict[str, Any] = {
+                "name": name,
+                "value": value,
+                "httpOnly": http_only,
+                "secure": secure,
+                "sameSite": same_site.capitalize(),
+            }
+            if url:
+                cookie["url"] = url
+            elif domain:
+                cookie["domain"] = domain
+                cookie["path"] = path
+            else:
+                page = await browser.page()
+                cookie["url"] = page.url
+            await context.add_cookies([cookie])
+            return {"available": True, "cookie": cookie}
+        except Exception as exc:
+            return _tool_unavailable("browser.set_cookie", str(exc), name=name)
 
     return server
 

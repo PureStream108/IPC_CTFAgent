@@ -18,7 +18,7 @@ from backend.core.difficulty import (
     normalize_difficulty,
 )
 from backend.core.logging_util import IPCLogger
-from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession
+from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
 from backend.members.adapters import BaseAdapter, MemberAction
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
@@ -49,6 +49,7 @@ class MemberDeps:
     mcps: MCPRegistry
     registry: ToolRegistry
     memory: MemoryStore
+    container_mcps: dict[str, MCPRegistryTarget] | None = None
     eval_interval: int = 7
     max_steps: int = 60
     max_actions_per_task: int = 4
@@ -108,7 +109,9 @@ class BaseMember:
         is_initial: bool = False,
     ) -> SolveResult:
         category_tools = build_category_tools_mcp(self.deps.registry, category)
-        async with self.deps.mcps.session({"tools": category_tools}) as mcp_session:
+        extra_mcps: dict[str, MCPRegistryTarget] = {"tools": category_tools}
+        extra_mcps.update(self.deps.container_mcps or {})
+        async with self.deps.mcps.session(extra_mcps) as mcp_session:
             return await self._solve_with_mcp(
                 project_id,
                 intent_id,
@@ -878,7 +881,7 @@ class BaseMember:
             "sandbox_backend": getattr(d.sandbox, "__class__", type(d.sandbox)).__name__,
             "runtime_notes": [
                 "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
-                "If sandbox_backend is DockerSandbox, use Linux commands inside the container.",
+                "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
                 "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
                 "If attachment_true is true, inspect the listed attachments before blind target probing.",
             ],
@@ -911,7 +914,7 @@ class BaseMember:
                 "available": [name for name, ok in cli_availability.items() if ok],
                 "missing": [name for name, ok in cli_availability.items() if not ok],
             },
-            "available_mcps": d.mcps.names(),
+            "available_mcps": list(dict.fromkeys([*d.mcps.names(), *(d.container_mcps or {})])),
             "public_mcps": list(PUBLIC_MCPS),
             "available_languages": list(LANGUAGES),
             "attachment_true": attachment_true,

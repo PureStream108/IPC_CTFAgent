@@ -1,9 +1,9 @@
 services:
-  ipc-member-image:
+  ipc-task-image:
     build:
       context: .
       dockerfile: docker/member/Dockerfile
-    image: ipc-member:latest
+    image: ipc-task:latest
     command: ["true"]
     restart: "no"
 
@@ -39,9 +39,6 @@ services:
       - IPC_LOG_ENABLED=true
       - IPC_LOG_EXPORT_DIR=/app/exports/logs
       - IPC_WP_EXPORT_DIR=/app/exports/Wp
-      - IPC_CHROME_BIN=/usr/bin/chromium
-      - IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
-      - ZAP_API_URL=http://ipc-zap:8080
     volumes:
       - ipc_data:/app/data
       - ipc_memory:/app/memory
@@ -54,12 +51,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
-      - ipc-member-image
+      - ipc-task-image
       - ipc-zap
 
-# Shared MCP runtime:
-# - Browser and Ghidra run from binaries bundled in the ipc-app image.
-# - ZAP runs as the shared ipc-zap service and is reached through ZAP_API_URL.
+# Browser and reverse MCP servers run inside each task container. ZAP remains a
+# shared service on the Compose network and is reached by the task-side server.
 
 volumes:
   ipc_data:

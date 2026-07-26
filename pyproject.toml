@@ -2,7 +2,7 @@
 name = "ipc-ctfagent"
 version = "0.1.0"
 description = "IPC_CTFAgent"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3",

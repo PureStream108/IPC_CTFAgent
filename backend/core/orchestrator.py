@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import suppress
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -14,8 +15,10 @@ from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.memory_writer import write_memory
 from backend.core.project_manager import ProjectManager
 from backend.core.resource_manager import ResourceManager
+from backend.mcp.mcp_client import MCPClient, MCPRegistryTarget
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
+from backend.sandbox.task_sandbox import member_workdir, task_container_name
 
 
 @dataclass(slots=True)
@@ -38,6 +41,8 @@ class Orchestrator:
         self._task_index: dict[tuple[str, str], Any] = {}
         self._completing: set[str] = set()
         self._reason_checkpoints: dict[str, ReasonCheckpoint] = {}
+        self._pending_projects: deque[str] = deque()
+        self._pending_project_ids: set[str] = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -80,16 +85,51 @@ class Orchestrator:
             return
         if status in ("running", "flag_found", "wp_writing", "memory_writing", "completed"):
             return
-        self.projects.ensure_dirs(project_id)
-        self.projects.start_challenge_env(project_id)
-        with suppress(LifecycleError):
-            self.lifecycle.transition(project_id, "running")
-        assignment = self.diamond.assign_initial(project_id)
+        if not self.resources.acquire_task(project_id):
+            self._queue_project(project_id)
+            self.state.logger.project(
+                "task_admission_denied",
+                project_id,
+                active_tasks=self.state.limiter.active_tasks(),
+                max_concurrent_tasks=self.state.limiter.max_concurrent_tasks,
+            )
+            return
+        self._remove_queued_project(project_id)
+        try:
+            self.projects.ensure_dirs(project_id)
+            self.projects.start_challenge_env(project_id)
+            with suppress(LifecycleError):
+                self.lifecycle.transition(project_id, "running")
+            assignment = self.diamond.assign_initial(project_id)
+        except Exception:
+            self.resources.release_project(project_id)
+            self.projects.teardown(project_id)
+            raise
         if assignment is None:
             self.state.logger.project("no_members_available", project_id)
+            with suppress(LifecycleError):
+                self.lifecycle.transition(project_id, "stopped")
+            self.resources.release_project(project_id)
+            self.projects.teardown(project_id)
             return
         self.state.logger.project("project_scheduler_started", project_id, member=assignment.member, intent=assignment.intent_id)
-        self._launch_member(project_id, assignment.member, assignment.intent_id, self._category(project_id), assignment.is_initial)
+        try:
+            launched = self._launch_member(
+                project_id,
+                assignment.member,
+                assignment.intent_id,
+                self._category(project_id),
+                assignment.is_initial,
+            )
+            if not launched:
+                raise RuntimeError(f"configured member is unavailable: {assignment.member}")
+        except Exception as exc:
+            with suppress(LifecycleError):
+                self.lifecycle.transition(project_id, "stopped")
+            self.resources.release_project(project_id)
+            self.projects.teardown(project_id)
+            self.state.logger.project("project_start_failed", project_id, error=str(exc))
+            raise
 
     def resume_project(self, project_id: str) -> None:
         self._reconcile_resources()
@@ -101,8 +141,23 @@ class Orchestrator:
             return
         if status != "stopped":
             return
-        self.projects.ensure_dirs(project_id)
-        self.projects.start_challenge_env(project_id)
+        if not self.resources.acquire_task(project_id):
+            self._queue_project(project_id)
+            self.state.logger.project(
+                "task_admission_denied",
+                project_id,
+                active_tasks=self.state.limiter.active_tasks(),
+                max_concurrent_tasks=self.state.limiter.max_concurrent_tasks,
+            )
+            return
+        self._remove_queued_project(project_id)
+        try:
+            self.projects.ensure_dirs(project_id)
+            self.projects.start_challenge_env(project_id)
+        except Exception:
+            self.resources.release_project(project_id)
+            self.projects.teardown(project_id)
+            raise
         try:
             self.lifecycle.transition(project_id, "running")
         except LifecycleError:
@@ -111,6 +166,8 @@ class Orchestrator:
         with self.state.db.connect() as conn:
             detail = graph_store.project_detail(conn, project_id)
             if detail is None:
+                self.resources.release_project(project_id)
+                self.projects.teardown(project_id)
                 return
             graph_store.set_agent_state(conn, project_id, "diamond", "active")
             conn.execute(
@@ -224,15 +281,6 @@ class Orchestrator:
         cfg = self._member_config(member_name)
         if cfg is None:
             return False
-        if not self.resources.can_admit_member(project_id, member_name):
-            self.state.logger.project(
-                "member_admission_denied",
-                project_id,
-                member=member_name,
-                reserved_memory_gb=self.state.limiter.reserved_memory_gb,
-                active_sandboxes=self.state.pool.active_keys(),
-            )
-            return False
         sandbox = self.resources.sandbox_for(project_id, member_name)
         self._record_member_assignment(project_id, member_name, intent_id)
         deps = MemberDeps(
@@ -242,6 +290,7 @@ class Orchestrator:
             mcps=self.state.mcps,
             registry=self.state.registry,
             memory=self.state.memory,
+            container_mcps=self._container_mcps(project_id, member_name),
             eval_interval=self.state.config.runtime.eval_interval_steps,
             max_steps=self.state.config.runtime.max_member_steps,
             max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
@@ -257,6 +306,35 @@ class Orchestrator:
             self._futures.setdefault(project_id, []).append(future)
             self._task_index[(project_id, intent_id)] = future
         return True
+
+    def _container_mcps(self, project_id: str, member: str) -> dict[str, MCPRegistryTarget]:
+        if self.state.pool.backend != "docker":
+            return {}
+        container = task_container_name(project_id)
+        workdir = member_workdir(member)
+
+        def target(server: str, *, env: dict[str, str] | None = None) -> MCPClient:
+            args = ["exec", "-i"]
+            for key, value in (env or {}).items():
+                args.extend(["-e", f"{key}={value}"])
+            args.extend(
+                [
+                    "-w",
+                    workdir,
+                    container,
+                    "python3",
+                    "-m",
+                    "backend.mcp.mcp_server",
+                    server,
+                ]
+            )
+            return MCPClient.stdio("docker", args, read_timeout=600)
+
+        return {
+            "browser": target("browser"),
+            "reverse": target("reverse"),
+            "zap": target("zap", env={"ZAP_API_URL": "http://ipc-zap:8080"}),
+        }
 
     def _record_member_assignment(self, project_id: str, member_name: str, intent_id: str) -> None:
         with self.state.db.connect() as conn:
@@ -306,6 +384,7 @@ class Orchestrator:
     # ---- stop ----
 
     def stop_project(self, project_id: str) -> None:
+        self._remove_queued_project(project_id)
         with self._lock:
             members = list(self._members.get(project_id, {}).values())
         for m in members:
@@ -384,6 +463,7 @@ class Orchestrator:
 
     def _tick(self) -> None:
         self._reconcile_resources()
+        self._drain_pending_projects()
         with self.state.db.connect() as conn:
             graph_store.expire_reason_leases(conn, self.state.config.runtime.reason_timeout)
             edge_store.expire_workers(conn, self.state.config.runtime.intent_timeout)
@@ -393,6 +473,9 @@ class Orchestrator:
         self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
             if summary.status != "running":
+                continue
+            if not self.resources.acquire_task(summary.id):
+                self._queue_project(summary.id)
                 continue
             self._dispatch_project(summary.id)
 
@@ -468,12 +551,49 @@ class Orchestrator:
             if summary.status in ("running", "flag_found", "wp_writing", "memory_writing")
         }
         reclaimed = self.resources.reclaim_orphaned_projects(active_project_ids)
+        for project_id in self.state.limiter.active_tasks():
+            if project_id not in active_project_ids:
+                self.state.limiter.release(project_id)
         if reclaimed:
             self.state.logger.project(
                 "orphaned_project_resources_reclaimed",
                 "system",
                 projects=reclaimed,
             )
+
+    def _queue_project(self, project_id: str) -> None:
+        with self._lock:
+            if project_id in self._pending_project_ids:
+                return
+            self._pending_project_ids.add(project_id)
+            self._pending_projects.append(project_id)
+
+    def _remove_queued_project(self, project_id: str) -> None:
+        with self._lock:
+            if project_id not in self._pending_project_ids:
+                return
+            self._pending_project_ids.discard(project_id)
+            self._pending_projects = deque(
+                queued for queued in self._pending_projects if queued != project_id
+            )
+
+    def _drain_pending_projects(self) -> None:
+        while True:
+            with self._lock:
+                if not self._pending_projects:
+                    return
+                project_id = self._pending_projects[0]
+            if not self.resources.can_admit_task(project_id):
+                return
+            self._remove_queued_project(project_id)
+            status = self.lifecycle.status(project_id)
+            if status == "created":
+                self.start_project(project_id)
+            elif status == "stopped":
+                self.resume_project(project_id)
+            elif status == "running":
+                if self.resources.acquire_task(project_id):
+                    self._dispatch_project(project_id)
 
     def _select_member_for_intent(self, project_id: str, detail, intent, active: set[str]) -> str | None:
         preferred = self._intent_member_candidates(detail, intent)

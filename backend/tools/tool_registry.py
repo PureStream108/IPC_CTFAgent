@@ -9,7 +9,7 @@ import yaml
 REGISTRY_DIR = Path(__file__).resolve().parent / "registry"
 
 # Public tools/MCPs every project may use regardless of category.
-PUBLIC_MCPS = ("browser", "ghidra", "zap")
+PUBLIC_MCPS = ("browser", "reverse", "zap")
 # Languages/runtimes always available in the member sandbox.
 LANGUAGES = ("python", "java", "go", "rust", "php", "nodejs", "maven")
 

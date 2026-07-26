@@ -108,3 +108,37 @@ def test_broadcast(db):
         bs = graph_store.list_broadcasts(conn)
     assert bs[0].flag == "flag{abc}"
     assert bs[0].title == "Pwnme"
+
+
+def test_database_migrates_external_id_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'misc',
+            status TEXT NOT NULL DEFAULT 'created',
+            flag TEXT,
+            wp_path TEXT,
+            log_filename TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            reason_worker TEXT,
+            reason_trigger TEXT,
+            reason_started_at TEXT,
+            reason_last_heartbeat_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    database = Database(path).configure()
+
+    with database.connect() as migrated:
+        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(projects)")}
+    assert "external_id" in columns

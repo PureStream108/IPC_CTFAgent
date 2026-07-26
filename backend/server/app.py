@@ -9,9 +9,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.api import config as config_router
+from backend.api import flags as flags_router
 from backend.api import graph as graph_router
 from backend.api import logs as logs_router
 from backend.api import memory as memory_router
+from backend.api import platform as platform_router
 from backend.api import project as project_router
 from backend.api import solve as solve_router
 from backend.api import wp as wp_router
@@ -51,6 +53,8 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     app.include_router(config_router.router)
     app.include_router(logs_router.router)
     app.include_router(wp_router.router)
+    app.include_router(platform_router.router)
+    app.include_router(flags_router.router)
 
     @app.get("/", include_in_schema=False)
     def index():

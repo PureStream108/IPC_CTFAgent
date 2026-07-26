@@ -8,11 +8,11 @@ import threading
 import pytest
 import requests
 
-from backend.sandbox import docker_manager
+from backend.sandbox import docker_manager, task_sandbox
 from backend.core.resource_manager import ResourceManager
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
-from backend.sandbox.resource_limiter import ResourceLimiter
+from backend.sandbox.resource_limiter import TaskSlotLimiter
 from backend.sandbox.sandbox import LocalSandbox
 
 
@@ -79,59 +79,15 @@ def test_local_sandbox_exposes_webui_via_proxy(tmp_path):
     thread.join(timeout=1)
 
 
-def test_resource_limiter_per_agent_cap():
-    rl = ResourceLimiter(total_memory_gb=8, per_agent_memory_gb=5)
-    assert rl.reserve("a", 5) is True
-    assert rl.reserve("b", 5) is False  # 10 > 8 total
-    assert rl.reserve("b", 3) is True   # 5+3 = 8 ok
-    rl.release("a")
-    assert rl.reserved_memory_gb == 3
-
-
-def test_resource_limiter_rejects_over_per_agent():
-    rl = ResourceLimiter(per_agent_memory_gb=5)
-    assert rl.can_admit(6) is False
-    assert rl.reserve("a", 6) is False
-
-
-def test_resource_limiter_repeated_reserve_same_agent_replaces_reservation():
-    rl = ResourceLimiter(total_memory_gb=8, per_agent_memory_gb=5)
-    assert rl.reserve("a", 5) is True
-    assert rl.reserve("a", 3) is True
-    assert rl.reserved_memory_gb == 3
-    assert rl.reserve("b", 5) is True
-    assert rl.reserved_memory_gb == 8
-
-
-def test_resource_manager_resets_leaked_reservations_when_no_sandboxes(tmp_path):
-    rl = ResourceLimiter(total_memory_gb=5, per_agent_memory_gb=5)
-    assert rl.reserve("ghost", 5) is True
-    pool = ContainerPool(backend="local", workspace_root=tmp_path)
-    manager = ResourceManager(rl, pool)
-
-    assert manager.can_admit_member() is True
-    assert rl.reserved_memory_gb == 0
-
-
-def test_resource_manager_allows_reusing_existing_sandbox_when_memory_full():
-    class FakePool:
-        def active_keys(self):
-            return [
-                ("proj_001", "aventurine"),
-                ("proj_001", "pearl"),
-                ("proj_001", "jade"),
-                ("proj_001", "topaz"),
-            ]
-
-    rl = ResourceLimiter(total_memory_gb=20, per_agent_memory_gb=5)
-    for member in ("aventurine", "pearl", "jade", "topaz"):
-        assert rl.reserve(f"proj_001-{member}", 5) is True
-    manager = ResourceManager(rl, FakePool())
-
-    assert rl.reserved_memory_gb == 20
-    assert manager.can_admit_member("proj_001", "jade") is True
-    assert manager.can_admit_member("proj_001", "pearl") is True
-    assert manager.can_admit_member("proj_001", "sapphire") is False
+def test_task_slot_limiter_is_project_scoped_and_idempotent():
+    limiter = TaskSlotLimiter(max_concurrent_tasks=2)
+    assert limiter.acquire("proj_001") is True
+    assert limiter.acquire("proj_001") is True
+    assert limiter.acquire("proj_002") is True
+    assert limiter.acquire("proj_003") is False
+    assert limiter.active_tasks() == ["proj_001", "proj_002"]
+    limiter.release("proj_001")
+    assert limiter.acquire("proj_003") is True
 
 
 def test_resource_manager_reclaims_orphaned_projects():
@@ -140,16 +96,16 @@ def test_resource_manager_reclaims_orphaned_projects():
             self.keys = [("proj_001", "aventurine"), ("proj_002", "jade")]
             self.stopped = []
 
-        def active_keys(self):
-            return list(self.keys)
+        def active_projects(self):
+            return sorted({project_id for project_id, _ in self.keys})
 
         def stop_project(self, project_id):
             self.stopped.append(project_id)
             self.keys = [key for key in self.keys if key[0] != project_id]
 
-    rl = ResourceLimiter(total_memory_gb=10, per_agent_memory_gb=5)
-    assert rl.reserve("proj_001-aventurine", 5) is True
-    assert rl.reserve("proj_002-jade", 5) is True
+    rl = TaskSlotLimiter(max_concurrent_tasks=2)
+    assert rl.acquire("proj_001") is True
+    assert rl.acquire("proj_002") is True
     pool = FakePool()
     manager = ResourceManager(rl, pool)
 
@@ -157,7 +113,7 @@ def test_resource_manager_reclaims_orphaned_projects():
 
     assert reclaimed == ["proj_001"]
     assert pool.stopped == ["proj_001"]
-    assert rl.reserved_memory_gb == 10
+    assert rl.active_tasks() == ["proj_002"]
 
 
 def test_container_pool_isolated_workspaces(tmp_path):
@@ -170,21 +126,15 @@ def test_container_pool_isolated_workspaces(tmp_path):
     assert pool.get("proj_001", "aventurine") is sb1
 
 
-def test_container_pool_docker_isolates_member_containers_and_workdirs(tmp_path, monkeypatch):
+def test_container_pool_docker_shares_one_task_container_between_members(tmp_path, monkeypatch):
     created = []
 
-    class FakeDockerSandbox:
-        def __init__(self, name, image, env, memory_gb, network, limiter, workdir, attachments_dir=None):
-            self.name = name
-            self.image = image
-            self.env = env
-            self.memory_gb = memory_gb
-            self.network = network
-            self.limiter = limiter
-            self.workdir = workdir
-            self.attachments_dir = attachments_dir
+    class FakeMemberSandbox:
+        def __init__(self, task, member):
+            self.task = task
+            self.name = f"{task.project_id}-{member}"
+            self.workdir = f"/workspace/{member}"
             self.started = False
-            created.append(self)
 
         def start(self):
             self.started = True
@@ -192,12 +142,28 @@ def test_container_pool_docker_isolates_member_containers_and_workdirs(tmp_path,
         def stop(self):
             self.started = False
 
-    monkeypatch.setattr(docker_manager, "DockerSandbox", FakeDockerSandbox)
+    class FakeTaskSandbox:
+        def __init__(self, project_id, image, env, network, attachments_dir=None):
+            self.project_id = project_id
+            self.image = image
+            self.env = env
+            self.network = network
+            self.attachments_dir = attachments_dir
+            self.views = {}
+            created.append(self)
+
+        def member_view(self, member):
+            return self.views.setdefault(member, FakeMemberSandbox(self, member))
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(task_sandbox, "TaskSandbox", FakeTaskSandbox)
 
     pool = ContainerPool(
         backend="docker",
-        image="ipc-member:latest",
-        limiter=ResourceLimiter(),
+        image="ipc-task:latest",
+        limiter=TaskSlotLimiter(),
         workspace_root=tmp_path / "projects",
     )
     sb1 = pool.get("proj_001", "aventurine")
@@ -206,14 +172,15 @@ def test_container_pool_docker_isolates_member_containers_and_workdirs(tmp_path,
     assert sb1 is not sb2
     assert sb1.name == "proj_001-aventurine"
     assert sb2.name == "proj_001-pearl"
-    assert sb1.workdir == "/workspace/proj_001/aventurine"
-    assert sb2.workdir == "/workspace/proj_001/pearl"
-    assert sb1.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
-    assert sb2.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
+    assert sb1.workdir == "/workspace/aventurine"
+    assert sb2.workdir == "/workspace/pearl"
+    assert sb1.task is sb2.task
+    assert sb1.task.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
     assert sb1.started is True
     assert sb2.started is True
     assert pool.get("proj_001", "aventurine") is sb1
-    assert created == [sb1, sb2]
+    assert created == [sb1.task]
+    assert pool.active_projects() == ["proj_001"]
 
 
 def test_container_pool_stop_project(tmp_path):
@@ -296,12 +263,70 @@ def test_load_docker_sdk_skips_repo_local_shadow(monkeypatch, tmp_path):
     assert docker_manager.sys.modules["docker"] is sdk
 
 
-def test_docker_sandbox_releases_reservation_on_start_failure(monkeypatch):
-    limiter = ResourceLimiter(total_memory_gb=5, per_agent_memory_gb=5)
-    sb = docker_manager.DockerSandbox(name="broken", image="ipc-member:latest", limiter=limiter)
+def test_task_sandbox_clears_container_on_start_failure(monkeypatch):
+    sb = task_sandbox.TaskSandbox(project_id="broken", image="ipc-task:latest")
 
     monkeypatch.setattr(sb, "_docker", lambda: (_ for _ in ()).throw(RuntimeError("docker unavailable")))
 
     with pytest.raises(RuntimeError, match="docker unavailable"):
         sb.start()
-    assert limiter.reserved_memory_gb == 0
+    assert sb._container is None
+
+
+def test_task_sandbox_initializes_shared_workspace_and_copies_attachments(tmp_path, monkeypatch):
+    from docker.errors import NotFound
+
+    attachments = tmp_path / "attachments"
+    attachments.mkdir()
+    (attachments / "challenge.bin").write_bytes(b"binary")
+
+    class FakeContainer:
+        attrs = {"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}}
+
+        def __init__(self):
+            self.commands = []
+            self.archives = []
+
+        def exec_run(self, command, **kwargs):
+            self.commands.append((command, kwargs))
+            return types.SimpleNamespace(exit_code=0, output=b"")
+
+        def put_archive(self, path, data):
+            self.archives.append((path, data))
+
+        def remove(self, force=False):
+            return None
+
+    container = FakeContainer()
+
+    class FakeContainers:
+        def __init__(self):
+            self.run_kwargs = None
+
+        def get(self, name):
+            raise NotFound("missing")
+
+        def run(self, **kwargs):
+            self.run_kwargs = kwargs
+            return container
+
+    containers = FakeContainers()
+    client = types.SimpleNamespace(containers=containers)
+    sandbox = task_sandbox.TaskSandbox(
+        project_id="proj_001",
+        image="ipc-task:latest",
+        attachments_dir=attachments,
+    )
+    monkeypatch.setattr(sandbox, "_docker", lambda: client)
+    monkeypatch.setattr(sandbox, "_shared_network_name", lambda: None)
+
+    sandbox.start()
+    aventurine = sandbox.member_view("aventurine")
+    pearl = sandbox.member_view("pearl")
+
+    assert containers.run_kwargs["name"] == "ipc-task-proj_001"
+    assert "mem_limit" not in containers.run_kwargs
+    assert container.archives and container.archives[0][0] == "/workspace/attachments"
+    assert aventurine._task is pearl._task is sandbox
+    assert aventurine.workdir == "/workspace/aventurine"
+    assert pearl.workdir == "/workspace/pearl"

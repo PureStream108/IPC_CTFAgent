@@ -118,6 +118,7 @@ def expire_reason_leases(conn: sqlite3.Connection, timeout: int, project_id: str
 def project_meta(row: sqlite3.Row) -> ProjectMeta:
     return ProjectMeta(
         id=row["id"],
+        external_id=row["external_id"],
         title=row["title"],
         category=row["category"],
         status=row["status"],
@@ -141,6 +142,7 @@ def create_project(
     goal: str,
     category: str,
     hints: list[tuple[str, str]] | None = None,
+    external_id: str | None = None,
 ) -> str:
     pid = next_project_id(conn)
     now = utcnow()
@@ -150,9 +152,9 @@ def create_project(
     ]
     log_filename = numbered_filename(title, ".jsonl", used, fallback=pid)
     conn.execute(
-        "INSERT INTO projects (id, title, category, status, log_filename, created_at, updated_at) "
-        "VALUES (?, ?, ?, 'created', ?, ?, ?)",
-        (pid, title, category, log_filename, now, now),
+        "INSERT INTO projects (id, external_id, title, category, status, log_filename, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 'created', ?, ?, ?)",
+        (pid, external_id, title, category, log_filename, now, now),
     )
     node_store.insert_fact(conn, pid, "origin", origin)
     node_store.insert_fact(conn, pid, "goal", goal)

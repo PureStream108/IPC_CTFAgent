@@ -1,6 +1,4 @@
 limits:
-  total_cpu: 4          # cores across all containers
-  total_memory_gb: 20   # GB across all containers
-  total_disk_gb: 25     # GB across all containers
-  per_agent_memory_gb: 5  # per Member / Diamond
-  network: true         # all containers may reach the network
+  total_cpu: 4               # cores across all containers
+  max_concurrent_tasks: 5    # max CTF tasks running at once (one container each)
+  network: true              # all containers may reach the network

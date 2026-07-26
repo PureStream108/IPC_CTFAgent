@@ -88,6 +88,7 @@ class Broadcast(BaseModel):
 
 class ProjectMeta(BaseModel):
     id: str
+    external_id: str | None = None
     title: str
     category: str
     status: ProjectStatus

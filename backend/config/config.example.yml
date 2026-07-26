@@ -36,7 +36,5 @@ runtime:
   max_member_actions_per_task: 20
 limits:
   total_cpu: 4
-  total_memory_gb: 20
-  total_disk_gb: 25
-  per_agent_memory_gb: 5
+  max_concurrent_tasks: 5
   network: true

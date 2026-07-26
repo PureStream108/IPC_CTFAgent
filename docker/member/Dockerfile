@@ -151,6 +151,42 @@ RUN sed -i 's/from fractions import gcd/from math import gcd/' /opt/cado-nfs/scr
     && printf '#!/bin/sh\nexport PYTHONPATH=/opt/cado-nfs/scripts/cadofactor${PYTHONPATH:+:$PYTHONPATH}\nexec python3 /opt/cado-nfs/cado-nfs.py "$@"\n' > /usr/local/bin/cado-nfs \
     && chmod +x /usr/local/bin/cado-nfs
 
+# Container-backed MCP runtimes live beside the CTF tools so paths seen by a
+# Member are the same paths used by browser and reverse analysis.
+ARG TEMURIN_JDK_URL=https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse
+RUN mkdir -p /opt/java21 \
+    && wget -qO /tmp/jdk21.tar.gz "$TEMURIN_JDK_URL" \
+    && tar -xzf /tmp/jdk21.tar.gz -C /opt/java21 --strip-components=1 \
+    && rm -f /tmp/jdk21.tar.gz
+ENV GHIDRA_JAVA_HOME=/opt/java21
+ENV JAVA_HOME=/opt/java21
+ENV PATH="/opt/java21/bin:${PATH}"
+
+ARG GHIDRA_VERSION=12.1.2
+ARG GHIDRA_DATE=20260605
+ARG GHIDRA_TAG=Ghidra_12.1.2_build
+RUN wget -qO /tmp/ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip" \
+    && unzip -q /tmp/ghidra.zip -d /opt \
+    && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
+    && rm -f /tmp/ghidra.zip \
+    && pip3 install --no-cache-dir /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-*.whl
+
+# Ubuntu's system packaging library is too old for current setuptools and can
+# silently produce empty UNKNOWN wheels, so use an explicit build toolchain.
+RUN pip3 install --no-cache-dir --upgrade "setuptools>=68" "packaging>=24" wheel \
+    && pip3 install --no-cache-dir --no-build-isolation \
+        "git+https://github.com/radareorg/radare2-r2pipe.git@d87a5759b1c1a522f0f7e59baa938f80415fd038#subdirectory=python"
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+ENV IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
+
+RUN pip3 install --no-cache-dir playwright \
+    && playwright install --with-deps chromium
+ENV IPC_CHROME_BIN=/usr/bin/chromium
+
+COPY pyproject.toml /opt/ipc/pyproject.toml
+COPY backend /opt/ipc/backend
+RUN pip3 install --no-cache-dir --no-build-isolation /opt/ipc
+
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]

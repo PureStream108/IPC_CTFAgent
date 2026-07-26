@@ -1,34 +1,25 @@
 from __future__ import annotations
 
 from backend.sandbox.container_pool import ContainerPool
-from backend.sandbox.resource_limiter import ResourceLimiter
+from backend.sandbox.resource_limiter import TaskSlotLimiter
 
 
 class ResourceManager:
-    def __init__(self, limiter: ResourceLimiter, pool: ContainerPool):
+    def __init__(self, limiter: TaskSlotLimiter, pool: ContainerPool):
         self.limiter = limiter
         self.pool = pool
 
-    def can_admit_member(self, project_id: str | None = None, member: str | None = None) -> bool:
-        if (
-            project_id is not None
-            and member is not None
-            and (project_id, member) in self.pool.active_keys()
-        ):
-            return True
-        if self.limiter.can_admit():
-            return True
-        if not self.pool.active_keys():
-            self.limiter.reset()
-            return self.limiter.can_admit()
-        return False
+    def can_admit_task(self, project_id: str) -> bool:
+        return self.limiter.can_admit(project_id)
+
+    def acquire_task(self, project_id: str) -> bool:
+        return self.limiter.acquire(project_id)
 
     def reclaim_orphaned_projects(self, active_project_ids: set[str]) -> list[str]:
-        orphaned = sorted({project_id for project_id, _ in self.pool.active_keys() if project_id not in active_project_ids})
+        orphaned = sorted(pid for pid in self.pool.active_projects() if pid not in active_project_ids)
         for project_id in orphaned:
             self.pool.stop_project(project_id)
-        if orphaned and not self.pool.active_keys():
-            self.limiter.reset()
+            self.limiter.release(project_id)
         return orphaned
 
     def sandbox_for(self, project_id: str, member: str, env: dict | None = None):
@@ -36,3 +27,4 @@ class ResourceManager:
 
     def release_project(self, project_id: str) -> None:
         self.pool.stop_project(project_id)
+        self.limiter.release(project_id)

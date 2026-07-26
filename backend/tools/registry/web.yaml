@@ -1,5 +1,17 @@
 category: web
 tools:
+  - name: browser
+    description: Stateful Playwright browser MCP with rendering, interaction, cookies, JavaScript, and screenshots.
+    path: task-container
+    exec: mcp:browser
+    tags: [browser, playwright, javascript, web]
+    when_to_use: Render JavaScript applications, interact with forms, or preserve a login session across requests.
+  - name: zap
+    description: OWASP ZAP spider and active-scan MCP reached from the task container over the shared network.
+    path: task-container
+    exec: mcp:zap
+    tags: [zap, spider, active-scan, web]
+    when_to_use: Crawl an authorized challenge target or verify likely web vulnerabilities after manual reconnaissance.
   - name: sqlmap
     description: Automatic SQL injection detection and database takeover tool.
     path: tools/sqlmap/sqlmapproject-sqlmap-03be590

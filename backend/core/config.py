@@ -46,9 +46,9 @@ class LimitsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     total_cpu: int = 4
-    total_memory_gb: int = 20
-    total_disk_gb: int = 25
-    per_agent_memory_gb: int = 5
+    # Max CTF tasks running concurrently. Each task owns one shared container;
+    # containers are not memory-capped, so there is no per-agent memory limit.
+    max_concurrent_tasks: int = Field(default=5, gt=0)
     network: bool = True
 
 
@@ -127,6 +127,15 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
             m.model = defaults.get(m.api_format, "")
 
 
+# Limit keys removed in the task-slot model. Silently dropped from old configs
+# so an existing config.yaml/limits.yaml does not fail extra="forbid" validation.
+_LEGACY_LIMIT_KEYS = ("total_memory_gb", "total_disk_gb", "per_agent_memory_gb")
+
+
+def _strip_legacy_limits(limits: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in limits.items() if k not in _LEGACY_LIMIT_KEYS}
+
+
 def load_config(config_dir: Path | None = None) -> AppConfig:
     """Load and merge config.yaml + models.yaml + limits.yaml."""
     base = config_dir or CONFIG_DIR
@@ -136,6 +145,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
 
     if limits:
         raw.setdefault("limits", limits.get("limits", limits))
+
+    if isinstance(raw.get("limits"), dict):
+        raw["limits"] = _strip_legacy_limits(raw["limits"])
 
     cfg = AppConfig.model_validate(raw)
     _apply_models_defaults(cfg, models)

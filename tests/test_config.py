@@ -102,3 +102,24 @@ def test_models_yaml_fills_empty_model(tmp_path: Path):
     # empty diamond model -> mock default; empty member model -> openai default
     assert cfg.diamond.model == "mock-model"
     assert cfg.members[0].model == "gpt-4o"
+
+
+def test_load_config_drops_legacy_memory_limits(tmp_path: Path):
+    config_dir = write_mock_config(tmp_path / "config")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "limits:\n"
+        + "  total_cpu: 8\n"
+        + "  total_memory_gb: 20\n"
+        + "  total_disk_gb: 25\n"
+        + "  per_agent_memory_gb: 5\n"
+        + "  max_concurrent_tasks: 3\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_dir)
+
+    assert cfg.limits.total_cpu == 8
+    assert cfg.limits.max_concurrent_tasks == 3
+    assert "total_memory_gb" not in cfg.limits.model_dump()
