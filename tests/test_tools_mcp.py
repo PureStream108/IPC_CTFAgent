@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from backend.mcp import reverse_mcp
+from backend.mcp import reverse_mcp, reverse_worker
 from backend.mcp.mcp_client import MCPClient
 from backend.mcp.mcp_server import SERVER_NAMES, build_mcp_server
 from backend.mcp.reverse_mcp import build_reverse_mcp
@@ -223,13 +225,13 @@ def test_reverse_decompile_falls_back_to_r2(monkeypatch, tmp_path):
     binary.write_bytes(b"binary")
     monkeypatch.setattr(
         reverse_mcp,
-        "_open_program",
-        lambda path: (_ for _ in ()).throw(RuntimeError("jvm failed")),
+        "_run_ghidra_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("jvm failed")),
     )
     monkeypatch.setattr(
         reverse_mcp,
-        "_r2_cmd_sync",
-        lambda binary, cmd: {"available": True, "output": "push rbp"},
+        "_r2_decompile_sync",
+        lambda binary, function: {"available": True, "output": "push rbp"},
     )
 
     result = call_tool(build_reverse_mcp(), "decompile", binary=str(binary), function="main")
@@ -237,6 +239,147 @@ def test_reverse_decompile_falls_back_to_r2(monkeypatch, tmp_path):
     assert result["available"] is True
     assert result["fallback"] == "r2"
     assert result["disassembly"] == "push rbp"
+
+
+def test_reverse_r2_fallback_resolves_symbol_to_numeric_address(monkeypatch, tmp_path):
+    binary = tmp_path / "challenge.bin"
+    binary.write_bytes(b"binary")
+    commands = []
+
+    class FakeR2:
+        def cmd(self, command):
+            commands.append(command)
+            if command.startswith("pdf @"):
+                return "push rbp\nret"
+            return ""
+
+        def cmdj(self, command):
+            assert command == "aflj"
+            return [{"name": "sym.secret_check", "offset": 0x401126}]
+
+        def quit(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "r2pipe",
+        SimpleNamespace(open=lambda *args, **kwargs: FakeR2()),
+    )
+
+    for selector in ("secret_check", "sym.secret_check", "0x401126"):
+        commands.clear()
+        result = reverse_mcp._r2_decompile_sync(str(binary), selector)
+
+        assert result["available"] is True
+        assert result["address"] == 0x401126
+        assert commands == ["aaa", f"pdf @ {0x401126}"]
+        assert selector not in commands[-1]
+
+
+def test_reverse_r2_fallback_rejects_empty_output(monkeypatch, tmp_path):
+    binary = tmp_path / "challenge.bin"
+    binary.write_bytes(b"binary")
+
+    class FakeR2:
+        def cmd(self, command):
+            return ""
+
+        def cmdj(self, command):
+            return [{"name": "sym.main", "offset": 0x401000}]
+
+        def quit(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "r2pipe",
+        SimpleNamespace(open=lambda *args, **kwargs: FakeR2()),
+    )
+
+    result = reverse_mcp._r2_decompile_sync(str(binary), "main")
+
+    assert result["available"] is False
+    assert "empty disassembly" in result["error"]
+
+
+def test_reverse_worker_hard_timeout_cleans_temporary_project(monkeypatch, tmp_path):
+    binary = tmp_path / "sample"
+    binary.write_bytes(b"\x7fELF")
+    observed: dict[str, Path] = {}
+
+    def hang(command, **kwargs):
+        project_dir = Path(command[command.index("--project-dir") + 1])
+        observed["project"] = project_dir
+        assert project_dir.is_dir()
+        assert kwargs["timeout"] == 2
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(reverse_mcp.subprocess, "run", hang)
+
+    with pytest.raises(TimeoutError, match="hard timeout"):
+        reverse_mcp._run_ghidra_worker(
+            "decompile", str(binary), 2, function="main"
+        )
+
+    assert not observed["project"].exists()
+
+
+def test_reverse_worker_uses_manual_analysis_and_closes_context(
+    monkeypatch, tmp_path
+):
+    binary = tmp_path / "sample"
+    binary.write_bytes(b"\x7fELF")
+    events = []
+
+    class Manager:
+        def getFunctions(self, forward):
+            assert forward is True
+            return []
+
+    class Program:
+        def getFunctionManager(self):
+            return Manager()
+
+    class Flat:
+        def getCurrentProgram(self):
+            return Program()
+
+    class Context:
+        def __enter__(self):
+            events.append("enter")
+            return Flat()
+
+        def __exit__(self, *args):
+            events.append("exit")
+
+    def open_program(path, **kwargs):
+        events.append(("open", path, kwargs))
+        return Context()
+
+    fake_pyghidra = SimpleNamespace(
+        open_program=open_program,
+        task_monitor=lambda timeout: ("monitor", timeout),
+        analyze=lambda program, monitor: events.append(("analyze", monitor)),
+    )
+    monkeypatch.setitem(sys.modules, "pyghidra", fake_pyghidra)
+    monkeypatch.setattr(reverse_mcp, "_ensure_jvm", lambda: events.append("jvm"))
+
+    result = reverse_worker._run(
+        "list_functions",
+        str(binary),
+        10,
+        project_dir=str(tmp_path / "project"),
+    )
+
+    assert result["available"] is True
+    assert result["functions"] == []
+    assert events[0] == "jvm"
+    assert events[1][0] == "open"
+    assert events[1][2]["analyze"] is False
+    assert any(
+        isinstance(event, tuple) and event[0] == "analyze" for event in events
+    )
+    assert events[-1] == "exit"
 
 
 def test_reverse_jvm_uses_bundled_paths_when_stdio_filters_environment(monkeypatch, tmp_path):

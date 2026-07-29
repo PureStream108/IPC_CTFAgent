@@ -24,13 +24,16 @@ def numbered_filename(
 ) -> str:
     ext = extension if extension.startswith(".") else f".{extension}"
     base = safe_stem(name, fallback=fallback)
-    used_names = set(used)
+    # Host bind mounts may be case-insensitive even though the application
+    # container is Linux. Treat names case-insensitively so an export never
+    # overwrites e.g. ``Task.md`` with ``task.md``.
+    used_names = {value.casefold() for value in used}
     candidate = f"{base}{ext}"
-    if candidate not in used_names:
+    if candidate.casefold() not in used_names:
         return candidate
     counter = 1
     while True:
         candidate = f"{base}{counter:02d}{ext}"
-        if candidate not in used_names:
+        if candidate.casefold() not in used_names:
             return candidate
         counter += 1

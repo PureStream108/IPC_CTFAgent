@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>IPC · CTF Agents</title>
+  <title>IPC Agent</title>
   <link rel="icon" type="image/png" href="/static/Interastral_Peace_Corporation_2.png" />
   <script src="/static/vendor/tailwindcss.js"></script>
   <script src="/static/vendor/dagre.min.js"></script>
@@ -33,6 +33,14 @@
         radial-gradient(circle at 1px 1px, rgba(148,163,184,0.20) 1px, transparent 0) 0 0/26px 26px,
         linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.72));
     }
+    .catalog-markdown h1 { margin: 0 0 1rem; color: #0f172a; font-size: 1.5rem; font-weight: 700; }
+    .catalog-markdown h2 { margin: 1.5rem 0 .65rem; color: #334155; font-size: 1rem; font-weight: 700; }
+    .catalog-markdown p { margin: .45rem 0; line-height: 1.7; }
+    .catalog-markdown ul { margin: .5rem 0 .5rem 1.25rem; list-style: disc; }
+    .catalog-markdown pre { margin: .75rem 0; overflow-x: auto; border-radius: .65rem; background: #0f172a; padding: .9rem; color: #e2e8f0; }
+    .catalog-markdown code { border-radius: .25rem; background: #f1f5f9; padding: .1rem .3rem; color: #4338ca; }
+    .catalog-markdown pre code { background: transparent; padding: 0; color: inherit; }
+    .catalog-markdown a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
   </style>
   <script>
     tailwind.config = {
@@ -485,36 +493,74 @@
   </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showMemory" x-cloak>
-    <div class="panel rounded-2xl w-[680px] max-h-[90vh] overflow-y-auto p-5">
+    <div class="panel rounded-2xl w-[1050px] max-w-[96vw] max-h-[90vh] overflow-y-auto p-5">
       <div class="flex items-center justify-between mb-4">
         <div class="text-lg font-semibold text-slate-700">Memory</div>
         <div class="flex gap-2">
-          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showAddMem=!showAddMem">+ Add</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="memoryTab='experience';showAddMem=!showAddMem">+ Add</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveMemory()">+ Derive</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showMemory=false">Close</button>
         </div>
       </div>
-      <div class="rounded-2xl border border-slate-200 bg-slate-50/60 p-3 mb-3" x-show="showAddMem">
-        <select class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.category">
-          <option value="knowledge">knowledge</option><option value="tool_usage">tool_usage</option>
-          <option value="exploit">exploit</option><option value="lessons">lessons</option>
-        </select>
-        <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.title" placeholder="title" />
-        <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" rows="2" x-model="nm.content" placeholder="content"></textarea>
-        <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.tags" placeholder="tags (comma separated)" />
-        <button class="btn px-3 py-1.5 rounded-lg text-sm" @click="addMemory()">Save memory</button>
+      <div class="flex gap-2 mb-3">
+        <button class="px-3 py-1.5 rounded-lg text-sm" :class="memoryTab==='catalog'?'btn':'btn-ghost'" @click="memoryTab='catalog'">工具目录</button>
+        <button class="px-3 py-1.5 rounded-lg text-sm" :class="memoryTab==='experience'?'btn':'btn-ghost'" @click="memoryTab='experience'">经验记忆</button>
       </div>
-      <template x-for="m in memories" :key="m.id">
-        <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
-          <div class="flex justify-between gap-3">
-            <span class="text-sm font-semibold text-slate-700" x-text="m.title"></span>
-            <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="m.category"></span>
-          </div>
-          <div class="text-[11px] text-slate-500 mt-1 whitespace-pre-wrap" x-text="m.content"></div>
-          <div class="text-[10px] text-slate-400 mt-1" x-text="(m.tags||[]).join(', ')"></div>
+
+      <div x-show="memoryTab==='catalog'" class="grid grid-cols-1 lg:grid-cols-[310px_1fr] gap-3 min-h-[560px]">
+        <div class="rounded-2xl border border-slate-200 bg-slate-50/60 p-2 overflow-y-auto max-h-[65vh]">
+          <template x-for="row in catalogRows()" :key="row.key">
+            <button class="w-full text-left rounded-lg py-1.5 pr-2 text-xs hover:bg-white"
+                    :class="row.entry&&selectedCatalog?.id===row.entry.id?'bg-white text-brand-700 font-semibold':'text-slate-600'"
+                    :style="'padding-left:'+(8+row.depth*14)+'px'"
+                    @click="row.entry?openCatalogDoc(row.entry.id):toggleCatalog(row.node.path)">
+              <span x-text="row.entry?'•':'›'" class="inline-block w-4" :class="!row.entry&&catalogOpen[row.node.path]?'rotate-90':''"></span>
+              <span x-text="row.entry?row.entry.title:row.node.title"></span>
+              <span x-show="row.entry" class="block text-[10px] text-slate-400 ml-4 truncate" x-text="row.entry?.summary"></span>
+            </button>
+          </template>
         </div>
-      </template>
-      <div x-show="memories.length===0" class="text-xs text-slate-400">No memory yet.</div>
+        <div class="rounded-2xl border border-slate-200 bg-white p-5 overflow-y-auto max-h-[65vh]">
+          <div x-show="!selectedCatalog" class="text-sm text-slate-400">从左侧目录选择工具、MCP、语言或库。</div>
+          <template x-if="selectedCatalog">
+            <div>
+              <div class="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <div class="text-lg font-semibold text-slate-700" x-text="selectedCatalog.title"></div>
+                  <div class="text-xs text-slate-400 mt-1" x-text="selectedCatalog.summary"></div>
+                </div>
+                <a class="btn-ghost px-3 py-1.5 rounded-lg text-xs" target="_blank" rel="noopener"
+                   :href="selectedCatalog.doc_url">打开 Markdown</a>
+              </div>
+              <div class="catalog-markdown text-sm text-slate-600" x-html="selectedCatalog.html"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div x-show="memoryTab==='experience'">
+        <div class="rounded-2xl border border-slate-200 bg-slate-50/60 p-3 mb-3" x-show="showAddMem">
+          <select class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.category">
+            <option value="knowledge">knowledge</option><option value="tool_usage">tool_usage</option>
+            <option value="exploit">exploit</option><option value="lessons">lessons</option>
+          </select>
+          <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.title" placeholder="title" />
+          <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" rows="2" x-model="nm.content" placeholder="content"></textarea>
+          <input class="w-full rounded-lg px-2.5 py-1.5 mb-2 text-sm" x-model="nm.tags" placeholder="tags (comma separated)" />
+          <button class="btn px-3 py-1.5 rounded-lg text-sm" @click="addMemory()">Save memory</button>
+        </div>
+        <template x-for="m in memories" :key="m.id">
+          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
+            <div class="flex justify-between gap-3">
+              <span class="text-sm font-semibold text-slate-700" x-text="m.title"></span>
+              <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="m.category"></span>
+            </div>
+            <div class="text-[11px] text-slate-500 mt-1 whitespace-pre-wrap" x-text="m.content"></div>
+            <div class="text-[10px] text-slate-400 mt-1" x-text="(m.tags||[]).join(', ')"></div>
+          </div>
+        </template>
+      </div>
+      <div x-show="memoryTab==='experience' && memories.length===0" class="text-xs text-slate-400">No memory yet.</div>
     </div>
   </div>
 
@@ -648,6 +694,7 @@
       newHint: { content:"", creator:"human" },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, health: {}, memories: [], wpText: "", toast: "",
+      memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
@@ -1167,7 +1214,31 @@
       },
       async runHealth(){ const r=await this.api("POST","/config/health"); this.health=r.results; this.flash("health checked"); },
 
-      async openMemory(){ this.memories=await this.api("GET","/memory"); this.showMemory=true; },
+      async openMemory(){
+        this.memories=await this.api("GET","/memory");
+        if(!this.catalogTree.length){
+          const c=await this.api("GET","/memory/catalog");
+          this.catalogTree=c.children||[];
+          for(const node of this.catalogTree) this.catalogOpen[node.path]=true;
+        }
+        this.showMemory=true;
+      },
+      catalogRows(){
+        const out=[];
+        const walk=(nodes,depth)=>{
+          for(const node of nodes||[]){
+            out.push({key:"g:"+node.path,node,depth});
+            if(this.catalogOpen[node.path]){
+              walk(node.children,depth+1);
+              for(const entry of node.entries||[]) out.push({key:"e:"+node.path+":"+entry.id,entry,depth:depth+1});
+            }
+          }
+        };
+        walk(this.catalogTree,0);
+        return out;
+      },
+      toggleCatalog(path){ this.catalogOpen[path]=!this.catalogOpen[path]; },
+      async openCatalogDoc(id){ this.selectedCatalog=await this.api("GET","/memory/catalog/"+encodeURIComponent(id)); },
       async addMemory(){ await this.api("POST","/memory",{category:this.nm.category,title:this.nm.title,
         content:this.nm.content,tags:this.nm.tags.split(",").map(t=>t.trim()).filter(Boolean)});
         this.nm={category:"knowledge",title:"",content:"",tags:""}; this.showAddMem=false; this.memories=await this.api("GET","/memory"); },

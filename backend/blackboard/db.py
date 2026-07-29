@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from collections.abc import Generator
+
+from backend.sqlite_util import RamSqlite
 
 PROJECT_STATES = (
     "created",
@@ -149,16 +151,20 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
 
 class Database:
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, in_memory: bool = False):
         self.path = Path(path)
+        self.in_memory = in_memory
         self._lock = threading.Lock()
         self._configured = False
+        # In RAM mode the path is never opened; it only names the database.
+        self._ram = RamSqlite(self.path.stem) if in_memory else None
 
     def configure(self) -> Database:
         with self._lock:
             if self._configured:
                 return self
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.in_memory:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.connect() as conn:
                 conn.executescript(SCHEMA)
                 columns = {
@@ -171,15 +177,25 @@ class Database:
 
     @contextmanager
     def connect(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(str(self.path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        ram = self._ram
+        with ram.guard() if ram is not None else nullcontext():
+            if ram is not None:
+                conn = ram.connect(timeout=30)
+            else:
+                conn = sqlite3.connect(str(self.path), timeout=30)
+            conn.row_factory = sqlite3.Row
+            if ram is None:
+                conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def close(self) -> None:
+        if self._ram is not None:
+            self._ram.close()

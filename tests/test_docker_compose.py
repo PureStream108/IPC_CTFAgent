@@ -5,21 +5,28 @@ from pathlib import Path
 import yaml
 
 
-def test_compose_persists_runtime_state_in_named_volumes():
-    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+def test_compose_persists_only_exports_via_data_bind_mount():
+    raw = Path("docker-compose.yml").read_text(encoding="utf-8")
+    compose = yaml.safe_load(raw)
     app = compose["services"]["ipc-app"]
-    volumes = app["volumes"]
-    mounted_targets = {entry.split(":", 1)[1] for entry in volumes if ":" in entry}
+    binds = dict(entry.split(":", 1) for entry in app["volumes"] if ":" in entry)
 
-    for target in ("/app/data", "/app/memory", "/app/wp", "/app/logs", "/app/projects"):
-        assert target in mounted_targets
+    # ./data is a host bind mount and the only state that survives `down`.
+    assert binds.get("./data") == "/app/data"
 
-    named_sources = {
-        entry.split(":", 1)[0]
-        for entry in volumes
-        if ":" in entry and not entry.startswith(".") and not entry.startswith("/")
-    }
-    assert named_sources <= set(compose["volumes"])
+    # Runtime state is in RAM / ephemeral, not held in named volumes.
+    assert "volumes" not in compose
+    assert {src for src in binds if not src.startswith((".", "/"))} == set()
+    for legacy in ("ipc_data", "ipc_memory", "ipc_wp", "ipc_runtime_logs", "ipc_projects"):
+        assert legacy not in raw
+    for target in ("/app/memory", "/app/wp", "/app/logs", "/app/projects"):
+        assert target not in binds.values()
+
+    # Everything the UI derives is written under the persistent bind mount.
+    env = dict(item.split("=", 1) for item in app["environment"])
+    assert env["IPC_LOG_EXPORT_DIR"] == "/app/data/logs"
+    assert env["IPC_WP_EXPORT_DIR"] == "/app/data/Wp"
+    assert env["IPC_MEMORY_EXPORT_DIR"] == "/app/data/memory"
 
 
 def test_task_image_contains_ctf_and_container_mcp_runtimes():

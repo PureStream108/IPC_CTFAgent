@@ -37,16 +37,16 @@ services:
     environment:
       - IPC_ROOT=/app
       - IPC_LOG_ENABLED=true
-      - IPC_LOG_EXPORT_DIR=/app/exports/logs
-      - IPC_WP_EXPORT_DIR=/app/exports/Wp
+      - IPC_LOG_EXPORT_DIR=/app/data/logs
+      - IPC_WP_EXPORT_DIR=/app/data/Wp
+      - IPC_MEMORY_EXPORT_DIR=/app/data/memory
     volumes:
-      - ipc_data:/app/data
-      - ipc_memory:/app/memory
-      - ipc_wp:/app/wp
-      - ipc_runtime_logs:/app/logs
-      - ipc_projects:/app/projects
-      - ./logs:/app/exports/logs
-      - ./Wp:/app/exports/Wp
+      # ./data is the only persistent location: the UI's Derive/Export actions
+      # write logs, WP and the memory vault here, and they survive
+      # `docker compose down`. Operational state (blackboard, memory, tool
+      # cache) is held in RAM and everything else the container writes is
+      # ephemeral, so a fresh `up` starts clean.
+      - ./data:/app/data
       - ./backend/config:/app/backend/config
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -56,10 +56,3 @@ services:
 
 # Browser and reverse MCP servers run inside each task container. ZAP remains a
 # shared service on the Compose network and is reached by the task-side server.
-
-volumes:
-  ipc_data:
-  ipc_memory:
-  ipc_wp:
-  ipc_runtime_logs:
-  ipc_projects:

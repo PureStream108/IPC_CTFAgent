@@ -66,14 +66,16 @@ RUN set -eux; \
     chmod +x /usr/local/bin/apt-install-retry
 
 # Languages/runtimes (Seed.md: Java/Python/Go/Rust/PHP/Nodejs/Maven).
+# No JDK is installed from apt: Temurin 21 (added below for Ghidra) is the only
+# JDK, and Maven compiles with it by way of JAVA_HOME.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         ca-certificates curl wget git build-essential \
         python3 python3-pip python3-venv \
-        openjdk-17-jdk maven \
+        maven \
         golang-go rustc cargo \
         php-cli \
         nodejs npm ruby ruby-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         nmap netcat-openbsd binutils file binwalk steghide exiftool \
@@ -83,7 +85,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked apt-install-retry \
         sagemath cmake pkg-config python3-dev libhwloc-dev \
         libgmp-dev libmpfr-dev libfplll-dev libeigen3-dev libz3-dev \
         libmhash-dev libmcrypt-dev libjpeg-dev zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
 
 RUN set -eux; \
     mkdir -p /opt/cado-nfs; \
@@ -95,6 +97,7 @@ RUN set -eux; \
     sed -i '1i #include <limits>' /opt/cado-nfs/sieve/logapprox.cpp; \
     cd /opt/cado-nfs \
     && CFLAGS="-O2 -fcommon -Wno-array-parameter -Wno-error=array-parameter -Wno-error" CXXFLAGS="-O2 -Wno-array-parameter -Wno-error=array-parameter -Wno-error" make -j2 \
+    && find /opt/cado-nfs -type f -name '*.o' -delete \
     && printf '#!/bin/sh\nexec python3 /opt/cado-nfs/cado-nfs.py "$@"\n' > /usr/local/bin/cado-nfs \
     && chmod +x /usr/local/bin/cado-nfs
 
@@ -141,6 +144,7 @@ RUN mkdir -p /opt/ipc-tools/tools \
     && (pip3 install --no-cache-dir -r /opt/ipc-tools/tools/dirsearch/dirsearch/requirements.txt || true) \
     && gem install --no-document one_gadget \
     && (gem install zsteg || true) \
+    && find /opt/ipc-tools /opt/RsaCtfTool -type d -name .git -prune -exec rm -rf {} + \
     && mkdir -p /workspace \
     && ln -s /opt/ipc-tools/tools /workspace/tools
 
@@ -165,10 +169,16 @@ ENV PATH="/opt/java21/bin:${PATH}"
 ARG GHIDRA_VERSION=12.1.2
 ARG GHIDRA_DATE=20260605
 ARG GHIDRA_TAG=Ghidra_12.1.2_build
-RUN wget -qO /tmp/ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip" \
+ARG GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
+ARG GHIDRA_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
+RUN wget -qO /tmp/ghidra.zip "${GHIDRA_URL}" \
+    && echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
     && unzip -q /tmp/ghidra.zip -d /opt \
     && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
     && rm -f /tmp/ghidra.zip \
+    && rm -rf /opt/ghidra/docs \
+    && find /opt/ghidra -type d \( -name mac_arm_64 -o -name mac_x86_64 -o -name win_x86_64 \) \
+        -prune -exec rm -rf {} + \
     && pip3 install --no-cache-dir /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-*.whl
 
 # Ubuntu's system packaging library is too old for current setuptools and can
@@ -179,8 +189,12 @@ RUN pip3 install --no-cache-dir --upgrade "setuptools>=68" "packaging>=24" wheel
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 ENV IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
 
+# `--with-deps` runs apt, so strip the docs it reinstates afterwards.
+ARG PLAYWRIGHT_DOWNLOAD_HOST=
 RUN pip3 install --no-cache-dir playwright \
-    && playwright install --with-deps chromium
+    && if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST; fi \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
 ENV IPC_CHROME_BIN=/usr/bin/chromium
 
 COPY pyproject.toml /opt/ipc/pyproject.toml

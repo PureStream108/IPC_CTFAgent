@@ -36,6 +36,12 @@ def test_index_served(client):
     assert "memory_log" in body
     assert "New Project" in body
     assert "Memory" in body
+    assert "工具目录" in body
+    assert "经验记忆" in body
+    assert "catalogRows" in body
+    assert "openCatalogDoc" in body
+    assert "/memory/catalog" in body
+    assert "打开 Markdown" in body
     assert "Add Hint" in body
     # dagre remains the hidden graph layout engine
     assert "cytoscape-dagre.js" in body

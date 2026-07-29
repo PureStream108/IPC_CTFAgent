@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
 
 from pydantic import BaseModel, Field
+
+from backend.sqlite_util import RamSqlite
 
 CATEGORIES = ("knowledge", "tool_usage", "exploit", "lessons")
 
@@ -62,17 +64,26 @@ def _tokenize(text: str) -> list[str]:
 
 
 class MemoryStore:
-    def __init__(self, db_path: str | Path, export_dir: str | Path | None = None):
+    def __init__(
+        self,
+        db_path: str | Path,
+        export_dir: str | Path | None = None,
+        in_memory: bool = False,
+    ):
         self.db_path = Path(db_path)
         self.export_dir = Path(export_dir) if export_dir else None
+        self.in_memory = in_memory
         self._lock = threading.Lock()
         self._configured = False
+        # In RAM mode the path is never opened; it only names the database.
+        self._ram = RamSqlite(self.db_path.stem) if in_memory else None
 
     def configure(self) -> "MemoryStore":
         with self._lock:
             if self._configured:
                 return self
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.in_memory:
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
                 conn.executescript(_SCHEMA)
             self._configured = True
@@ -80,17 +91,23 @@ class MemoryStore:
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(str(self.db_path), timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        ram = self._ram
+        with ram.guard() if ram is not None else nullcontext():
+            if ram is not None:
+                conn = ram.connect(timeout=30)
+            else:
+                conn = sqlite3.connect(str(self.db_path), timeout=30)
+            conn.row_factory = sqlite3.Row
+            if ram is None:
+                conn.execute("PRAGMA journal_mode=WAL")
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def _next_id(self, conn: sqlite3.Connection) -> str:
         conn.execute("UPDATE mem_counter SET value = value + 1 WHERE name = 'memory'")
@@ -146,6 +163,10 @@ class MemoryStore:
 
     def all(self) -> list[Memory]:
         return self.list()
+
+    def close(self) -> None:
+        if self._ram is not None:
+            self._ram.close()
 
     def _mirror_to_disk(self, mem: Memory) -> None:
         """Write a markdown copy so memory persists even without the db file."""

@@ -46,8 +46,8 @@ Core shell and build utilities
 Languages and runtimes
 ----------------------
 - python3/pip/venv: primary scripting environment for exploits and analysis.
-- Java 21/Javac/Maven: default Java runtime for Ghidra, Java challenges,
-  deserialization tooling, and JAR projects (Java 17 is also installed).
+- Java 21/Javac/Maven: the only JDK, used for Ghidra, Java challenges,
+  deserialization tooling, and JAR projects.
 - Go: build or audit Go challenge code.
 - Rust/Cargo: build Rust challenge code and small helpers.
 - PHP CLI: run and inspect PHP challenge code locally.

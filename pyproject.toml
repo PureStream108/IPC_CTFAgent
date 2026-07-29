@@ -35,7 +35,7 @@ where = ["."]
 include = ["backend*"]
 
 [tool.setuptools.package-data]
-"backend" = ["config/prompts/*.md", "config/*.yaml", "server/static/*", "server/static/vendor/*", "tools/registry/*.yaml", "tools/member_tools.txt"]
+"backend" = ["config/prompts/*.md", "config/*.yaml", "tools/registry/*.yaml", "tools/member_tools.txt", "tools/catalog.yaml", "tools/catalog_docs/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

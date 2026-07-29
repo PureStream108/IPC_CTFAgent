@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
+import json
 import os
 import subprocess
-import threading
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -12,8 +13,6 @@ from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.mcp.shared import _tool_unavailable
 
 _JVM_STARTED = False
-_PROJECTS: dict[str, tuple[Any, Any, Any]] = {}
-_GHIDRA_LOCK = threading.RLock()
 _DEFAULT_GHIDRA_INSTALL_DIR = Path("/opt/ghidra")
 _DEFAULT_GHIDRA_JAVA_HOME = Path("/opt/java21")
 
@@ -50,43 +49,6 @@ def _ensure_jvm() -> None:
 
     pyghidra.start(verbose=False, **start_kwargs)
     _JVM_STARTED = True
-
-
-def _open_program(binary: str) -> tuple[Any, Any, Any]:
-    path = str(_ensure_binary(binary))
-    with _GHIDRA_LOCK:
-        cached = _PROJECTS.get(path)
-        if cached is not None:
-            return cached
-        _ensure_jvm()
-        import pyghidra
-
-        project_location = Path("/workspace/ghidra-projects")
-        project_location.mkdir(parents=True, exist_ok=True)
-        context = pyghidra.open_program(
-            path,
-            project_location=str(project_location),
-            analyze=True,
-        )
-        flat = context.__enter__()
-        program = flat.getCurrentProgram()
-        opened = (context, flat, program)
-        _PROJECTS[path] = opened
-        return opened
-
-
-def _close_projects() -> None:
-    with _GHIDRA_LOCK:
-        projects = list(_PROJECTS.values())
-        _PROJECTS.clear()
-    for context, _, _ in projects:
-        try:
-            context.__exit__(None, None, None)
-        except Exception:
-            pass
-
-
-atexit.register(_close_projects)
 
 
 def _java_iter(iterator: Any) -> Iterator[Any]:
@@ -133,7 +95,10 @@ def _decompile_function(program: Any, function: Any, timeout: int) -> str:
         decompiled = result.getDecompiledFunction()
         if decompiled is None:
             raise RuntimeError("Ghidra returned no decompiled function")
-        return str(decompiled.getC())
+        source = str(decompiled.getC())
+        if not source.strip():
+            raise RuntimeError("Ghidra returned empty pseudocode")
+        return source
     finally:
         decompiler.dispose()
 
@@ -153,27 +118,136 @@ def _r2_cmd_sync(binary: str, cmd: str) -> dict[str, Any]:
         return _tool_unavailable("reverse.r2_cmd", str(exc), binary=binary, command=cmd)
 
 
+def _r2_decompile_sync(binary: str, function: str) -> dict[str, Any]:
+    """Resolve a function safely and return non-empty r2 disassembly."""
+    try:
+        path = _ensure_binary(binary)
+        import r2pipe
+
+        handle = r2pipe.open(str(path), flags=["-2"])
+        try:
+            handle.cmd("aaa")
+            functions = handle.cmdj("aflj") or []
+            selector = function.strip()
+            offset: int | None = None
+            try:
+                offset = int(selector, 0)
+            except ValueError:
+                pass
+            if offset is None:
+                exact = [
+                    item
+                    for item in functions
+                    if str(item.get("name", "")) == selector
+                ]
+                prefixes = ("sym.", "dbg.", "fcn.")
+                suffix = [
+                    item
+                    for item in functions
+                    if any(
+                        str(item.get("name", "")).startswith(prefix)
+                        and str(item.get("name", ""))[len(prefix) :] == selector
+                        for prefix in prefixes
+                    )
+                ]
+                selected = (exact or suffix or [None])[0]
+                if selected is None or selected.get("offset") is None:
+                    raise LookupError(f"r2 function not found: {function}")
+                raw_offset = selected["offset"]
+                offset = (
+                    int(raw_offset, 0)
+                    if isinstance(raw_offset, str)
+                    else int(raw_offset)
+                )
+            output = handle.cmd(f"pdf @ {offset}")
+        finally:
+            handle.quit()
+        if not output or not output.strip():
+            raise RuntimeError(f"r2 returned empty disassembly for {function}")
+        return {
+            "available": True,
+            "binary": str(path),
+            "function": function,
+            "address": offset,
+            "output": output,
+        }
+    except Exception as exc:
+        return _tool_unavailable(
+            "reverse.decompile.r2",
+            str(exc),
+            binary=binary,
+            function=function,
+        )
+
+
+def _run_ghidra_worker(
+    operation: str,
+    binary: str,
+    timeout: int,
+    **arguments: Any,
+) -> dict[str, Any]:
+    path = _ensure_binary(binary)
+    timeout = max(1, min(int(timeout), 600))
+    with tempfile.TemporaryDirectory(prefix="ipc-ghidra-") as temp:
+        temp_path = Path(temp)
+        output = temp_path / "result.json"
+        project_dir = temp_path / "project"
+        project_dir.mkdir()
+        command = [
+            sys.executable,
+            "-m",
+            "backend.mcp.reverse_worker",
+            operation,
+            "--binary",
+            str(path),
+            "--output",
+            str(output),
+            "--project-dir",
+            str(project_dir),
+            "--timeout",
+            str(timeout),
+        ]
+        for key, value in arguments.items():
+            command.extend([f"--{key.replace('_', '-')}", str(value)])
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"PyGhidra {operation} exceeded {timeout}s hard timeout"
+            ) from exc
+        if output.exists():
+            result = json.loads(output.read_text(encoding="utf-8"))
+            if result.get("available"):
+                return result
+            raise RuntimeError(result.get("error", f"PyGhidra {operation} failed"))
+        detail = "\n".join(
+            part.strip()
+            for part in (completed.stdout, completed.stderr)
+            if part and part.strip()
+        )
+        raise RuntimeError(detail or f"PyGhidra worker exited {completed.returncode}")
+
+
 def _decompile_sync(binary: str, function: str, timeout: int) -> dict[str, Any]:
     try:
         path = _ensure_binary(binary)
     except OSError as exc:
         return _tool_unavailable("reverse.decompile", str(exc), binary=binary, function=function)
     try:
-        with _GHIDRA_LOCK:
-            _, flat, program = _open_program(str(path))
-            selected = _find_function(flat, program, function)
-            if selected is None:
-                raise LookupError(f"function not found: {function}")
-            pseudocode = _decompile_function(program, selected, timeout)
-            return {
-                "available": True,
-                "binary": str(path),
-                "function": str(selected.getName()),
-                "address": str(selected.getEntryPoint()),
-                "pseudocode": pseudocode,
-            }
+        return _run_ghidra_worker(
+            "decompile",
+            str(path),
+            timeout,
+            function=function,
+        )
     except Exception as exc:
-        fallback = _r2_cmd_sync(str(path), f"aaa; pdf @ {function}")
+        fallback = _r2_decompile_sync(str(path), function)
         if fallback.get("available"):
             return {
                 "available": True,
@@ -195,87 +269,46 @@ def _decompile_sync(binary: str, function: str, timeout: int) -> dict[str, Any]:
 def _decompile_all_sync(binary: str, limit: int, timeout: int) -> dict[str, Any]:
     try:
         path = _ensure_binary(binary)
-        with _GHIDRA_LOCK:
-            _, _, program = _open_program(str(path))
-            results = []
-            for function in _functions(program):
-                if len(results) >= max(1, min(limit, 200)):
-                    break
-                if function.isThunk() or function.isExternal():
-                    continue
-                try:
-                    pseudocode = _decompile_function(program, function, timeout)
-                except Exception as exc:
-                    results.append(
-                        {
-                            "name": str(function.getName()),
-                            "address": str(function.getEntryPoint()),
-                            "error": str(exc),
-                        }
-                    )
-                    continue
-                results.append(
-                    {
-                        "name": str(function.getName()),
-                        "address": str(function.getEntryPoint()),
-                        "pseudocode": pseudocode,
-                    }
-                )
-            return {"available": True, "binary": str(path), "functions": results}
+        return _run_ghidra_worker(
+            "decompile_all",
+            str(path),
+            timeout,
+            limit=limit,
+        )
     except Exception as exc:
         return _tool_unavailable("reverse.decompile_all", str(exc), binary=binary)
 
 
-def _list_functions_sync(binary: str) -> dict[str, Any]:
+def _list_functions_sync(binary: str, timeout: int = 90) -> dict[str, Any]:
     try:
         path = _ensure_binary(binary)
-        with _GHIDRA_LOCK:
-            _, _, program = _open_program(str(path))
-            functions = [
-                {
-                    "name": str(function.getName()),
-                    "address": str(function.getEntryPoint()),
-                    "size": int(function.getBody().getNumAddresses()),
-                }
-                for function in _functions(program)
-            ]
-        return {"available": True, "binary": str(path), "functions": functions}
+        return _run_ghidra_worker("list_functions", str(path), timeout)
     except Exception as exc:
         return _tool_unavailable("reverse.list_functions", str(exc), binary=binary)
 
 
-def _strings_sync(binary: str, min_len: int) -> dict[str, Any]:
+def _strings_sync(binary: str, min_len: int, timeout: int = 90) -> dict[str, Any]:
     try:
         path = _ensure_binary(binary)
-        with _GHIDRA_LOCK:
-            _, _, program = _open_program(str(path))
-            from ghidra.program.util import DefinedDataIterator
-
-            strings = []
-            for data in _java_iter(DefinedDataIterator.definedStrings(program)):
-                value = str(data.getValue())
-                if len(value) >= max(1, min_len):
-                    strings.append({"address": str(data.getAddress()), "value": value})
-        return {"available": True, "binary": str(path), "strings": strings}
+        return _run_ghidra_worker(
+            "strings", str(path), timeout, min_len=min_len
+        )
     except Exception as exc:
         return _tool_unavailable("reverse.strings", str(exc), binary=binary)
 
 
-def _disassemble_sync(binary: str, addr: str, count: int) -> dict[str, Any]:
+def _disassemble_sync(
+    binary: str, addr: str, count: int, timeout: int = 90
+) -> dict[str, Any]:
     try:
         path = _ensure_binary(binary)
-        with _GHIDRA_LOCK:
-            _, flat, program = _open_program(str(path))
-            address = flat.toAddr(int(addr, 0))
-            iterator = program.getListing().getInstructions(address, True)
-            instructions = []
-            for instruction in _java_iter(iterator):
-                if len(instructions) >= max(1, min(count, 500)):
-                    break
-                instructions.append(
-                    {"address": str(instruction.getAddress()), "instruction": str(instruction)}
-                )
-        return {"available": True, "binary": str(path), "instructions": instructions}
+        return _run_ghidra_worker(
+            "disassemble",
+            str(path),
+            timeout,
+            addr=addr,
+            count=count,
+        )
     except Exception as exc:
         return _tool_unavailable("reverse.disassemble", str(exc), binary=binary, address=addr)
 
@@ -333,16 +366,23 @@ def build_reverse_mcp() -> MCPServer:
         return await asyncio.to_thread(_decompile_all_sync, binary, limit, timeout)
 
     @server.tool(name="list_functions", description="List Ghidra functions with addresses and sizes.")
-    async def list_functions(binary: str) -> dict[str, Any]:
-        return await asyncio.to_thread(_list_functions_sync, binary)
+    async def list_functions(binary: str, timeout: int = 90) -> dict[str, Any]:
+        return await asyncio.to_thread(_list_functions_sync, binary, timeout)
 
     @server.tool(name="strings", description="List Ghidra-defined strings with addresses.")
-    async def strings(binary: str, min_len: int = 4) -> dict[str, Any]:
-        return await asyncio.to_thread(_strings_sync, binary, min_len)
+    async def strings(binary: str, min_len: int = 4, timeout: int = 90) -> dict[str, Any]:
+        return await asyncio.to_thread(_strings_sync, binary, min_len, timeout)
 
     @server.tool(name="disassemble", description="Disassemble instructions starting at an address.")
-    async def disassemble(binary: str, addr: str, count: int = 40) -> dict[str, Any]:
-        return await asyncio.to_thread(_disassemble_sync, binary, addr, count)
+    async def disassemble(
+        binary: str,
+        addr: str,
+        count: int = 40,
+        timeout: int = 90,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            _disassemble_sync, binary, addr, count, timeout
+        )
 
     @server.tool(name="r2_cmd", description="Run an r2 command against a binary.")
     async def r2_cmd(binary: str, cmd: str) -> dict[str, Any]:

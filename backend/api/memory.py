@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from backend.api.deps import get_state
@@ -45,7 +46,41 @@ def search_memory(q: str, category: str | None = None, limit: int = 5, state: Ap
     return [{"memory": m.model_dump(), "score": s} for m, s in results]
 
 
+@router.get("/memory/catalog")
+def memory_catalog(state: AppState = Depends(get_state)):
+    return {"children": state.catalog.tree()}
+
+
+@router.get("/memory/catalog/{entry_id}")
+def memory_catalog_entry(entry_id: str, state: AppState = Depends(get_state)):
+    entry = state.catalog.get(entry_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog document not found")
+    return {
+        **entry.to_dict(),
+        "markdown": state.catalog.document(entry_id),
+        "html": state.catalog.html_document(entry_id),
+    }
+
+
+@router.get("/memory/catalog/{entry_id}/document")
+def memory_catalog_document(
+    entry_id: str,
+    state: AppState = Depends(get_state),
+):
+    entry = state.catalog.get(entry_id)
+    if entry is None:
+        raise HTTPException(404, "Catalog document not found")
+    return Response(
+        content=state.catalog.document(entry_id),
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f'inline; filename="{entry.id}.md"',
+        },
+    )
+
+
 @router.post("/memory/derive")
 def derive_memory(state: AppState = Depends(get_state)):
-    vault = export_obsidian(state.memory, state.root / "memory" / "export" / "vault")
+    vault = export_obsidian(state.memory, state.memory_export_dir / "vault")
     return {"vault": str(vault)}

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Callable, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -19,9 +20,27 @@ SERVER_NAMES = (
 )
 
 
-def create_mcp_server(name: str, description: str = "") -> MCPServer:
+def create_mcp_server(
+    name: str,
+    description: str = "",
+    *,
+    lifespan: Callable[[FastMCP], Any] | None = None,
+) -> MCPServer:
 
-    return FastMCP(name=name, instructions=description or None)
+    return FastMCP(name=name, instructions=description or None, lifespan=lifespan)
+
+
+def close_lifespan(close: Callable[[], None]):
+    """Build a FastMCP lifespan for a resource owned by one server."""
+
+    @asynccontextmanager
+    async def lifespan(_server: FastMCP):
+        try:
+            yield {}
+        finally:
+            close()
+
+    return lifespan
 
 
 def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") -> MCPServer:
@@ -41,22 +60,32 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
 
         return build_zap_mcp()
 
+    # Parity with AppState: these standalone debug servers keep their state in
+    # RAM too, so the paths only name the in-RAM databases.
     data_dir = root_path / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
     if name == "memory":
         from backend.memory.memory_mcp import build_memory_mcp
         from backend.memory.memory_store import MemoryStore
+        from backend.tools.catalog import ToolCatalog
 
-        store = MemoryStore(data_dir / "memory.db", export_dir=root_path / "memory").configure()
-        return build_memory_mcp(store)
+        store = MemoryStore(data_dir / "memory.db", export_dir=None, in_memory=True).configure()
+        return build_memory_mcp(
+            store,
+            catalog=ToolCatalog.load(),
+            lifespan=close_lifespan(store.close),
+        )
     if name in {"tool_search", "tools"}:
         from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
         from backend.tools.tool_registry import ToolRegistry
 
-        registry = ToolRegistry(cache_db=data_dir / "tool_cache.db").load()
+        registry = ToolRegistry(cache_db=data_dir / "tool_cache.db", in_memory=True).load()
         if name == "tools":
-            return build_category_tools_mcp(registry, category)
-        return build_tool_search_mcp(registry)
+            return build_category_tools_mcp(
+                registry, category, lifespan=close_lifespan(registry.close)
+            )
+        return build_tool_search_mcp(
+            registry, lifespan=close_lifespan(registry.close)
+        )
     raise ValueError(f"unknown MCP server: {name}")
 
 

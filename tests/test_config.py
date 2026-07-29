@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from backend.core.config import AppConfig, LLMConfig, MemberConfig, load_config, save_config
 from tests.helpers import write_mock_config
@@ -101,7 +102,10 @@ def test_models_yaml_fills_empty_model(tmp_path: Path):
     cfg = load_config(tmp_path)
     # empty diamond model -> mock default; empty member model -> openai default
     assert cfg.diamond.model == "mock-model"
-    assert cfg.members[0].model == "gpt-4o"
+    model_defaults = yaml.safe_load((tmp_path / "models.yaml").read_text(encoding="utf-8"))[
+        "defaults"
+    ]
+    assert cfg.members[0].model == model_defaults["openai"]
 
 
 def test_load_config_drops_legacy_memory_limits(tmp_path: Path):

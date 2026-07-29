@@ -17,12 +17,15 @@ RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/
 
 COPY pyproject.toml /app/pyproject.toml
 COPY backend /app/backend
+COPY frontend /app/frontend
 COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
-# Runtime data directories are mounted as named volumes by docker-compose.yml.
-RUN mkdir -p /app/data /app/memory /app/wp /app/logs /app/projects /app/exports/logs /app/exports/Wp
+# /app/data is bind-mounted by docker-compose.yml and holds the exports that
+# persist; the rest is ephemeral working state, wiped with the container.
+RUN mkdir -p /app/data/logs /app/data/Wp /app/data/memory \
+    && mkdir -p /app/memory /app/wp /app/logs /app/projects
 
 ENV IPC_ROOT=/app
 EXPOSE 8000

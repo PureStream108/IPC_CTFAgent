@@ -125,8 +125,9 @@ class IPCLogger:
         return entries if limit is None else entries[-limit:]
 
     @staticmethod
+    def jsonl_text(entries: list[dict]) -> str:
+        return "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
+
+    @staticmethod
     def write_jsonl(path: Path, entries: list[dict]) -> None:
-        path.write_text(
-            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries),
-            encoding="utf-8",
-        )
+        path.write_text(IPCLogger.jsonl_text(entries), encoding="utf-8")

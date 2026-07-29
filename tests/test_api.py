@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -158,11 +159,18 @@ def test_project_logs_list_and_derive(client):
 
     r = client.post("/logs/derive")
     assert r.status_code == 200
-    export = client.app.state.ipc.log_export_dir / "project_logs" / "Demo.jsonl"
+    assert r.json()["files"]["project_logs"] == ["Demo.log"]
+    export = client.app.state.ipc.log_export_dir / "project_logs" / "Demo.log"
     assert export.exists()
     assert json.loads(export.read_text(encoding="utf-8").splitlines()[0])["project_id"] == pid
-    assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.jsonl").exists()
-    assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.jsonl").exists()
+    assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.log").exists()
+    assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.log").exists()
+
+    # A repeated export is a new snapshot and never overwrites the first.
+    r = client.post("/logs/derive")
+    assert r.json()["files"]["project_logs"] == ["Demo01.log"]
+    assert export.exists()
+    assert (client.app.state.ipc.log_export_dir / "project_logs" / "Demo01.log").exists()
 
 
 def test_delete_project_preserves_derived_logs(client):
@@ -174,7 +182,7 @@ def test_delete_project_preserves_derived_logs(client):
 
     r = client.post("/logs/derive")
     assert r.status_code == 200
-    export = client.app.state.ipc.log_export_dir / "project_logs" / "Archived.jsonl"
+    export = client.app.state.ipc.log_export_dir / "project_logs" / "Archived.log"
     assert export.exists()
     exported_text = export.read_text(encoding="utf-8")
 
@@ -281,6 +289,122 @@ def test_completed_wp_list_and_derive(client):
     export = client.app.state.ipc.wp_export_dir / "Solved.md"
     assert export.exists()
     assert export.read_text(encoding="utf-8") == "# Solved\n"
+
+    r = client.post("/wp/derive")
+    assert r.json()["files"] == ["Solved01.md"]
+    assert export.read_text(encoding="utf-8") == "# Solved\n"
+    assert (client.app.state.ipc.wp_export_dir / "Solved01.md").read_text(
+        encoding="utf-8"
+    ) == "# Solved\n"
+
+
+def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
+    tmp_path, monkeypatch
+):
+    exports = tmp_path / "persistent-exports"
+    monkeypatch.setenv("IPC_WP_EXPORT_DIR", str(exports / "wp"))
+    monkeypatch.setenv("IPC_LOG_EXPORT_DIR", str(exports / "logs"))
+
+    def make_snapshot(root: Path, content: str) -> tuple[dict, dict]:
+        config_dir = write_mock_config(root / "config")
+        app = create_app(root=root)
+        with TestClient(app) as current:
+            current.app.state.ipc.config_dir = config_dir
+            current.app.state.ipc.reload_config()
+            detail = current.post(
+                "/projects",
+                json={
+                    "title": "Same:Task",
+                    "origin": "o",
+                    "goal": "g",
+                    "category": "web",
+                },
+            ).json()
+            pid = detail["project"]["id"]
+            wp_path = current.app.state.ipc.wp_dir / f"{pid}.md"
+            wp_path.write_text(content, encoding="utf-8")
+            with current.app.state.ipc.db.connect() as conn:
+                graph_store.set_wp_path(conn, pid, str(wp_path))
+                for status in (
+                    "running",
+                    "flag_found",
+                    "wp_writing",
+                    "memory_writing",
+                    "completed",
+                ):
+                    graph_store.set_status(conn, pid, status)
+            return current.post("/wp/derive").json(), current.post(
+                "/logs/derive"
+            ).json()
+
+    first_wp, first_logs = make_snapshot(tmp_path / "run-one", "# first\n")
+    first_wp_path = exports / "wp" / "Same_Task.md"
+    first_log_paths = [
+        exports / "logs" / group / "Same_Task.log"
+        for group in ("project_logs", "llm_logs", "tool_logs", "memory_logs")
+    ]
+    original_wp = first_wp_path.read_bytes()
+    original_logs = {path: path.read_bytes() for path in first_log_paths}
+
+    second_wp, second_logs = make_snapshot(tmp_path / "run-two", "# second\n")
+
+    assert first_wp["files"] == ["Same_Task.md"]
+    assert second_wp["files"] == ["Same_Task01.md"]
+    assert first_wp_path.read_bytes() == original_wp
+    assert (exports / "wp" / "Same_Task01.md").read_text(encoding="utf-8") == "# second\n"
+    for group in ("project_logs", "llm_logs", "tool_logs", "memory_logs"):
+        assert first_logs["files"][group] == ["Same_Task.log"]
+        assert second_logs["files"][group] == ["Same_Task01.log"]
+        old = exports / "logs" / group / "Same_Task.log"
+        new = exports / "logs" / group / "Same_Task01.log"
+        assert old.read_bytes() == original_logs[old]
+        assert new.exists()
+        for line in new.read_text(encoding="utf-8").splitlines():
+            json.loads(line)
+
+
+def test_export_collision_detection_is_case_insensitive(client):
+    detail = client.post(
+        "/projects",
+        json={"title": "Case", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()
+    pid = detail["project"]["id"]
+    wp_path = client.app.state.ipc.wp_dir / "case-source.md"
+    wp_path.write_text("# new\n", encoding="utf-8")
+    with client.app.state.ipc.db.connect() as conn:
+        graph_store.set_wp_path(conn, pid, str(wp_path))
+        for status in (
+            "running",
+            "flag_found",
+            "wp_writing",
+            "memory_writing",
+            "completed",
+        ):
+            graph_store.set_status(conn, pid, status)
+
+    target = client.app.state.ipc.wp_export_dir
+    target.mkdir(parents=True, exist_ok=True)
+    old = target / "CASE.md"
+    old.write_bytes(b"old bytes")
+    result = client.post("/wp/derive").json()
+    assert result["files"] == ["Case01.md"]
+    assert old.read_bytes() == b"old bytes"
+
+
+def test_memory_derive_writes_to_export_dir(client):
+    r = client.post(
+        "/memory",
+        json={"category": "knowledge", "title": "SSTI", "content": "jinja2 payloads", "tags": ["web"]},
+    )
+    assert r.status_code == 201
+
+    r = client.post("/memory/derive")
+    assert r.status_code == 200
+    vault = client.app.state.ipc.memory_export_dir / "vault"
+    assert Path(r.json()["vault"]) == vault
+    assert (vault / "_index.md").exists()
+    notes = list((vault / "knowledge").glob("*.md"))
+    assert notes and "jinja2 payloads" in notes[0].read_text(encoding="utf-8")
 
 
 def test_export_and_replay(client):

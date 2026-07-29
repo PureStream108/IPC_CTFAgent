@@ -67,13 +67,26 @@ def completed_wp(state: AppState = Depends(get_state)):
 def derive_wp(state: AppState = Depends(get_state)):
     target = state.wp_export_dir
     target.mkdir(parents=True, exist_ok=True)
-    for stale in target.glob("*.md"):
-        stale.unlink()
     writeups = _completed_writeups(state)
     files: list[str] = []
-    for item in writeups:
-        (target / item["filename"]).write_text(item["content"], encoding="utf-8")
-        files.append(item["filename"])
+    with state.export_lock:
+        used = {path.name for path in target.glob("*.md")}
+        for item in writeups:
+            while True:
+                filename = numbered_filename(
+                    item["title"], ".md", used, fallback=item["project_id"]
+                )
+                try:
+                    with (target / filename).open("x", encoding="utf-8") as fh:
+                        fh.write(item["content"])
+                except FileExistsError:
+                    # Another process may have exported after our directory
+                    # scan. Reserve that name and retry with the next suffix.
+                    used.add(filename)
+                    continue
+                used.add(filename)
+                files.append(filename)
+                break
     return {"dir": str(target), "files": files}
 
 

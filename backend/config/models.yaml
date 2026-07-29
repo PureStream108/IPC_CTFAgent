@@ -1,5 +1,5 @@
 defaults:
-  openai: gpt-4o
+  openai: gpt-5.5
   claudecode: claude-opus-4-8
   deepseek: deepseek-v4-pro
   pi: pi-default

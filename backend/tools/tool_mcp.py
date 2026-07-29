@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.tools.tool_registry import ToolRegistry
 
 
-def build_tool_search_mcp(registry: ToolRegistry) -> MCPServer:
-    server = create_mcp_server("tool_search", "Search for CTF tools across all categories")
+def build_tool_search_mcp(
+    registry: ToolRegistry,
+    *,
+    lifespan: Callable | None = None,
+) -> MCPServer:
+    server = create_mcp_server(
+        "tool_search",
+        "Search for CTF tools across all categories",
+        lifespan=lifespan,
+    )
 
     @server.tool(
         name="tool_search",
@@ -24,10 +32,16 @@ def build_tool_search_mcp(registry: ToolRegistry) -> MCPServer:
     return server
 
 
-def build_category_tools_mcp(registry: ToolRegistry, category: str) -> MCPServer:
+def build_category_tools_mcp(
+    registry: ToolRegistry,
+    category: str,
+    *,
+    lifespan: Callable | None = None,
+) -> MCPServer:
     server = create_mcp_server(
         "tools",
         f"Tools exposed for a {category} challenge plus how to invoke them",
+        lifespan=lifespan,
     )
     exposed = registry.exposed_for(category)
 

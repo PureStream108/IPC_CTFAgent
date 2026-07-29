@@ -55,7 +55,8 @@ def test_app_state_clean_start_wipes_runtime_state(tmp_path, monkeypatch):
     assert not (tmp_path / "projects" / "proj_001" / "attachments" / "x.txt").exists()
     assert not (tmp_path / "memory" / "export" / "memory.md").exists()
     assert not (tmp_path / "wp" / "Old.md").exists()
-    assert data_dir.exists()
+    # Operational state is held in RAM, so no database files reach the disk.
+    assert not data_dir.exists()
 
 
 def test_lifecycle_transitions(state):

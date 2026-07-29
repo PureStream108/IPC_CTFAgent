@@ -1,0 +1,483 @@
+groups:
+  tools: 工具
+  tools/core: 核心命令行工具
+  tools/web: Web
+  tools/pwn: Pwn
+  tools/reverse: Reverse
+  tools/crypto: Crypto
+  tools/misc: Misc / Forensics
+  tools/ai: AI
+  tools/osint: OSINT
+  mcps: MCP 服务
+  languages: 语言与运行时
+  languages/bash: Bash / Shell
+  languages/python: Python
+  languages/java: Java
+  languages/go: Go
+  languages/rust: Rust
+  languages/php: PHP
+  languages/nodejs: JavaScript / Node.js
+  languages/ruby: Ruby
+  libraries: 语言库
+  libraries/python: Python 库
+  libraries/ruby: Ruby 库
+
+entries:
+  - id: core_bash
+    kind: language
+    group: languages/bash
+    title: Bash / Shell
+    summary: 用于组合命令、处理文件、编写自动化探测与复现脚本。
+    tags: [bash, shell, automation]
+    command: bash
+    install_path: /bin/bash
+    workflow: 使用 set -euo pipefail、明确引用变量，并把复杂流程保存为可复现脚本。
+    example: "bash -lc 'file ./challenge && strings ./challenge | head'"
+    official: https://www.gnu.org/software/bash/manual/
+  - id: lang_python
+    kind: language
+    group: languages/python
+    title: Python 3
+    summary: 主要解题语言，用于漏洞利用、密码学、数据处理、自动化和 MCP 服务。
+    tags: [python, pip, venv]
+    command: python3
+    install_path: /usr/bin/python3
+    workflow: 优先在当前 Member 目录创建脚本，使用 python3 -m pip 查看可用包。
+    example: "python3 -c \"import sys; print(sys.version)\""
+    official: https://docs.python.org/3/
+  - id: lang_java
+    kind: language
+    group: languages/java
+    title: Java 21 / Maven
+    summary: 用于 Java 题目、反序列化工具、JAR 工程以及 Ghidra 运行时。
+    tags: [java, javac, maven, jdk]
+    command: java
+    install_path: /opt/java21
+    workflow: 使用 javac 编译单文件，使用 Maven 构建依赖工程，并确认 JAVA_HOME=/opt/java21。
+    example: "java -version && javac -version && mvn -version"
+    official: https://docs.oracle.com/en/java/javase/21/
+  - id: lang_go
+    kind: language
+    group: languages/go
+    title: Go
+    summary: 用于构建或审计 Go 题目、网络服务和静态二进制辅助工具。
+    tags: [go, golang]
+    command: go
+    install_path: /usr/bin/go
+    example: "go version"
+    official: https://go.dev/doc/
+  - id: lang_rust
+    kind: language
+    group: languages/rust
+    title: Rust / Cargo
+    summary: 用于构建 Rust 题目、分析依赖和编写高性能辅助程序。
+    tags: [rust, cargo]
+    command: rustc
+    install_path: /usr/bin/rustc
+    example: "rustc --version && cargo --version"
+    official: https://doc.rust-lang.org/
+  - id: lang_php
+    kind: language
+    group: languages/php
+    title: PHP CLI
+    summary: 用于运行、调试和复现 PHP Web 题目及序列化行为。
+    tags: [php, web]
+    command: php
+    install_path: /usr/bin/php
+    example: "php -r 'echo PHP_VERSION, PHP_EOL;'"
+    official: https://www.php.net/manual/
+  - id: lang_nodejs
+    kind: language
+    group: languages/nodejs
+    title: JavaScript / Node.js
+    summary: 用于运行 Node.js 题目、审计 npm 项目和编写 JavaScript 探针。
+    tags: [javascript, nodejs, npm]
+    command: node
+    install_path: /usr/bin/node
+    example: "node --version && npm --version"
+    official: https://nodejs.org/docs/latest/api/
+  - id: lang_ruby
+    kind: language
+    group: languages/ruby
+    title: Ruby / Gem
+    summary: 用于运行 Ruby 脚本以及 one_gadget、zsteg 等解题工具。
+    tags: [ruby, gem]
+    command: ruby
+    install_path: /usr/bin/ruby
+    example: "ruby --version && gem --version"
+    official: https://docs.ruby-lang.org/
+
+  - id: mcp_memory
+    kind: mcp
+    group: mcps
+    title: Memory MCP
+    summary: 检索当前运行期经验和只读的预装工具知识目录。
+    tags: [mcp, memory, knowledge]
+    command: ipc-mcp-server memory
+    install_path: backend/memory/memory_mcp.py
+    workflow: 先 memory_search，再用 memory_get 读取经验或 memory_doc 打开工具文档。
+    example: "ipc-mcp-server memory --transport stdio"
+  - id: mcp_tool_search
+    kind: mcp
+    group: mcps
+    title: tool_search MCP
+    summary: 跨题型搜索完整工具注册表并返回调用方法和适用场景。
+    tags: [mcp, tools, search]
+    command: ipc-mcp-server tool_search
+    install_path: backend/tools/tool_mcp.py
+    example: "ipc-mcp-server tool_search --transport stdio"
+  - id: mcp_tools
+    kind: mcp
+    group: mcps
+    title: tools MCP
+    summary: 按题型列出当前 Member 已暴露的工具及其执行入口。
+    tags: [mcp, category, tools]
+    command: ipc-mcp-server tools
+    install_path: backend/tools/tool_mcp.py
+    example: "ipc-mcp-server tools --category pwn --transport stdio"
+  - id: mcp_browser
+    kind: mcp
+    group: mcps
+    title: browser MCP
+    summary: 在任务容器中用 Playwright Chromium 导航、交互和截图。
+    tags: [mcp, browser, playwright, chromium]
+    command: ipc-mcp-server browser
+    install_path: backend/mcp/shared.py
+    example: "ipc-mcp-server browser --transport stdio"
+  - id: mcp_reverse
+    kind: mcp
+    group: mcps
+    title: reverse MCP
+    summary: 通过隔离的 PyGhidra worker 和 radare2 完成反编译与二进制分析。
+    tags: [mcp, reverse, ghidra, radare2]
+    command: ipc-mcp-server reverse
+    install_path: backend/mcp/reverse_mcp.py
+    workflow: 优先调用 file_info/list_functions，再按函数调用 decompile；超时会自动降级到 r2。
+    example: "ipc-mcp-server reverse --transport stdio"
+    related: [lib_pyghidra, tool_radare2]
+  - id: mcp_zap
+    kind: mcp
+    group: mcps
+    title: zap MCP
+    summary: 调用共享 OWASP ZAP 服务进行爬取和授权范围内的主动扫描。
+    tags: [mcp, zap, web]
+    command: ipc-mcp-server zap
+    install_path: backend/mcp/shared.py
+    example: "ZAP_API_URL=http://ipc-zap:8080 ipc-mcp-server zap"
+
+  - id: core_ripgrep
+    kind: tool
+    group: tools/core
+    title: ripgrep
+    summary: 在源码、配置和日志中快速递归搜索文本与正则表达式。
+    tags: [rg, search, source]
+    command: rg
+    install_path: /usr/bin/rg
+    example: "rg -n 'flag|password|secret' ."
+    official: https://github.com/BurntSushi/ripgrep
+  - id: core_git
+    kind: tool
+    group: tools/core
+    title: Git
+    summary: 检查源码历史、差异、分支和公开辅助工具仓库。
+    tags: [git, source, history]
+    command: git
+    install_path: /usr/bin/git
+    example: "git log --oneline --all && git diff"
+    official: https://git-scm.com/docs
+  - id: core_jq
+    kind: tool
+    group: tools/core
+    title: jq
+    summary: 查询、筛选和变换 JSON API 响应与日志记录。
+    tags: [json, cli]
+    command: jq
+    install_path: /usr/bin/jq
+    example: "jq -r '.items[]?.id' response.json"
+    official: https://jqlang.github.io/jq/manual/
+  - id: core_archives
+    kind: tool
+    group: tools/core
+    title: zip / unzip
+    summary: 检查、解压和重新打包 ZIP 类题目附件。
+    tags: [zip, archive]
+    command: unzip
+    install_path: /usr/bin/unzip
+    example: "unzip -l attachment.zip && unzip attachment.zip -d extracted"
+  - id: core_file_triage
+    kind: tool
+    group: tools/core
+    title: file / xxd / hexdump
+    summary: 识别文件格式并查看魔数、头部和原始十六进制数据。
+    tags: [file, xxd, hex, triage]
+    command: file
+    install_path: /usr/bin/file
+    example: "file challenge && xxd -l 128 challenge"
+  - id: core_build
+    kind: tool
+    group: tools/core
+    title: GCC / G++ / Make / CMake
+    summary: 编译题目源码、利用程序和本地复现所需的原生辅助代码。
+    tags: [gcc, g++, make, cmake, build]
+    command: gcc
+    install_path: /usr/bin/gcc
+    example: "gcc -O0 -g -o sample sample.c"
+  - id: core_netcat
+    kind: tool
+    group: tools/core
+    title: netcat
+    summary: 建立原始 TCP 连接、发送协议数据并创建临时监听端口。
+    tags: [nc, tcp, network]
+    command: nc
+    install_path: /usr/bin/nc
+    example: "nc -nv target 31337"
+  - id: core_media
+    kind: tool
+    group: tools/core
+    title: ffmpeg / sox
+    summary: 提取音视频流、拆分声道并生成音频分析素材。
+    tags: [ffmpeg, sox, audio, video]
+    command: ffmpeg
+    install_path: /usr/bin/ffmpeg
+    example: "ffmpeg -i input.mp4 -vn audio.wav && sox audio.wav -n spectrogram"
+  - id: core_imagemagick
+    kind: tool
+    group: tools/core
+    title: ImageMagick
+    summary: 检查和转换图片、分离通道并执行基础图像处理。
+    tags: [image, identify, convert]
+    command: identify
+    install_path: /usr/bin/identify
+    example: "identify -verbose image.png"
+  - id: core_tesseract
+    kind: tool
+    group: tools/core
+    title: Tesseract OCR
+    summary: 从截图、扫描件和题目图片中提取可搜索文本。
+    tags: [ocr, image, tesseract]
+    command: tesseract
+    install_path: /usr/bin/tesseract
+    example: "tesseract image.png stdout -l eng"
+  - id: core_pngcheck
+    kind: tool
+    group: tools/core
+    title: pngcheck
+    summary: 验证 PNG 数据块、定位损坏结构和异常附加数据。
+    tags: [png, image, forensic]
+    command: pngcheck
+    install_path: /usr/bin/pngcheck
+    example: "pngcheck -vt image.png"
+
+  - id: tool_curl
+    kind: tool
+    group: tools/osint
+    parents: [tools/core]
+    title: curl
+    summary: 使用 curl 或 wget 发起 HTTP 请求、下载附件并检查响应头、重定向和 API 数据。
+    tags: [http, download, curl, wget, core, osint]
+    command: curl
+    install_path: /usr/bin/curl 与 /usr/bin/wget
+    workflow: curl 适合可重复的协议探测和 API 请求，wget 适合递归或断点下载；敏感认证头只放在当前命令中。
+    example: "curl -iL https://example.com/ && wget -O attachment.bin https://example.com/attachment.bin"
+    official: https://curl.se/docs/
+
+  - id: tool_objdump
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: objdump
+    summary: 使用 Binutils 的 objdump、readelf、nm 和 strip 检查 ELF 头、符号、段、重定位与反汇编。
+    tags: [binutils, objdump, readelf, nm, strip, elf, reverse]
+    command: objdump
+    install_path: /usr/bin/objdump、/usr/bin/readelf、/usr/bin/nm、/usr/bin/strip
+    workflow: 先用 readelf/file 确认架构和段，再用 nm/objdump 定位符号与代码；除副本外不要对题目原件执行 strip。
+    example: "readelf -hW challenge && nm -an challenge | head && objdump -d -M intel challenge | head -80"
+    official: https://sourceware.org/binutils/docs/
+
+  - id: lib_pwntools
+    kind: library
+    group: libraries/python
+    title: pwntools
+    summary: 提供进程/网络交互、打包、ELF、ROP 和 shellcode 的漏洞利用框架。
+    tags: [python, pwn, elf, rop]
+    command: "python3 -c \"import pwnlib; print(pwnlib.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"from pwn import *; print(p64(0x41414141))\""
+    official: https://docs.pwntools.com/
+  - id: lib_pycryptodome
+    kind: library
+    group: libraries/python
+    title: PyCryptodome
+    summary: 提供 AES、RSA、哈希、随机数和常用密码学原语。
+    tags: [python, crypto, aes, rsa]
+    command: "python3 -c \"import Crypto; print(Crypto.__version__)\""
+    install_path: Python site-packages/Crypto
+    example: "python3 -c \"from Crypto.Util.number import long_to_bytes; print(long_to_bytes(0x666c6167))\""
+    official: https://pycryptodome.readthedocs.io/
+  - id: lib_math
+    kind: library
+    group: libraries/python
+    title: SymPy / gmpy2 / fpylll
+    summary: 用于符号运算、大整数、数论、格基约化和密码攻击脚本。
+    tags: [python, math, crypto, lll]
+    command: "python3 -c \"import sympy,gmpy2,fpylll; print(sympy.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"from sympy.ntheory.modular import crt; print(crt([3,5],[2,3]))\""
+  - id: lib_z3
+    kind: library
+    group: libraries/python
+    title: z3-solver
+    summary: 用 SMT 约束求解整数、位向量、逻辑条件和程序路径。
+    tags: [python, z3, smt, constraint]
+    command: "python3 -c \"import z3; print(z3.get_version_string())\""
+    install_path: Python site-packages/z3
+    example: "python3 -c \"from z3 import *; x=Int('x'); s=Solver(); s.add(x*x==49,x>0); print(s.check(),s.model())\""
+    official: https://z3prover.github.io/api/html/namespacez3py.html
+  - id: lib_web_python
+    kind: library
+    group: libraries/python
+    title: Requests / Flask / PyJWT / Jinja2
+    summary: 用于 HTTP 请求、本地 Web 复现、JWT 分析和模板注入研究。
+    tags: [python, web, requests, flask, jwt, jinja2]
+    command: "python3 -c \"import requests,flask,jwt,jinja2\""
+    install_path: Python site-packages
+    example: "python3 -c \"import requests; print(requests.get('http://target').status_code)\""
+  - id: lib_numpy_scipy
+    kind: library
+    group: libraries/python
+    title: NumPy / SciPy
+    summary: 用于数组、数值计算、信号处理、频域分析和 AI 数据预处理。
+    tags: [python, numpy, scipy, signal]
+    command: "python3 -c \"import numpy,scipy; print(numpy.__version__,scipy.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"import numpy as np; print(np.fft.fft([1,0,1,0]))\""
+    official: https://numpy.org/doc/
+  - id: lib_images
+    kind: library
+    group: libraries/python
+    title: Pillow / pytesseract
+    summary: 用 Python 读取、变换图片并调用 Tesseract 完成 OCR。
+    tags: [python, pillow, ocr, image]
+    command: "python3 -c \"import PIL,pytesseract; print(PIL.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"from PIL import Image; print(Image.open('image.png').size)\""
+    official: https://pillow.readthedocs.io/
+  - id: lib_angr
+    kind: library
+    group: libraries/python
+    title: angr
+    summary: 对二进制执行符号执行、CFG 恢复和路径约束求解。
+    tags: [python, reverse, symbolic, angr]
+    command: "python3 -c \"import angr; print(angr.__version__)\""
+    install_path: Python site-packages/angr
+    example: "python3 -c \"import angr; p=angr.Project('./challenge',auto_load_libs=False); print(p.entry)\""
+    official: https://docs.angr.io/
+  - id: lib_emulation
+    kind: library
+    group: libraries/python
+    title: Capstone / Unicorn
+    summary: 提供多架构反汇编和 CPU 指令级仿真能力。
+    tags: [python, capstone, unicorn, reverse]
+    command: "python3 -c \"import capstone,unicorn; print(capstone.__version__,unicorn.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"from capstone import *; print(next(Cs(CS_ARCH_X86,CS_MODE_64).disasm(b'\\\\x90',0x1000)).mnemonic)\""
+  - id: lib_volatility3
+    kind: library
+    group: libraries/python
+    title: Volatility 3
+    summary: 分析内存镜像中的进程、模块、网络连接和恶意活动痕迹。
+    tags: [python, memory, forensics, volatility]
+    command: python3 -m volatility3
+    install_path: Python site-packages/volatility3
+    example: "python3 -m volatility3 -f memory.raw windows.info"
+    official: https://volatility3.readthedocs.io/
+  - id: lib_torch
+    kind: library
+    group: libraries/python
+    title: PyTorch
+    summary: 在 CPU 上加载和检查神经网络模型、张量与 AI 题目数据。
+    tags: [python, ai, torch]
+    command: "python3 -c \"import torch; print(torch.__version__)\""
+    install_path: Python site-packages/torch
+    example: "python3 -c \"import torch; print(torch.load('model.pt',map_location='cpu',weights_only=False))\""
+    official: https://pytorch.org/docs/stable/
+  - id: lib_keras
+    kind: library
+    group: libraries/python
+    title: Keras / h5py
+    summary: 加载 Keras/HDF5 模型并检查层结构、权重和输入输出。
+    tags: [python, ai, keras, h5py]
+    command: "python3 -c \"import keras,h5py; print(keras.__version__)\""
+    install_path: Python site-packages
+    example: "python3 -c \"import h5py; f=h5py.File('model.h5'); print(list(f.keys()))\""
+    official: https://keras.io/api/
+  - id: lib_pyghidra
+    kind: library
+    group: libraries/python
+    title: PyGhidra
+    summary: 从 Python 启动 Ghidra、分析程序并调用反编译 API。
+    tags: [python, ghidra, reverse]
+    command: "python3 -c \"import importlib.metadata,pyghidra; print(importlib.metadata.version('pyghidra'))\""
+    install_path: /opt/ghidra/Ghidra/Features/PyGhidra
+    workflow: 项目通过 reverse MCP 的隔离 worker 调用 PyGhidra，避免直接启动无法回收的 JVM。
+    example: "python3 -c \"import pyghidra; print(pyghidra)\""
+    official: https://github.com/NationalSecurityAgency/ghidra/tree/master/Ghidra/Features/PyGhidra
+  - id: lib_r2pipe
+    kind: library
+    group: libraries/python
+    title: r2pipe
+    summary: 从 Python 驱动 radare2 并获取文本或 JSON 分析结果。
+    tags: [python, radare2, reverse]
+    command: "python3 -c \"import r2pipe; print(r2pipe)\""
+    install_path: Python site-packages/r2pipe
+    example: "python3 -c \"import r2pipe; r=r2pipe.open('./challenge'); print(r.cmd('aaa; afl')); r.quit()\""
+    official: https://github.com/radareorg/radare2-r2pipe
+  - id: lib_playwright
+    kind: library
+    group: libraries/python
+    title: Playwright / Chromium
+    summary: 自动化真实 Chromium 页面、JavaScript、Cookie、截图和前端交互。
+    tags: [python, browser, playwright, chromium]
+    command: "python3 -c \"import playwright; print(playwright)\""
+    install_path: Python site-packages/playwright
+    example: "python3 -c \"from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()\""
+    official: https://playwright.dev/python/
+  - id: lib_typhonbreaker
+    kind: library
+    group: libraries/python
+    title: TyphonBreaker
+    summary: 为 Python pyjail、黑名单和受限 builtins 场景生成读取或 RCE payload。
+    tags: [python, pyjail, sandbox, web]
+    command: "python3 -c \"from Typhon import bypassREAD,bypassRCE; print(bypassREAD,bypassRCE)\""
+    install_path: Python site-packages/Typhon
+    example: "python3 -c \"from Typhon import bypassREAD; print(bypassREAD)\""
+  - id: lib_tqdm
+    kind: library
+    group: libraries/python
+    title: tqdm
+    summary: 为批量爆破、遍历和长时间数据处理显示进度。
+    tags: [python, progress, automation]
+    command: "python3 -c \"import tqdm; print(tqdm.__version__)\""
+    install_path: Python site-packages/tqdm
+    example: "python3 -c \"from tqdm import tqdm; [None for _ in tqdm(range(100))]\""
+    official: https://tqdm.github.io/
+  - id: lib_one_gadget
+    kind: library
+    group: libraries/ruby
+    title: one_gadget
+    summary: 枚举 libc 中满足特定约束即可触发 execve 的 one-shot gadget。
+    tags: [ruby, pwn, libc]
+    command: one_gadget
+    install_path: Ruby gems
+    example: "one_gadget ./libc.so.6"
+    official: https://github.com/david942j/one_gadget
+  - id: lib_zsteg
+    kind: library
+    group: libraries/ruby
+    title: zsteg
+    summary: 检测 PNG/BMP 中的 LSB、bit-plane 和隐藏数据。
+    tags: [ruby, stego, png]
+    command: zsteg
+    install_path: Ruby gems
+    example: "zsteg -a image.png"
+    official: https://github.com/zed-0xff/zsteg

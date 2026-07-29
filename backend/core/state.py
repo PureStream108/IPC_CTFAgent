@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 from pathlib import Path
 
 from backend.blackboard import graph_store
@@ -15,6 +16,7 @@ from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
 from backend.tools.tool_mcp import build_tool_search_mcp
+from backend.tools.catalog import ToolCatalog
 from backend.tools.tool_registry import ToolRegistry
 
 
@@ -31,20 +33,30 @@ class AppState:
             self._clean_runtime_state()
         self.config: AppConfig = load_config(config_dir)
 
+        # Operational state lives in RAM: it is wiped when the container is
+        # removed. Only what the UI exports (below) is written to disk, so the
+        # paths here just name the in-RAM databases.
         data_dir = self.root / "data"
-        self.db = Database(data_dir / "graph.db").configure()
+        self.db = Database(data_dir / "graph.db", in_memory=True).configure()
         with self.db.connect() as conn:
             graph_store.reset_project_counter_if_empty(conn)
         self.memory = MemoryStore(
-            data_dir / "memory.db", export_dir=self.root / "memory"
+            data_dir / "memory.db", export_dir=None, in_memory=True
         ).configure()
-        self.registry = ToolRegistry(cache_db=data_dir / "tool_cache.db").load()
+        self.registry = ToolRegistry(cache_db=data_dir / "tool_cache.db", in_memory=True).load()
+        self.catalog = ToolCatalog.load(self.registry)
         self.log_export_dir = Path(
             os.environ.get("IPC_LOG_EXPORT_DIR", self.root / "exports" / "logs")
         )
         self.wp_export_dir = Path(
             os.environ.get("IPC_WP_EXPORT_DIR", self.root / "exports" / "Wp")
         )
+        self.memory_export_dir = Path(
+            os.environ.get("IPC_MEMORY_EXPORT_DIR", self.root / "exports" / "memory")
+        )
+        # Derive endpoints allocate collision-free filenames from persistent
+        # directories. Serialise allocation + creation within this process.
+        self.export_lock = threading.RLock()
         self.logger = IPCLogger(
             self.root / "logs",
             enabled=self.config.log_enabled,
@@ -67,7 +79,7 @@ class AppState:
         # servers (browser, reverse, zap) run inside each task container and are
         # injected per Member by the orchestrator via docker-exec stdio targets.
         self.mcps = MCPRegistry()
-        self.mcps.register(build_memory_mcp(self.memory))
+        self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
 
         self.projects_dir = self.root / "projects"
@@ -79,7 +91,8 @@ class AppState:
         self.orchestrator = None
 
     def _clean_runtime_state(self) -> None:
-        for name in ("data", "projects", "memory", "logs", "wp"):
+        # "data" is absent: it holds exports now, and the databases are in RAM.
+        for name in ("projects", "memory", "logs", "wp"):
             target = self.root / name
             if not target.exists():
                 continue
@@ -95,6 +108,16 @@ class AppState:
     def save_config(self) -> None:
         save_config(self.config, self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+
+    def close(self) -> None:
+        """Release resources owned by the application state."""
+        try:
+            self.registry.close()
+        finally:
+            try:
+                self.memory.close()
+            finally:
+                self.db.close()
 
     def project_log_filename(self, project_id: str) -> str | None:
         with self.db.connect() as conn:

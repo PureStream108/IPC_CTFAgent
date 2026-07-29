@@ -1,17 +1,31 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Generator
 
 import yaml
+
+from backend.sqlite_util import RamSqlite
 
 REGISTRY_DIR = Path(__file__).resolve().parent / "registry"
 
 # Public tools/MCPs every project may use regardless of category.
 PUBLIC_MCPS = ("browser", "reverse", "zap")
 # Languages/runtimes always available in the member sandbox.
-LANGUAGES = ("python", "java", "go", "rust", "php", "nodejs", "maven")
+LANGUAGES = (
+    "bash",
+    "python",
+    "java",
+    "go",
+    "rust",
+    "php",
+    "nodejs",
+    "ruby",
+    "maven",
+)
 
 
 @dataclass(slots=True)
@@ -36,9 +50,18 @@ class Tool:
 
 
 class ToolRegistry:
-    def __init__(self, registry_dir: Path | None = None, cache_db: str | Path | None = None):
+    def __init__(
+        self,
+        registry_dir: Path | None = None,
+        cache_db: str | Path | None = None,
+        in_memory: bool = False,
+    ):
         self.registry_dir = registry_dir or REGISTRY_DIR
         self.cache_db = Path(cache_db) if cache_db else None
+        # The search cache is a pure performance cache, so RAM (or no cache at
+        # all, when cache_db is None) is always safe.
+        self.in_memory = in_memory and self.cache_db is not None
+        self._ram = RamSqlite(self.cache_db.stem) if self.in_memory else None
         self._tools: list[Tool] = []
         self._loaded = False
 
@@ -90,21 +113,28 @@ class ToolRegistry:
     # ---- tool_search (cached) ----
 
     def _init_cache(self) -> None:
-        self.cache_db.parent.mkdir(parents=True, exist_ok=True)
-        conn = self._conn()
-        try:
+        if not self.in_memory:
+            self.cache_db.parent.mkdir(parents=True, exist_ok=True)
+        with self._conn() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS tool_search_cache ("
                 "query TEXT PRIMARY KEY, results TEXT NOT NULL, created_at TEXT NOT NULL)"
             )
             conn.commit()
-        finally:
-            conn.close()
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.cache_db), timeout=30)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @contextmanager
+    def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+        ram = self._ram
+        with ram.guard() if ram is not None else nullcontext():
+            if ram is not None:
+                conn = ram.connect(timeout=30)
+            else:
+                conn = sqlite3.connect(str(self.cache_db), timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     def _score(self, tool: Tool, terms: list[str]) -> float:
         name = tool.name.lower()
@@ -134,26 +164,24 @@ class ToolRegistry:
         import json
         from datetime import UTC, datetime
 
-        conn = self._conn()
-        try:
+        with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO tool_search_cache (query, results, created_at) VALUES (?, ?, ?)",
                 (query, json.dumps(names), datetime.now(UTC).isoformat()),
             )
             conn.commit()
-        finally:
-            conn.close()
 
     def cached_search(self, query: str) -> list[str] | None:
         if self.cache_db is None:
             return None
         import json
 
-        conn = self._conn()
-        try:
+        with self._conn() as conn:
             row = conn.execute(
                 "SELECT results FROM tool_search_cache WHERE query = ?", (query,)
             ).fetchone()
-        finally:
-            conn.close()
         return json.loads(row["results"]) if row else None
+
+    def close(self) -> None:
+        if self._ram is not None:
+            self._ram.close()

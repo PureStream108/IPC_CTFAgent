@@ -20,11 +20,26 @@ from backend.api import wp as wp_router
 from backend.core.state import AppState
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
-STATIC_DIR = Path(__file__).parent / "static"
+
+def _resolve_frontend_dir(app_root: Path) -> Path:
+    """Locate the top-level ``frontend/`` web UI directory.
+
+    The UI no longer lives inside the ``backend`` package, so resolve it from
+    (1) an explicit ``IPC_FRONTEND_DIR`` override, (2) the repo root relative to
+    this file, or (3) ``<IPC_ROOT>/frontend`` (the Docker layout at /app).
+    """
+    override = os.environ.get("IPC_FRONTEND_DIR")
+    if override:
+        return Path(override)
+    repo_candidate = Path(__file__).resolve().parents[2] / "frontend"
+    if repo_candidate.exists():
+        return repo_candidate
+    return app_root / "frontend"
 
 
 def create_app(root: str | Path | None = None) -> FastAPI:
     app_root = Path(root) if root else Path(os.environ.get("IPC_ROOT", "."))
+    frontend_dir = _resolve_frontend_dir(app_root)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -38,11 +53,20 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             state.orchestrator.start()
         except Exception as exc:  # orchestrator optional during early bring-up
             app.state.orchestrator_error = str(exc)
-        yield
-        if state.orchestrator is not None:
-            state.orchestrator.shutdown()
-        state.pool.stop_all()
-        webui_proxy_manager.close_all()
+        try:
+            yield
+        finally:
+            try:
+                if state.orchestrator is not None:
+                    state.orchestrator.shutdown()
+            finally:
+                try:
+                    state.pool.stop_all()
+                finally:
+                    try:
+                        webui_proxy_manager.close_all()
+                    finally:
+                        state.close()
 
     app = FastAPI(title="IPC_CTFAgent", description="Multi-agent CTF solver", lifespan=lifespan)
 
@@ -58,10 +82,10 @@ def create_app(root: str | Path | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(frontend_dir / "index.html")
 
-    if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    if frontend_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
     return app
 
