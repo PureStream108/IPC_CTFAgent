@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.blackboard import graph_store
 from backend.core.logging_util import IPCLogger
+from backend.core.wp_writer import validate_writeup
 from backend.filename_util import safe_stem
 
 _ARCHIVE_VERSION = 1
@@ -33,6 +34,15 @@ def archive_completed_project(state, project_id: str) -> dict[str, Any]:
     wp_path = Path(str(row["wp_path"] or ""))
     if not wp_path.is_file():
         raise ValueError(f"project {project_id} does not have a readable writeup")
+    writeup_errors = validate_writeup(
+        wp_path.read_text(encoding="utf-8"),
+        expected_flag=str(row["flag"] or "") or None,
+        require_complete=True,
+    )
+    if writeup_errors:
+        raise ValueError(
+            f"project {project_id} does not have a valid final writeup: {'; '.join(writeup_errors)}"
+        )
 
     archive_id = project_archive_id(str(row["id"]), str(row["created_at"]))
     manifest_dir = state.log_export_dir / ".ipc-archives"

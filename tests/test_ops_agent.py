@@ -353,7 +353,34 @@ def test_ipc_mcp_finalizes_project_with_real_writeup(client):
                 {
                     "project_id": created["project_id"],
                     "flag": "flag{archive}",
-                    "markdown": "# MCP archived challenge\n\nReproducible solution.",
+                    "markdown": """# MCP archived challenge
+
+## Summary
+
+The IPC action agent recorded a deterministic, reproducible demonstration solve.
+
+## Solution
+
+```python
+import re
+
+
+def main() -> None:
+    output = "service returned flag{archive}"
+    match = re.search(r"flag\\{[^}]+\\}", output)
+    if not match:
+        raise SystemExit("flag not found")
+    print(match.group(0))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Flag
+
+`flag{archive}`
+""",
                 },
             )
 

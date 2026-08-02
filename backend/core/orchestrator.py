@@ -182,6 +182,16 @@ class Orchestrator:
                 error=error,
             )
 
+    def reload_config(self) -> None:
+        """Apply model configuration changes to future dispatches and WP generation.
+
+        Active Members keep their already-created adapters. Diamond reads this shared config for
+        each new assignment and final writeup, so settings saved from the UI take effect without a
+        process restart or disrupting an in-flight task.
+        """
+
+        self.diamond.config = self.state.config
+
     def _startup_in_progress(self, project_id: str) -> bool:
         with self._lock:
             return project_id in self._startup_project_ids
@@ -580,7 +590,13 @@ class Orchestrator:
         # WP_WRITING
         with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "wp_writing")
-        wp_path = self.diamond.write_wp(project_id, state.wp_dir)
+        try:
+            wp_path = self.diamond.write_wp(project_id, state.wp_dir)
+        except (OSError, RuntimeError, ValueError) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            state.logger.project("wp_generation_failed", project_id, error=error)
+            self._cleanup_after_wp_failure(project_id, error)
+            return
         state.logger.project("wp_written", project_id, path=wp_path)
 
         # MEMORY_WRITING
@@ -625,6 +641,24 @@ class Orchestrator:
                 error=f"{type(exc).__name__}: {exc}",
             )
         self.stop_project(project_id)
+
+    def _cleanup_after_wp_failure(self, project_id: str, error: str) -> None:
+        """Release the solved task without disguising a failed WP as a completed project."""
+
+        self._remove_queued_project(project_id)
+        self._clear_project_member_retries(project_id)
+        with self._lock:
+            members = list(self._members.get(project_id, {}).values())
+        for member in members:
+            member.stop()
+        with self.state.db.connect() as conn:
+            conn.execute(
+                "UPDATE agents SET state = 'idle' WHERE project_id = ? AND role = 'member'",
+                (project_id,),
+            )
+        self.resources.release_project(project_id)
+        self.projects.teardown(project_id)
+        self._set_runtime_phase(project_id, "wp_failed", error=error)
 
     # ---- scheduler loop ----
 

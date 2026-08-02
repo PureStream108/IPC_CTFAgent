@@ -170,6 +170,10 @@ def test_full_solve_pipeline_to_completed(state):
     # WP file exists
     assert Path(row["wp_path"]).exists()
     assert Path(row["wp_path"]).name == "Demo.md"
+    wp_content = Path(row["wp_path"]).read_text(encoding="utf-8")
+    assert "```python" in wp_content
+    assert row["flag"] in wp_content
+    assert "The CTF challenge is complete" not in wp_content
     assert (state.wp_export_dir / "Demo.md").is_file()
     for folder in state.logger.KINDS.values():
         assert (state.log_export_dir / folder / "Demo.log").is_file()

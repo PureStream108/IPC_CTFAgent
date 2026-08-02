@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.blackboard import graph_store
+from backend.core.wp_writer import validate_writeup
 
 
 def verify_flag_and_wp(db, project_id: str, wp_dir: Path) -> dict:
@@ -22,7 +23,13 @@ def verify_flag_and_wp(db, project_id: str, wp_dir: Path) -> dict:
         reasons.append("no flag recorded")
     if not has_goal_edge:
         reasons.append("no completion (goal) edge in graph")
-    if not wp_path or not Path(wp_path).exists():
+    if not wp_path or not Path(wp_path).is_file():
         reasons.append("writeup file missing")
+    elif errors := validate_writeup(
+        Path(wp_path).read_text(encoding="utf-8"),
+        expected_flag=flag,
+        require_complete=True,
+    ):
+        reasons.extend(f"invalid writeup: {error}" for error in errors)
 
     return {"ok": not reasons, "flag": flag, "wp_path": wp_path, "reasons": reasons}

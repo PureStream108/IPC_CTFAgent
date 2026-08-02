@@ -299,7 +299,14 @@ class _Tools:
         self._require_project(project_id)
         flag = _required_text(flag, "flag", 2048)
         try:
-            path = write_wp_content(self.state.db, project_id, self.state.wp_dir, markdown)
+            path = write_wp_content(
+                self.state.db,
+                project_id,
+                self.state.wp_dir,
+                markdown,
+                expected_flag=flag,
+                require_complete=True,
+            )
         except (RuntimeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         with self.state.db.connect() as conn:
