@@ -170,6 +170,9 @@ def test_full_solve_pipeline_to_completed(state):
     # WP file exists
     assert Path(row["wp_path"]).exists()
     assert Path(row["wp_path"]).name == "Demo.md"
+    assert (state.wp_export_dir / "Demo.md").is_file()
+    for folder in state.logger.KINDS.values():
+        assert (state.log_export_dir / folder / "Demo.log").is_file()
     # memory was written (4 categories may not all fill, but at least exploit+knowledge)
     assert len(state.memory.all()) >= 1
     # completion graph links
@@ -373,6 +376,9 @@ def test_task_slot_queue_starts_next_project_after_release(state):
     orch.stop_project(project_ids[0])
     orch._tick()
 
+    deadline = time.time() + 2
+    while Lifecycle(state.db).status(project_ids[2]) != "running" and time.time() < deadline:
+        time.sleep(0.01)
     assert Lifecycle(state.db).status(project_ids[2]) == "running"
     assert state.limiter.active_tasks() == sorted(project_ids[1:])
     assert list(orch._pending_projects) == []
@@ -386,14 +392,18 @@ def test_orchestrator_builds_task_container_mcp_targets(state):
     orch = Orchestrator(state, max_workers=1)
     targets = orch._container_mcps("proj_001", "aventurine")
 
-    assert set(targets) == {"browser", "reverse", "zap"}
+    assert set(targets) == {"browser", "reverse"}
     reverse_args = targets["reverse"].target.args
     assert reverse_args == [
         "exec", "-i", "-w", "/workspace/aventurine", "ipc-task-proj_001",
         "python3", "-m", "backend.mcp.mcp_server", "reverse",
     ]
-    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
     assert targets["reverse"].read_timeout == 600
+
+    state.config.runtime.zap_enabled = True
+    targets = orch._container_mcps("proj_001", "aventurine")
+    assert set(targets) == {"browser", "reverse", "zap"}
+    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
     orch.shutdown()
 
 

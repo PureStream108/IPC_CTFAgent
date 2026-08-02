@@ -54,6 +54,25 @@ def test_exposed_for_category(registry):
     assert "ghidra" not in names
 
 
+def test_unavailable_mcp_tools_are_filtered(registry):
+    web = registry.exposed_for("web", available_mcps={"browser", "reverse"})
+    assert "browser" in {tool.name for tool in web}
+    assert "zap" not in {tool.name for tool in web}
+    assert registry.get("zap", available_mcps={"browser", "reverse"}) is None
+    assert not registry.search("zap spider", available_mcps={"browser", "reverse"})
+
+    mcp = build_category_tools_mcp(
+        registry, "web", available_mcps={"browser", "reverse"}
+    )
+    assert "zap" not in {tool["name"] for tool in call_tool(mcp, "list_tools")}
+    assert call_tool(mcp, "get_tool", name="zap")["error"]
+
+    search_mcp = build_tool_search_mcp(
+        registry, available_mcps={"browser", "reverse"}
+    )
+    assert not call_tool(search_mcp, "tool_search", query="zap spider")
+
+
 def test_tool_search_finds_cross_category(registry):
     results = registry.search("rsa lattice factoring")
     names = {tool.name for tool in results}

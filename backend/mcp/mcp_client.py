@@ -182,16 +182,10 @@ class MCPRegistrySession:
     async def __aenter__(self) -> MCPRegistrySession:
         await self._stack.__aenter__()
         self._open = True
-        try:
-            for name, target in self._targets.items():
-                client = target if isinstance(target, MCPClient) else MCPClient(target)
-                self._clients[name] = await self._stack.enter_async_context(client)
-            return self
-        except BaseException:
-            self._open = False
-            self._clients.clear()
-            await self._stack.aclose()
-            raise
+        # Servers backed by ``docker exec`` are comparatively expensive to
+        # initialise.  Open only the server a Member actually calls instead of
+        # spawning every browser/reverse/tool process before its first action.
+        return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._open = False
@@ -206,7 +200,12 @@ class MCPRegistrySession:
             raise RuntimeError("MCP registry session is not open")
         client = self._clients.get(server)
         if client is None:
-            raise KeyError(f"no MCP server named '{server}'")
+            target = self._targets.get(server)
+            if target is None:
+                raise KeyError(f"no MCP server named '{server}'")
+            candidate = target if isinstance(target, MCPClient) else MCPClient(target)
+            client = await self._stack.enter_async_context(candidate)
+            self._clients[server] = client
         return client
 
     async def list_tools(self, server: str) -> list[types.Tool]:

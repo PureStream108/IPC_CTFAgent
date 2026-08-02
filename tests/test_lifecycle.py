@@ -15,7 +15,7 @@ from backend.memory.memory_store import MemoryStore
 from backend.server.app import create_app
 from backend.sqlite_util import RamSqlite
 from backend.tools.tool_registry import ToolRegistry
-from tests.helpers import write_mock_config
+from tests.helpers import setup_test_auth, write_mock_config
 
 
 def test_ram_sqlite_shared_cache_is_thread_safe_and_close_is_idempotent(monkeypatch):
@@ -148,6 +148,7 @@ def test_fastapi_lifespan_closes_state_after_request_exception(tmp_path):
         raise RuntimeError("expected request failure")
 
     with TestClient(app, raise_server_exceptions=False) as client:
+        setup_test_auth(client)
         state = client.app.state.ipc
         assert client.get("/test-lifespan-error").status_code == 500
         with state.db.connect() as conn:

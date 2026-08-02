@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
+from backend.core.archive import list_archived_projects, project_archive_id
 from backend.core.logging_util import IPCLogger
 from backend.core.state import AppState
 from backend.filename_util import numbered_filename
@@ -40,7 +41,9 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
     with state.db.connect() as conn:
         projects = graph_store.project_summaries(conn)
     logs = []
+    live_archive_ids: set[str] = set()
     for project in projects:
+        live_archive_ids.add(project_archive_id(project.id, project.created_at))
         item = {
             "project_id": project.id,
             "title": project.title,
@@ -50,6 +53,27 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
             item[key] = {
                 "filename": project.log_filename or f"{project.id}.jsonl",
                 "entries": state.logger.read_log(kind, project.id, limit),
+            }
+        logs.append(item)
+    for archive in list_archived_projects(state):
+        if archive["archive_id"] in live_archive_ids:
+            continue
+        item = {
+            "project_id": f"archive:{archive['archive_id']}",
+            "source_project_id": archive["project_id"],
+            "title": archive["title"],
+            "status": "completed",
+            "archived": True,
+        }
+        for kind, key in LOG_GROUPS:
+            path = (
+                state.log_export_dir
+                / state.logger.KINDS[kind]
+                / archive["log_filename"]
+            )
+            item[key] = {
+                "filename": archive["log_filename"],
+                "entries": state.logger.read_file(path, limit),
             }
         logs.append(item)
     return {

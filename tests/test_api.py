@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -8,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
 from backend.server.app import create_app
-from tests.helpers import write_mock_config
+from tests.helpers import setup_test_auth, write_mock_config
 
 
 @pytest.fixture
@@ -20,6 +22,7 @@ def client(tmp_path, monkeypatch):
     app = create_app(root=tmp_path)
     # point state at the temp config dir
     with TestClient(app) as c:
+        setup_test_auth(c)
         c.app.state.ipc.config_dir = cfgdir
         c.app.state.ipc.reload_config()
         yield c
@@ -44,6 +47,36 @@ def test_list_projects(client):
     assert r.status_code == 200
     assert len(r.json()) == 1
     assert r.json()[0]["member_count"] == 0
+
+
+def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
+    pid = client.post(
+        "/projects",
+        json={"title": "Async", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_start(_project_id):
+        entered.set()
+        release.wait(5)
+        return None
+
+    orchestrator = client.app.state.ipc.orchestrator
+    monkeypatch.setattr(orchestrator.projects, "start_challenge_env", slow_start)
+    started_at = time.monotonic()
+    response = client.post(f"/projects/{pid}/start")
+    elapsed = time.monotonic() - started_at
+
+    assert response.status_code == 200
+    assert elapsed < 1
+    assert response.json()["phase"] in {"queued", "workspace", "challenge_environment"}
+    assert entered.wait(1)
+
+    stopped = client.post(f"/projects/{pid}/stop")
+    release.set()
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "stopped"
 
 
 def test_intent_protocol_flow(client):
@@ -309,6 +342,7 @@ def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
         config_dir = write_mock_config(root / "config")
         app = create_app(root=root)
         with TestClient(app) as current:
+            setup_test_auth(current)
             current.app.state.ipc.config_dir = config_dir
             current.app.state.ipc.reload_config()
             detail = current.post(

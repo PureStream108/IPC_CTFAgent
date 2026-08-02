@@ -29,8 +29,10 @@ def start_solving(project_id: str, state: AppState = Depends(get_state)):
         raise HTTPException(400, "; ".join(errors))
     if state.orchestrator is None:
         raise HTTPException(503, "Orchestrator not running")
-    state.orchestrator.start_project(project_id)
-    return {"status": "running", "project_id": project_id}
+    try:
+        return state.orchestrator.start_project_async(project_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/reopen")
@@ -42,6 +44,7 @@ def reopen_project(project_id: str, state: AppState = Depends(get_state)):
         if row["status"] != "completed":
             raise HTTPException(409, "Only completed projects can be reopened")
         graph_store.set_status(conn, project_id, "stopped")
+        graph_store.set_runtime_phase(conn, project_id, "stopped")
         graph_store.clear_reason(conn, project_id)
     state.logger.project("reopened", project_id)
     return {"status": "stopped", "project_id": project_id}
@@ -92,12 +95,15 @@ def resume_solving(project_id: str, state: AppState = Depends(get_state)):
             raise HTTPException(404, "Project not found")
         if row["status"] != "stopped":
             raise HTTPException(409, "Only stopped projects can resume")
-    if state.orchestrator is not None:
-        state.orchestrator.resume_project(project_id)
-    else:
-        with state.db.connect() as conn:
-            graph_store.set_status(conn, project_id, "running")
-    return {"status": "running", "project_id": project_id}
+    errors = state.config.startup_errors()
+    if errors:
+        raise HTTPException(400, "; ".join(errors))
+    if state.orchestrator is None:
+        raise HTTPException(503, "Orchestrator not running")
+    try:
+        return state.orchestrator.start_project_async(project_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/reports", response_model=Report, status_code=201)

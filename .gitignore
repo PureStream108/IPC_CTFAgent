@@ -8,6 +8,7 @@ Interastral_Peace_Corporation_2.png
 backend/config/config.yaml
 logs/
 data/
+.ipc/
 memory/
 projects/
 Wp/
@@ -64,6 +65,9 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+.pytest-tmp-*/
+.tmp-pytest/
+.tmp-pytest-*/
 cover/
 
 # Translations

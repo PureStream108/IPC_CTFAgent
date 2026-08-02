@@ -14,6 +14,7 @@ class ChallengeEnv:
     network_name: str = ""
     started: bool = False
     endpoints: list[str] = field(default_factory=list)
+    error: str | None = None
 
 
 class NetworkManager:
@@ -75,7 +76,17 @@ class NetworkManager:
                     capture_output=True,
                 )
             return True
-        except Exception:
+        except subprocess.CalledProcessError as exc:
+            output = exc.stderr or exc.stdout or b""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            detail = str(output).strip()
+            env.error = f"docker command failed with exit code {exc.returncode}"
+            if detail:
+                env.error += f": {detail[-4000:]}"
+            return False
+        except Exception as exc:
+            env.error = f"{type(exc).__name__}: {exc}"
             return False
 
     def get(self, project_id: str) -> ChallengeEnv | None:

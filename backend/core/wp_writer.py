@@ -40,3 +40,31 @@ def write_wp(db, project_id: str, wp_dir: Path) -> str:
     with db.connect() as conn:
         graph_store.set_wp_path(conn, project_id, str(path))
     return str(path)
+
+
+def write_wp_content(db, project_id: str, wp_dir: Path, content: str) -> str:
+    """Persist an agent-produced Markdown writeup for a live IPC project.
+
+    The existing :func:`write_wp` intentionally creates a starter template for
+    the multi-agent lifecycle.  A Claude Code action run already has its final
+    explanation, so replacing that explanation with the starter text loses the
+    useful artifact.  This helper uses the same collision-safe path policy but
+    writes the supplied Markdown verbatim.
+    """
+
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("writeup content must be non-empty")
+    if len(content) > 1_000_000:
+        raise ValueError("writeup content is limited to 1,000,000 characters")
+
+    wp_dir.mkdir(parents=True, exist_ok=True)
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, project_id)
+    if detail is None:
+        raise RuntimeError(f"project {project_id} not found")
+
+    path = _target_path(wp_dir, project_id, detail.project.title, detail.project.wp_path)
+    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+    with db.connect() as conn:
+        graph_store.set_wp_path(conn, project_id, str(path))
+    return str(path)

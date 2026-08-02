@@ -5,17 +5,20 @@ from pathlib import Path
 import yaml
 
 
-def test_compose_persists_only_exports_via_data_bind_mount():
+def test_compose_persists_app_exports_and_claude_native_sessions():
     raw = Path("docker-compose.yml").read_text(encoding="utf-8")
     compose = yaml.safe_load(raw)
     app = compose["services"]["ipc-app"]
     binds = dict(entry.split(":", 1) for entry in app["volumes"] if ":" in entry)
 
-    # ./data is a host bind mount and the only state that survives `down`.
+    # ./data is the app's host bind mount for durable IPC state and exports.
     assert binds.get("./data") == "/app/data"
 
-    # Runtime state is in RAM / ephemeral, not held in named volumes.
-    assert "volumes" not in compose
+    # Solver runtime remains ephemeral. The only named volume belongs to the
+    # Claude runner and preserves native sessions used by `--resume`.
+    assert set(compose.get("volumes", {})) == {"ipc_claude_home"}
+    runner_volumes = compose["services"]["ipc-claude-runner"]["volumes"]
+    assert "ipc_claude_home:/home/node/.claude" in runner_volumes
     assert {src for src in binds if not src.startswith((".", "/"))} == set()
     for legacy in ("ipc_data", "ipc_memory", "ipc_wp", "ipc_runtime_logs", "ipc_projects"):
         assert legacy not in raw
@@ -37,6 +40,8 @@ def test_task_image_contains_ctf_and_container_mcp_runtimes():
     assert "ripgrep" in task_dockerfile
     assert "pyghidra" in task_dockerfile
     assert "playwright install --with-deps chromium" in task_dockerfile
+    assert "GHIDRA_DIRECT_URL=https://github.com/NationalSecurityAgency/ghidra" in task_dockerfile
+    assert 'for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"' in task_dockerfile
     assert "COPY backend /opt/ipc/backend" in task_dockerfile
     assert "docker.io" in app_dockerfile
     assert "chromium" not in app_dockerfile
@@ -48,3 +53,16 @@ def test_compose_builds_task_image_and_app_depends_on_it():
     assert compose["services"]["ipc-task-image"]["image"] == "ipc-task:latest"
     assert "ipc-member-image" not in compose["services"]
     assert "ipc-task-image" in compose["services"]["ipc-app"]["depends_on"]
+    assert compose["services"]["ipc-app"]["ports"] == ["8000:8000"]
+
+
+def test_zap_is_an_opt_in_compose_service():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    zap = compose["services"]["ipc-zap"]
+    app = compose["services"]["ipc-app"]
+
+    assert zap["profiles"] == ["zap"]
+    assert "ipc-zap" not in app.get("depends_on", [])
+    assert any(
+        value.startswith("IPC_ZAP_ENABLED=") for value in app["environment"]
+    )

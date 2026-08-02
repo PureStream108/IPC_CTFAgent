@@ -96,7 +96,7 @@ class TaskSandbox:
             if self._container is not None:
                 return
             client = self._docker()
-            from docker.errors import NotFound
+            from docker.errors import ImageNotFound, NotFound
 
             try:
                 container = client.containers.get(self._container_name)
@@ -120,7 +120,12 @@ class TaskSandbox:
                         run_kwargs["network_mode"] = "bridge"
                 else:
                     run_kwargs["network_mode"] = "none"
-                container = client.containers.run(**run_kwargs)
+                try:
+                    container = client.containers.run(**run_kwargs)
+                except ImageNotFound as exc:
+                    raise RuntimeError(
+                        f"task image '{self.image}' is unavailable; build the ipc-task-image service first"
+                    ) from exc
             else:
                 networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
                 self._shared_network = next((name for name in networks if name != "bridge"), None)

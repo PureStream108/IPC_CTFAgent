@@ -15,10 +15,12 @@ Execution model
   /opt/ipc-tools/tools.
 - Prefer creating private scripts and temporary output in the current Member
   directory; use /workspace/shared only for cross-Member exchange.
-- Use action "tool" for MCP helpers: memory, tool_search, browser, reverse, zap,
-  or the virtual "tools" server with list_tools/get_tool.
-- Browser and reverse run inside the shared task container; ZAP is reached from
-  that container over the Compose network. Browser tools are navigate, click,
+- Use action "tool" only for helpers listed in the current `available_mcps`:
+  memory, tool_search, browser, reverse, the optional zap service, or the
+  virtual "tools" server with list_tools/get_tool.
+- Browser and reverse run inside the shared task container. ZAP is disabled by
+  default and is reached over the Compose network only when explicitly enabled.
+  Browser tools are navigate, click,
   fill, press, eval_js, get_content, screenshot, cookies, and set_cookie.
 - Reverse tools are decompile, decompile_all, list_functions, strings,
   disassemble, r2_cmd, checksec, and file_info.

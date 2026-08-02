@@ -22,8 +22,8 @@ COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
-# /app/data is bind-mounted by docker-compose.yml and holds the exports that
-# persist; the rest is ephemeral working state, wiped with the container.
+# /app/data is bind-mounted by docker-compose.yml and holds authentication,
+# Operations Agent state and exports; the rest is ephemeral working state.
 RUN mkdir -p /app/data/logs /app/data/Wp /app/data/memory \
     && mkdir -p /app/memory /app/wp /app/logs /app/projects
 

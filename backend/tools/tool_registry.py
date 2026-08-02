@@ -4,7 +4,7 @@ import sqlite3
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Collection, Generator
 
 import yaml
 
@@ -97,13 +97,33 @@ class ToolRegistry:
     def by_category(self, category: str) -> list[Tool]:
         return [t for t in self._tools if t.category == category]
 
-    def exposed_for(self, category: str) -> list[Tool]:
-        """Tools initially exposed to a Member of the given project category."""
-        return self.by_category(category)
+    @staticmethod
+    def _available(tool: Tool, available_mcps: Collection[str] | None) -> bool:
+        if available_mcps is None or not tool.exec.startswith("mcp:"):
+            return True
+        return tool.exec.removeprefix("mcp:").strip() in available_mcps
 
-    def get(self, name: str) -> Tool | None:
+    def exposed_for(
+        self,
+        category: str,
+        *,
+        available_mcps: Collection[str] | None = None,
+    ) -> list[Tool]:
+        """Tools initially exposed to a Member of the given project category."""
+        return [
+            tool
+            for tool in self.by_category(category)
+            if self._available(tool, available_mcps)
+        ]
+
+    def get(
+        self,
+        name: str,
+        *,
+        available_mcps: Collection[str] | None = None,
+    ) -> Tool | None:
         for t in self._tools:
-            if t.name == name:
+            if t.name == name and self._available(t, available_mcps):
                 return t
         return None
 
@@ -150,9 +170,19 @@ class ToolRegistry:
                 score += 1.0
         return score
 
-    def search(self, query: str, limit: int = 8) -> list[Tool]:
+    def search(
+        self,
+        query: str,
+        limit: int = 8,
+        *,
+        available_mcps: Collection[str] | None = None,
+    ) -> list[Tool]:
         terms = [w for w in query.lower().replace(",", " ").split() if len(w) >= 2]
-        scored = [(t, self._score(t, terms)) for t in self._tools]
+        scored = [
+            (tool, self._score(tool, terms))
+            for tool in self._tools
+            if self._available(tool, available_mcps)
+        ]
         scored = [(t, s) for t, s in scored if s > 0]
         scored.sort(key=lambda p: p[1], reverse=True)
         results = [t for t, _ in scored[:limit]]

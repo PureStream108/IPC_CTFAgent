@@ -1,29 +1,29 @@
 log_enabled: true
 diamond:
-  api_format: claudecode
+  api_format: deepseek
   api_key: 
-  base_url: 
-  model: claude-opus-4-6
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
 members:
-- api_format: openai
+- api_format: deepseek
   api_key: 
-  base_url: 
-  model: gpt-5.4
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
   name: aventurine
-- api_format: openai
+- api_format: deepseek
   api_key: 
-  base_url: 
-  model: gpt-5.5
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
   name: pearl
-- api_format: openai
+- api_format: deepseek
   api_key: 
-  base_url: 
-  model: gpt-5.4
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
   name: jade
-- api_format: openai
-  api_key: sk-
-  base_url: 
-  model: gpt-5.4
+- api_format: deepseek
+  api_key:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
   name: topaz
 runtime:
   eval_interval_steps: 20
@@ -34,6 +34,7 @@ runtime:
   sandbox_backend: docker
   max_member_steps: 60
   max_member_actions_per_task: 20
+  zap_enabled: false
 limits:
   total_cpu: 4
   max_concurrent_tasks: 5

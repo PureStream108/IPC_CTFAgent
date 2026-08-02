@@ -27,3 +27,14 @@ def test_logger_reads_legacy_json_array(tmp_path):
     logger = IPCLogger(tmp_path, project_filename_resolver=lambda project_id: "legacy.json")
 
     assert logger.read_project_log("legacy") == [{"event": "old", "project_id": "legacy"}]
+
+
+def test_logger_accepts_kind_as_record_field(tmp_path):
+    logger = IPCLogger(tmp_path)
+
+    logger.llm("claude_code_event", "proj_001", kind="tool", label="Bash")
+
+    entry = logger.read_log("llm", "proj_001")[-1]
+    assert entry["event"] == "claude_code_event"
+    assert entry["kind"] == "tool"
+    assert entry["label"] == "Bash"

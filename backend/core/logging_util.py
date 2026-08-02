@@ -52,12 +52,19 @@ class IPCLogger:
                 return filename if filename.endswith((".jsonl", ".json")) else f"{filename}.jsonl"
         return f"{project_id}.jsonl"
 
-    def log(self, kind: str, event: str, project_id: str | None = None, **fields) -> None:
+    def log(self, log_kind: str, event: str, project_id: str | None = None, **fields) -> None:
+        """Append one log record.
+
+        ``log_kind`` selects the destination stream.  Keep that name distinct
+        from a record's optional ``kind`` field: IPC runtime events legitimately
+        mirror their own kind (for example ``tool`` or ``status``) into the LLM
+        log, and using ``kind`` for both caused ``multiple values`` failures.
+        """
         if not self._enabled:
             return
         record = {"ts": _utcnow(), "event": event, "project_id": project_id, **fields}
         with self._lock:
-            path = self._file(kind, project_id)
+            path = self._file(log_kind, project_id)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -81,6 +88,12 @@ class IPCLogger:
     def read_log(self, kind: str, project_id: str | None, limit: int | None = 500) -> list[dict]:
         path = self._file(kind, project_id)
         return self._tail(path, limit)
+
+    @staticmethod
+    def read_file(path: str | Path, limit: int | None = 500) -> list[dict]:
+        """Read an exported IPC JSONL log without creating a live log file."""
+
+        return IPCLogger._tail(Path(path), limit)
 
     def delete_project_logs(self, project_id: str) -> None:
         with self._lock:

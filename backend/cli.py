@@ -27,12 +27,12 @@ def _check(args) -> int:
     cfg = load_config()
     errors = cfg.startup_errors()
     if errors:
-        print("NOT READY:")
+        print("READY. Web UI is available; configure LLM endpoints before solving:")
         for e in errors:
             print("  -", e)
-        return 1
+        return 0
     avail = [m.name for m in cfg.available_members()]
-    print(f"READY. Diamond configured. Members with creds: {avail}")
+    print(f"READY. Solver configured. Members with creds: {avail}")
     return 0
 
 
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     h = sub.add_parser("health", help="health-check all configured LLM endpoints")
     h.set_defaults(func=_health)
 
-    c = sub.add_parser("check", help="report startup readiness")
+    c = sub.add_parser("check", help="report service and solver readiness")
     c.set_defaults(func=_check)
 
     args = parser.parse_args(argv)

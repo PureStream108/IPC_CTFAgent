@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.blackboard import edge_store, graph_store, node_store
+from backend.core.archive import archive_completed_project
 from backend.core.diamond import Diamond
 from backend.core.ipc import verify_flag_and_wp
 from backend.core.lifecycle import Lifecycle, LifecycleError
@@ -29,13 +30,25 @@ class ReasonCheckpoint:
 
 
 class Orchestrator:
-    def __init__(self, state, max_workers: int = 8, scripts: dict | None = None):
+    def __init__(self, state, max_workers: int | None = None, scripts: dict | None = None):
         self.state = state
         self.diamond = Diamond(state.db, state.config, state.logger)
         self.lifecycle = Lifecycle(state.db)
         self.resources = ResourceManager(state.limiter, state.pool)
         self.projects = ProjectManager(state.projects_dir, state.network)
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ipc-member")
+        member_workers = max_workers or max(
+            4,
+            state.config.limits.max_concurrent_tasks
+            * state.config.runtime.max_members_per_report,
+        )
+        self.executor = ThreadPoolExecutor(
+            max_workers=member_workers,
+            thread_name_prefix="ipc-member",
+        )
+        self.startup_executor = ThreadPoolExecutor(
+            max_workers=max(1, min(state.config.limits.max_concurrent_tasks, 8)),
+            thread_name_prefix="ipc-startup",
+        )
         self._members: dict[str, dict[str, Any]] = {}
         self._futures: dict[str, list] = {}
         self._task_index: dict[tuple[str, str], Any] = {}
@@ -43,6 +56,8 @@ class Orchestrator:
         self._reason_checkpoints: dict[str, ReasonCheckpoint] = {}
         self._pending_projects: deque[str] = deque()
         self._pending_project_ids: set[str] = set()
+        self._startup_project_ids: set[str] = set()
+        self._startup_futures: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -64,6 +79,7 @@ class Orchestrator:
             members = [m for proj in self._members.values() for m in proj.values()]
         for m in members:
             m.stop()
+        self.startup_executor.shutdown(wait=False)
         self.executor.shutdown(wait=False)
 
     # ---- project category helper ----
@@ -74,6 +90,96 @@ class Orchestrator:
             return row["category"] if row else "misc"
 
     # ---- start solving ----
+
+    def start_project_async(self, project_id: str) -> dict[str, str | None]:
+        """Queue slow Docker/bootstrap work without blocking an HTTP or MCP call."""
+
+        status = self.lifecycle.status(project_id)
+        if status is None:
+            raise ValueError(f"project not found: {project_id}")
+        if status in ("flag_found", "wp_writing", "memory_writing", "completed"):
+            return self.runtime_status(project_id)
+        if status == "running" and not self._startup_in_progress(project_id):
+            return self.runtime_status(project_id)
+        with self._lock:
+            if project_id in self._startup_project_ids:
+                return self.runtime_status(project_id)
+            self._startup_project_ids.add(project_id)
+        self._set_runtime_phase(project_id, "queued")
+        try:
+            future = self.startup_executor.submit(
+                self._run_project_startup,
+                project_id,
+                status == "stopped",
+            )
+        except Exception:
+            with self._lock:
+                self._startup_project_ids.discard(project_id)
+            raise
+        with self._lock:
+            self._startup_futures[project_id] = future
+        return self.runtime_status(project_id)
+
+    def _run_project_startup(self, project_id: str, resume: bool) -> None:
+        try:
+            if resume:
+                self.resume_project(project_id)
+            else:
+                self.start_project(project_id)
+        except Exception as exc:
+            # Synchronous callers still receive startup exceptions. Background
+            # callers instead get a durable failed phase and a stopped project.
+            with self.state.db.connect() as conn:
+                row = graph_store.get_project_row(conn, project_id)
+                if row is not None and row["status"] not in ("completed", "stopped"):
+                    graph_store.set_status(conn, project_id, "stopped")
+            self._set_runtime_phase(project_id, "failed", error=str(exc))
+            self.state.logger.project(
+                "project_background_start_failed",
+                project_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            with self._lock:
+                self._startup_project_ids.discard(project_id)
+                self._startup_futures.pop(project_id, None)
+
+    def runtime_status(self, project_id: str) -> dict[str, str | None]:
+        with self.state.db.connect() as conn:
+            row = graph_store.get_project_row(conn, project_id)
+        if row is None:
+            raise ValueError(f"project not found: {project_id}")
+        return {
+            "project_id": project_id,
+            "status": str(row["status"]),
+            "phase": str(row["runtime_phase"] or "idle"),
+            "error": row["runtime_error"],
+        }
+
+    def _set_runtime_phase(
+        self,
+        project_id: str,
+        phase: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        with self.state.db.connect() as conn:
+            row = graph_store.get_project_row(conn, project_id)
+            if row is None:
+                return
+            changed = row["runtime_phase"] != phase or row["runtime_error"] != error
+            graph_store.set_runtime_phase(conn, project_id, phase, error)
+        if changed:
+            self.state.logger.project(
+                "project_runtime_phase",
+                project_id,
+                phase=phase,
+                error=error,
+            )
+
+    def _startup_in_progress(self, project_id: str) -> bool:
+        with self._lock:
+            return project_id in self._startup_project_ids
 
     def start_project(self, project_id: str) -> None:
         self._reconcile_resources()
@@ -87,6 +193,7 @@ class Orchestrator:
             return
         if not self.resources.acquire_task(project_id):
             self._queue_project(project_id)
+            self._set_runtime_phase(project_id, "queued_capacity")
             self.state.logger.project(
                 "task_admission_denied",
                 project_id,
@@ -95,25 +202,35 @@ class Orchestrator:
             )
             return
         self._remove_queued_project(project_id)
+        with suppress(LifecycleError):
+            self.lifecycle.transition(project_id, "running")
         try:
+            self._set_runtime_phase(project_id, "workspace")
             self.projects.ensure_dirs(project_id)
-            self.projects.start_challenge_env(project_id)
-            with suppress(LifecycleError):
-                self.lifecycle.transition(project_id, "running")
+            self._set_runtime_phase(project_id, "challenge_environment")
+            challenge_env = self.projects.start_challenge_env(project_id)
+            if challenge_env is not None and not challenge_env.started:
+                raise RuntimeError(challenge_env.error or "challenge environment failed to start")
+            if self.lifecycle.status(project_id) != "running":
+                self.resources.release_project(project_id)
+                self.projects.teardown(project_id)
+                return
+            self._set_runtime_phase(project_id, "assigning")
             assignment = self.diamond.assign_initial(project_id)
-        except Exception:
-            self.resources.release_project(project_id)
-            self.projects.teardown(project_id)
-            raise
-        if assignment is None:
-            self.state.logger.project("no_members_available", project_id)
-            with suppress(LifecycleError):
-                self.lifecycle.transition(project_id, "stopped")
-            self.resources.release_project(project_id)
-            self.projects.teardown(project_id)
-            return
-        self.state.logger.project("project_scheduler_started", project_id, member=assignment.member, intent=assignment.intent_id)
-        try:
+            if assignment is None:
+                self.state.logger.project("no_members_available", project_id)
+                with suppress(LifecycleError):
+                    self.lifecycle.transition(project_id, "stopped")
+                self._set_runtime_phase(project_id, "failed", error="no configured members available")
+                self.resources.release_project(project_id)
+                self.projects.teardown(project_id)
+                return
+            self.state.logger.project("project_scheduler_started", project_id, member=assignment.member, intent=assignment.intent_id)
+            self._set_runtime_phase(project_id, "sandbox_starting")
+            if self.lifecycle.status(project_id) != "running":
+                self.resources.release_project(project_id)
+                self.projects.teardown(project_id)
+                return
             launched = self._launch_member(
                 project_id,
                 assignment.member,
@@ -123,11 +240,16 @@ class Orchestrator:
             )
             if not launched:
                 raise RuntimeError(f"configured member is unavailable: {assignment.member}")
+            if self.lifecycle.status(project_id) != "running":
+                self.stop_project(project_id)
+                return
+            self._set_runtime_phase(project_id, "ready")
         except Exception as exc:
             with suppress(LifecycleError):
                 self.lifecycle.transition(project_id, "stopped")
             self.resources.release_project(project_id)
             self.projects.teardown(project_id)
+            self._set_runtime_phase(project_id, "failed", error=str(exc))
             self.state.logger.project("project_start_failed", project_id, error=str(exc))
             raise
 
@@ -143,6 +265,7 @@ class Orchestrator:
             return
         if not self.resources.acquire_task(project_id):
             self._queue_project(project_id)
+            self._set_runtime_phase(project_id, "queued_capacity")
             self.state.logger.project(
                 "task_admission_denied",
                 project_id,
@@ -152,40 +275,57 @@ class Orchestrator:
             return
         self._remove_queued_project(project_id)
         try:
+            try:
+                self.lifecycle.transition(project_id, "running")
+            except LifecycleError:
+                with self.state.db.connect() as conn:
+                    graph_store.set_status(conn, project_id, "running")
+            self._set_runtime_phase(project_id, "workspace")
             self.projects.ensure_dirs(project_id)
-            self.projects.start_challenge_env(project_id)
-        except Exception:
-            self.resources.release_project(project_id)
-            self.projects.teardown(project_id)
-            raise
-        try:
-            self.lifecycle.transition(project_id, "running")
-        except LifecycleError:
-            with self.state.db.connect() as conn:
-                graph_store.set_status(conn, project_id, "running")
-        with self.state.db.connect() as conn:
-            detail = graph_store.project_detail(conn, project_id)
-            if detail is None:
+            self._set_runtime_phase(project_id, "challenge_environment")
+            challenge_env = self.projects.start_challenge_env(project_id)
+            if challenge_env is not None and not challenge_env.started:
+                raise RuntimeError(challenge_env.error or "challenge environment failed to start")
+            if self.lifecycle.status(project_id) != "running":
                 self.resources.release_project(project_id)
                 self.projects.teardown(project_id)
                 return
-            graph_store.set_agent_state(conn, project_id, "diamond", "active")
-            conn.execute(
-                "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
-                (project_id,),
-            )
-            has_open = any(intent.to is None for intent in detail.intents)
-            if not has_open:
-                source = next((f.id for f in reversed(detail.facts) if f.id not in ("goal",)), "origin")
-                edge_store.create_intent(
-                    conn,
-                    project_id,
-                    [source],
-                    "resume exploration from reopened project state",
-                    "diamond",
+            self._set_runtime_phase(project_id, "assigning")
+            with self.state.db.connect() as conn:
+                detail = graph_store.project_detail(conn, project_id)
+                if detail is None:
+                    self.resources.release_project(project_id)
+                    self.projects.teardown(project_id)
+                    return
+                graph_store.set_agent_state(conn, project_id, "diamond", "active")
+                conn.execute(
+                    "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
+                    (project_id,),
                 )
-        self.state.logger.project("project_resumed", project_id)
-        self._dispatch_project(project_id)
+                has_open = any(intent.to is None for intent in detail.intents)
+                if not has_open:
+                    source = next((f.id for f in reversed(detail.facts) if f.id not in ("goal",)), "origin")
+                    edge_store.create_intent(
+                        conn,
+                        project_id,
+                        [source],
+                        "resume exploration from reopened project state",
+                        "diamond",
+                    )
+            self.state.logger.project("project_resumed", project_id)
+            self._set_runtime_phase(project_id, "sandbox_starting")
+            self._dispatch_project(project_id)
+            self._set_runtime_phase(project_id, "ready")
+        except Exception as exc:
+            with self.state.db.connect() as conn:
+                row = graph_store.get_project_row(conn, project_id)
+                if row is not None and row["status"] != "completed":
+                    graph_store.set_status(conn, project_id, "stopped")
+            self.resources.release_project(project_id)
+            self.projects.teardown(project_id)
+            self._set_runtime_phase(project_id, "failed", error=str(exc))
+            self.state.logger.project("project_resume_failed", project_id, error=str(exc))
+            raise
 
     # ---- reinforcements ----
 
@@ -330,11 +470,15 @@ class Orchestrator:
             )
             return MCPClient.stdio("docker", args, read_timeout=600)
 
-        return {
+        targets = {
             "browser": target("browser"),
             "reverse": target("reverse"),
-            "zap": target("zap", env={"ZAP_API_URL": "http://ipc-zap:8080"}),
         }
+        if self.state.config.runtime.zap_enabled:
+            targets["zap"] = target(
+                "zap", env={"ZAP_API_URL": "http://ipc-zap:8080"}
+            )
+        return targets
 
     def _record_member_assignment(self, project_id: str, member_name: str, intent_id: str) -> None:
         with self.state.db.connect() as conn:
@@ -389,8 +533,15 @@ class Orchestrator:
             members = list(self._members.get(project_id, {}).values())
         for m in members:
             m.stop()
+        with self.state.db.connect() as conn:
+            conn.execute(
+                "UPDATE agents SET state = 'idle' WHERE project_id = ? AND role = 'member'",
+                (project_id,),
+            )
         self.resources.release_project(project_id)
         self.projects.teardown(project_id)
+        phase = "completed" if self.lifecycle.status(project_id) == "completed" else "stopped"
+        self._set_runtime_phase(project_id, phase)
 
     # ---- flag found -> close pipeline ----
 
@@ -440,6 +591,7 @@ class Orchestrator:
         self.diamond.draw_completion(project_id)
         with suppress(LifecycleError):
             self.lifecycle.transition(project_id, "completed")
+        self._set_runtime_phase(project_id, "completed")
 
         # broadcast + release resources
         with state.db.connect() as conn:
@@ -448,6 +600,22 @@ class Orchestrator:
             flag = row["flag"] if row else ""
             graph_store.add_broadcast(conn, project_id, title, flag or "")
         state.logger.project("completed", project_id, flag=verdict.get("flag"))
+        try:
+            archive = archive_completed_project(state, project_id)
+            state.logger.project(
+                "outputs_archived",
+                project_id,
+                wp_filename=archive["wp_filename"],
+                log_filename=archive["log_filename"],
+            )
+        except Exception as exc:
+            # Completion must still release task resources. The durable archive
+            # failure remains visible in the live project log for diagnosis.
+            state.logger.project(
+                "outputs_archive_failed",
+                project_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         self.stop_project(project_id)
 
     # ---- scheduler loop ----
@@ -473,6 +641,11 @@ class Orchestrator:
         self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
             if summary.status != "running":
+                continue
+            # ``start_project`` marks the project running before slow Docker
+            # setup so the UI can expose a Stop control.  Do not dispatch a
+            # second Member until that startup worker reaches ``ready``.
+            if self._startup_in_progress(summary.id):
                 continue
             if not self.resources.acquire_task(summary.id):
                 self._queue_project(summary.id)
@@ -588,11 +761,11 @@ class Orchestrator:
             self._remove_queued_project(project_id)
             status = self.lifecycle.status(project_id)
             if status == "created":
-                self.start_project(project_id)
+                self.start_project_async(project_id)
             elif status == "stopped":
-                self.resume_project(project_id)
+                self.start_project_async(project_id)
             elif status == "running":
-                if self.resources.acquire_task(project_id):
+                if not self._startup_in_progress(project_id) and self.resources.acquire_task(project_id):
                     self._dispatch_project(project_id)
 
     def _select_member_for_intent(self, project_id: str, detail, intent, active: set[str]) -> str | None:
@@ -776,6 +949,9 @@ class Orchestrator:
         while monotonic() < deadline:
             with self._lock:
                 futures = list(self._futures.get(project_id, []))
+                startup = self._startup_futures.get(project_id)
+            if startup is not None:
+                futures.append(startup)
             pending = [f for f in futures if not f.done()]
             status = self.lifecycle.status(project_id)
             if (

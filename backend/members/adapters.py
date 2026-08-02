@@ -58,6 +58,16 @@ class BaseAdapter:
     def health(self) -> dict:
         raise NotImplementedError
 
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+    ) -> str:
+        raise NotImplementedError
+
     def decide(self, context: dict) -> MemberAction:
         raise NotImplementedError
 
@@ -144,24 +154,43 @@ class OpenAICompatibleAdapter(BaseAdapter):
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
 
     def decide(self, context: dict) -> MemberAction:
+        text = self.chat(
+            [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+            system_prompt=_SYSTEM_PROMPT,
+            temperature=0.4,
+            max_tokens=None,
+        )
+        return MemberAction.from_obj(_extract_json(text))
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+    ) -> str:
         import requests
 
+        request_messages = list(messages)
+        if system_prompt:
+            request_messages.insert(0, {"role": "system", "content": system_prompt})
+        request_body: dict[str, Any] = {
+            "model": self.config.model or "gpt-4o",
+            "messages": request_messages,
+        }
+        if temperature is not None:
+            request_body["temperature"] = temperature
+        if max_tokens is not None:
+            request_body["max_tokens"] = max_tokens
         resp = requests.post(
             self._endpoint(),
             headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"},
-            json={
-                "model": self.config.model or "gpt-4o",
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-                ],
-                "temperature": 0.4,
-            },
+            json=request_body,
             timeout=120,
         )
         resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
-        return MemberAction.from_obj(_extract_json(text))
+        return str(resp.json()["choices"][0]["message"]["content"])
 
 
 class ClaudeAdapter(BaseAdapter):
@@ -186,8 +215,33 @@ class ClaudeAdapter(BaseAdapter):
             return {"ok": False, "status": 0, "error": str(exc), "format": "claudecode"}
 
     def decide(self, context: dict) -> MemberAction:
+        text = self.chat(
+            [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+            system_prompt=_SYSTEM_PROMPT,
+            temperature=None,
+            max_tokens=1024,
+        )
+        return MemberAction.from_obj(_extract_json(text))
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+    ) -> str:
         import requests
 
+        request_body: dict[str, Any] = {
+            "model": self.config.model or "claude-opus-4-8",
+            "max_tokens": max_tokens or 2048,
+            "messages": messages,
+        }
+        if temperature is not None:
+            request_body["temperature"] = temperature
+        if system_prompt:
+            request_body["system"] = system_prompt
         resp = requests.post(
             f"{self.config.base_url.rstrip('/')}/v1/messages",
             headers={
@@ -195,17 +249,11 @@ class ClaudeAdapter(BaseAdapter):
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.config.model or "claude-opus-4-8",
-                "max_tokens": 1024,
-                "system": _SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
-            },
+            json=request_body,
             timeout=120,
         )
         resp.raise_for_status()
-        text = resp.json()["content"][0]["text"]
-        return MemberAction.from_obj(_extract_json(text))
+        return str(resp.json()["content"][0]["text"])
 
 
 class PiAdapter(OpenAICompatibleAdapter):

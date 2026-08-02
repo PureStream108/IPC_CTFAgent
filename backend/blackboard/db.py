@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS projects (
     flag TEXT,
     wp_path TEXT,
     log_filename TEXT,
+    runtime_phase TEXT NOT NULL DEFAULT 'idle',
+    runtime_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     reason_worker TEXT,
@@ -172,6 +174,12 @@ class Database:
                 }
                 if "external_id" not in columns:
                     conn.execute("ALTER TABLE projects ADD COLUMN external_id TEXT")
+                if "runtime_phase" not in columns:
+                    conn.execute(
+                        "ALTER TABLE projects ADD COLUMN runtime_phase TEXT NOT NULL DEFAULT 'idle'"
+                    )
+                if "runtime_error" not in columns:
+                    conn.execute("ALTER TABLE projects ADD COLUMN runtime_error TEXT")
             self._configured = True
         return self
 

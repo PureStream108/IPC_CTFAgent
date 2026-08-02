@@ -3,11 +3,15 @@ services:
     build:
       context: .
       dockerfile: docker/member/Dockerfile
+      args:
+        GITHUB_MIRROR: ${IPC_GITHUB_MIRROR:-https://github.com}
+        TEMURIN_JDK_URL: ${IPC_TEMURIN_JDK_URL:-https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse}
     image: ipc-task:latest
     command: ["true"]
     restart: "no"
 
   ipc-zap:
+    profiles: ["zap"]
     image: ghcr.io/zaproxy/zaproxy:stable
     command:
       - zap.sh
@@ -26,6 +30,42 @@ services:
       - "8080"
     restart: unless-stopped
 
+  ipc-claude-runner:
+    build:
+      context: .
+      dockerfile: docker/claude-runner/Dockerfile
+    image: ipc-claude-runner:latest
+    container_name: ipc-claude-runner
+    # Claude Code refuses bypass-permission mode as root. The supplemental
+    # host Docker group still permits the dedicated host helper to use the
+    # Docker socket without running the Claude process itself as root.
+    user: "1000:1000"
+    group_add:
+      - "997"
+    environment:
+      - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
+      - IPC_RUNNER_PORT=8600
+      - IPC_RUNNER_MAX_CONCURRENT=${IPC_RUNNER_MAX_CONCURRENT:-2}
+      - IPC_IPC_MCP_URL=${IPC_IPC_MCP_URL:-http://ipc-app:8000/internal/mcp}
+    expose:
+      - "8600"
+    working_dir: /data/ctf/IPC_CTFAgent
+    volumes:
+      # Keep the runner on the same absolute path so Docker Compose commands
+      # it launches resolve against the host's project path.
+      - ./:/data/ctf/IPC_CTFAgent
+      # The runner can repair source and deployment files, but must not read or
+      # modify persistent IPC conversations and workflow secrets by default.
+      - ./data:/data/ctf/IPC_CTFAgent/data:ro
+      # Claude Code's native JSONL sessions must survive runner replacement so
+      # each IPC conversation can resume its real agent context with --resume.
+      - ipc_claude_home:/home/node/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Reuse the host's Compose v2 plugin so the agent can rebuild/restart
+      # ipc-app after source changes without rebuilding the task image.
+      - /usr/libexec/docker/cli-plugins/docker-compose:/usr/libexec/docker/cli-plugins/docker-compose:ro
+    restart: unless-stopped
+
   ipc-app:
     build:
       context: .
@@ -37,22 +77,27 @@ services:
     environment:
       - IPC_ROOT=/app
       - IPC_LOG_ENABLED=true
+      - IPC_ZAP_ENABLED=${IPC_ZAP_ENABLED:-}
       - IPC_LOG_EXPORT_DIR=/app/data/logs
       - IPC_WP_EXPORT_DIR=/app/data/Wp
       - IPC_MEMORY_EXPORT_DIR=/app/data/memory
+      - IPC_CLAUDE_RUNNER_URL=${IPC_CLAUDE_RUNNER_URL:-http://ipc-claude-runner:8600}
+      - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
     volumes:
-      # ./data is the only persistent location: the UI's Derive/Export actions
-      # write logs, WP and the memory vault here, and they survive
-      # `docker compose down`. Operational state (blackboard, memory, tool
-      # cache) is held in RAM and everything else the container writes is
-      # ephemeral, so a fresh `up` starts clean.
+      # ./data is the only persistent location: administrator authentication,
+      # IPC conversation configuration/history/secrets, and UI Derive/Export
+      # outputs survive `docker compose down`. Solver blackboard, memory and
+      # tool caches remain in RAM, so a fresh `up` starts those clean.
       - ./data:/app/data
       - ./backend/config:/app/backend/config
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
       - ipc-task-image
-      - ipc-zap
+      - ipc-claude-runner
 
-# Browser and reverse MCP servers run inside each task container. ZAP remains a
-# shared service on the Compose network and is reached by the task-side server.
+# Browser and reverse MCP servers run inside each task container. ZAP is an
+# optional shared service enabled with the `zap` Compose profile.
+
+volumes:
+  ipc_claude_home:

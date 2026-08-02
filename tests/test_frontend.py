@@ -36,6 +36,24 @@ def test_index_served(client):
     assert "memory_log" in body
     assert "New Project" in body
     assert "Memory" in body
+    assert "First-time setup" in body
+    assert 'await this.authRequest("POST","/auth/setup"' in body
+    assert 'await this.authRequest("POST","/auth/login"' in body
+    assert "Persistent action agent powered by Claude Code" in body
+    assert "IPC live log" in body
+    assert "Archived" in body
+    assert "Interrupt & Send" in body
+    assert "/api/ops/chat/interrupt" in body
+    assert "interruptOpsRun" in body
+    assert "credentials for IPC" in body
+    assert "pollOpsRun" in body
+    assert "token/value (never added to chat history)" not in body
+    assert "openOpsAgent" in body
+    assert '"/api/ops/chat"' in body
+    assert "confirmOpsWorkflow" in body
+    assert "submitFoundFlags" in body
+    assert "addMember" in body
+    assert "cfg.runtime.zap_enabled" in body
     assert "工具目录" in body
     assert "经验记忆" in body
     assert "catalogRows" in body
