@@ -6,6 +6,7 @@ from contextlib import suppress
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from backend.blackboard import edge_store, graph_store, node_store
@@ -30,6 +31,8 @@ class ReasonCheckpoint:
 
 
 class Orchestrator:
+    _MEMBER_RETRY_DELAYS = (10, 30, 90, 300)
+
     def __init__(self, state, max_workers: int | None = None, scripts: dict | None = None):
         self.state = state
         self.diamond = Diamond(state.db, state.config, state.logger)
@@ -58,6 +61,8 @@ class Orchestrator:
         self._pending_project_ids: set[str] = set()
         self._startup_project_ids: set[str] = set()
         self._startup_futures: dict[str, Any] = {}
+        self._member_failure_counts: dict[tuple[str, str], int] = {}
+        self._member_retry_not_before: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -191,6 +196,7 @@ class Orchestrator:
             return
         if status in ("running", "flag_found", "wp_writing", "memory_writing", "completed"):
             return
+        self._clear_project_member_retries(project_id)
         if not self.resources.acquire_task(project_id):
             self._queue_project(project_id)
             self._set_runtime_phase(project_id, "queued_capacity")
@@ -263,6 +269,7 @@ class Orchestrator:
             return
         if status != "stopped":
             return
+        self._clear_project_member_retries(project_id)
         if not self.resources.acquire_task(project_id):
             self._queue_project(project_id)
             self._set_runtime_phase(project_id, "queued_capacity")
@@ -529,6 +536,7 @@ class Orchestrator:
 
     def stop_project(self, project_id: str) -> None:
         self._remove_queued_project(project_id)
+        self._clear_project_member_retries(project_id)
         with self._lock:
             members = list(self._members.get(project_id, {}).values())
         for m in members:
@@ -667,7 +675,13 @@ class Orchestrator:
         running = {intent_id for (pid, intent_id), fut in project_tasks.items() if pid == project_id and not fut.done()}
         open_intents = [i for i in detail.intents if i.to is None]
         category = detail.project.category
-        claimable = [i for i in open_intents if i.id not in running]
+        all_claimable = [i for i in open_intents if i.id not in running]
+        claimable = [
+            intent for intent in all_claimable
+            if not self._member_retry_blocked(project_id, intent.id)
+        ]
+        if not claimable and all_claimable:
+            return
         claimed = [
             i for i in claimable
             if i.worker is not None and i.worker not in active_members
@@ -714,6 +728,61 @@ class Orchestrator:
             running.add(intent.id)
             active_members.add(member_name)
             available_slots -= 1
+
+    def _member_retry_blocked(self, project_id: str, intent_id: str) -> bool:
+        with self._lock:
+            retry_at = self._member_retry_not_before.get((project_id, intent_id))
+        return retry_at is not None and monotonic() < retry_at
+
+    def _schedule_member_retry(
+        self,
+        project_id: str,
+        intent_id: str,
+        *,
+        error: str,
+    ) -> None:
+        if self.lifecycle.status(project_id) != "running":
+            return
+        key = (project_id, intent_id)
+        with self._lock:
+            count = self._member_failure_counts.get(key, 0) + 1
+            self._member_failure_counts[key] = count
+            delay = self._MEMBER_RETRY_DELAYS[min(count - 1, len(self._MEMBER_RETRY_DELAYS) - 1)]
+            self._member_retry_not_before[key] = monotonic() + delay
+        safe_error = error[:1000]
+        self.state.logger.project(
+            "member_task_retry_scheduled",
+            project_id,
+            intent=intent_id,
+            attempt=count,
+            delay_seconds=delay,
+            error=safe_error,
+        )
+        self._set_runtime_phase(
+            project_id,
+            "degraded",
+            error=(
+                f"Member action failed for {intent_id}; retry {count} in {delay}s. "
+                f"{safe_error}"
+            )[:1500],
+        )
+
+    def _clear_member_retry(self, project_id: str, intent_id: str) -> None:
+        key = (project_id, intent_id)
+        with self._lock:
+            existed = key in self._member_failure_counts or key in self._member_retry_not_before
+            self._member_failure_counts.pop(key, None)
+            self._member_retry_not_before.pop(key, None)
+            project_has_failures = any(pid == project_id for pid, _ in self._member_failure_counts)
+        if existed and not project_has_failures and self.lifecycle.status(project_id) == "running":
+            self._set_runtime_phase(project_id, "ready")
+
+    def _clear_project_member_retries(self, project_id: str) -> None:
+        with self._lock:
+            for key in [key for key in self._member_failure_counts if key[0] == project_id]:
+                self._member_failure_counts.pop(key, None)
+            for key in [key for key in self._member_retry_not_before if key[0] == project_id]:
+                self._member_retry_not_before.pop(key, None)
 
     def _reconcile_resources(self) -> None:
         with self.state.db.connect() as conn:
@@ -910,11 +979,18 @@ class Orchestrator:
                     done.append((project_id, intent_id, future))
         for project_id, intent_id, future in done:
             crashed = False
+            failure_error = "member task returned no result"
             try:
                 result = future.result()
             except Exception as exc:
                 crashed = True
-                self.state.logger.project("member_task_crash", project_id, intent=intent_id, error=str(exc))
+                failure_error = f"{type(exc).__name__}: {exc}"
+                self.state.logger.project(
+                    "member_task_crash",
+                    project_id,
+                    intent=intent_id,
+                    error=failure_error,
+                )
                 result = None
             finally:
                 with self._lock:
@@ -923,7 +999,27 @@ class Orchestrator:
             if result is None:
                 if not crashed:
                     self.state.logger.project("member_task_failed", project_id, intent=intent_id)
+                self._schedule_member_retry(
+                    project_id,
+                    intent_id,
+                    error=failure_error,
+                )
                 continue
+            if result.status == "failed":
+                self.state.logger.project(
+                    "member_task_failed",
+                    project_id,
+                    intent=intent_id,
+                    steps=result.steps,
+                    error=result.error,
+                )
+                self._schedule_member_retry(
+                    project_id,
+                    intent_id,
+                    error=result.error or "member action failed",
+                )
+                continue
+            self._clear_member_retry(project_id, intent_id)
             if result.status == "stalled":
                 self.state.logger.project("member_task_stalled", project_id, intent=intent_id, steps=result.steps)
             elif result.status == "done":

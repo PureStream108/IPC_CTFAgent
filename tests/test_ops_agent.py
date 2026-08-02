@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
 from backend.core.config import LLMConfig
-from backend.members.adapters import ClaudeAdapter, OpenAICompatibleAdapter
+from backend.members.adapters import ClaudeAdapter, DecisionOutputError, OpenAICompatibleAdapter
 from backend.mcp.mcp_client import MCPClient
 from backend.ops.network import NetworkPolicyError, WorkflowHttpClient
 from backend.ops.ipc_mcp import build_ipc_mcp
@@ -862,6 +862,98 @@ def test_existing_openai_decide_does_not_gain_chat_only_max_tokens(monkeypatch):
     )
     assert adapter.decide({"step": 1}).kind == "done"
     assert "max_tokens" not in captured
+
+
+def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
+    requests_seen = []
+    contents = iter(
+        [
+            ("I should inspect the target first.", "stop"),
+            ('{"action":"bash","command":"file ./target"}', "stop"),
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, content, finish_reason):
+            self.content = content
+            self.finish_reason = finish_reason
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": self.finish_reason,
+                        "message": {"content": self.content, "reasoning_content": "brief reasoning"},
+                    }
+                ]
+            }
+
+    def fake_post(url, **kwargs):
+        requests_seen.append(kwargs["json"])
+        return FakeResponse(*next(contents))
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="deepseek",
+            api_key="key",
+            base_url="https://api.deepseek.invalid/v1",
+            model="deepseek-chat",
+        )
+    )
+
+    action = adapter.decide({"step": 1})
+
+    assert action.kind == "bash"
+    assert action.args["command"] == "file ./target"
+    assert len(requests_seen) == 2
+    assert all(body["response_format"] == {"type": "json_object"} for body in requests_seen)
+    assert requests_seen[0]["max_tokens"] == 2048
+    assert requests_seen[0]["temperature"] == 0.0
+
+
+def test_decision_output_error_preserves_safe_response_diagnostics(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "still not an action"},
+                    }
+                ]
+            }
+
+    def fake_post(url, **kwargs):
+        nonlocal calls
+        calls += 1
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="deepseek",
+            api_key="key",
+            base_url="https://api.deepseek.invalid/v1",
+            model="deepseek-chat",
+        )
+    )
+
+    with pytest.raises(DecisionOutputError) as caught:
+        adapter.decide({"step": 1})
+
+    assert calls == 2
+    assert len(caught.value.attempts) == 2
+    assert caught.value.attempts[-1]["response"]["finish_reason"] == "length"
+    assert caught.value.attempts[-1]["preview"] == "still not an action"
 
 
 def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):

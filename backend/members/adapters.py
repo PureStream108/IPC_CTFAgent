@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,6 +49,17 @@ class MemberAction:
                 args["args"] = {}
         thought = obj.get("thought", "")
         return cls(kind=kind, args=args, thought=thought if isinstance(thought, str) else "")
+
+
+class DecisionOutputError(ValueError):
+    """The model answered, but did not produce a usable Member action."""
+
+    def __init__(self, attempts: list[dict[str, Any]]):
+        self.attempts = attempts
+        detail = attempts[-1].get("error", "invalid model output") if attempts else "invalid model output"
+        super().__init__(
+            f"model did not return a valid JSON action after {len(attempts)} attempt(s): {detail}"
+        )
 
 
 class BaseAdapter:
@@ -103,6 +115,7 @@ _SYSTEM_PROMPT = (
     "intent for a concrete next direction, or report when blocked; do not silently spin. "
     "At the start of each CTF round, check likely flag sources in this order: first try reading /flag, "
     "then inspect challenge environment variables(FLAG or check ENV), then continue with challenge-specific methods. "
+    "If recent_observations already contain the result of either probe, reuse it instead of running that probe again. "
     "Never claim a fake flag; use the flag action only for a confirmed real flag. "
     "Always inspect attachments and other provided materials first if they exist, because they may contain "
     "the real foothold or clue. If the current path is not moving, switch angle instead of repeating the same recon. "
@@ -131,6 +144,10 @@ _SYSTEM_PROMPT = (
 
 class OpenAICompatibleAdapter(BaseAdapter):
 
+    def __init__(self, config: LLMConfig, name: str = "agent"):
+        super().__init__(config, name=name)
+        self._last_response_meta: dict[str, Any] = {}
+
     def _endpoint(self) -> str:
         base = self.config.base_url.rstrip("/")
         return f"{base}/chat/completions"
@@ -154,13 +171,38 @@ class OpenAICompatibleAdapter(BaseAdapter):
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
 
     def decide(self, context: dict) -> MemberAction:
-        text = self.chat(
-            [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+        messages = [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
+        json_mode = self.config.api_format == "deepseek"
+        text = self._request_chat(
+            messages,
             system_prompt=_SYSTEM_PROMPT,
-            temperature=0.4,
-            max_tokens=None,
+            temperature=0.0 if json_mode else 0.4,
+            max_tokens=2048 if json_mode else None,
+            json_mode=json_mode,
         )
-        return MemberAction.from_obj(_extract_json(text))
+        attempts: list[dict[str, Any]] = []
+        try:
+            return MemberAction.from_obj(_extract_json(text))
+        except (TypeError, ValueError) as exc:
+            attempts.append(_decision_attempt(text, exc, self._last_response_meta))
+
+        repair_message = (
+            "Repair the previous response. Return exactly one concise JSON object matching the action "
+            "schema in the system prompt, with no Markdown or commentary. The previous invalid response was:\n"
+            + _clip_text(text, 6000)
+        )
+        repaired = self._request_chat(
+            [*messages, {"role": "user", "content": repair_message}],
+            system_prompt=_SYSTEM_PROMPT,
+            temperature=0.0,
+            max_tokens=2048 if json_mode else 1024,
+            json_mode=json_mode,
+        )
+        try:
+            return MemberAction.from_obj(_extract_json(repaired))
+        except (TypeError, ValueError) as exc:
+            attempts.append(_decision_attempt(repaired, exc, self._last_response_meta))
+            raise DecisionOutputError(attempts) from exc
 
     def chat(
         self,
@@ -169,6 +211,23 @@ class OpenAICompatibleAdapter(BaseAdapter):
         system_prompt: str = "",
         temperature: float | None = 0.2,
         max_tokens: int | None = None,
+    ) -> str:
+        return self._request_chat(
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=False,
+        )
+
+    def _request_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system_prompt: str,
+        temperature: float | None,
+        max_tokens: int | None,
+        json_mode: bool,
     ) -> str:
         import requests
 
@@ -183,6 +242,8 @@ class OpenAICompatibleAdapter(BaseAdapter):
             request_body["temperature"] = temperature
         if max_tokens is not None:
             request_body["max_tokens"] = max_tokens
+        if json_mode:
+            request_body["response_format"] = {"type": "json_object"}
         resp = requests.post(
             self._endpoint(),
             headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"},
@@ -190,10 +251,25 @@ class OpenAICompatibleAdapter(BaseAdapter):
             timeout=120,
         )
         resp.raise_for_status()
-        return str(resp.json()["choices"][0]["message"]["content"])
+        payload = resp.json()
+        choice = payload["choices"][0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        text = _content_text(content)
+        self._last_response_meta = {
+            "finish_reason": choice.get("finish_reason"),
+            "content_type": type(content).__name__,
+            "content_length": len(text),
+            "reasoning_present": bool(message.get("reasoning_content") or message.get("reasoning")),
+        }
+        return text
 
 
 class ClaudeAdapter(BaseAdapter):
+
+    def __init__(self, config: LLMConfig, name: str = "agent"):
+        super().__init__(config, name=name)
+        self._last_response_meta: dict[str, Any] = {}
 
     def health(self) -> dict:
         import requests
@@ -215,13 +291,39 @@ class ClaudeAdapter(BaseAdapter):
             return {"ok": False, "status": 0, "error": str(exc), "format": "claudecode"}
 
     def decide(self, context: dict) -> MemberAction:
+        messages = [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
         text = self.chat(
-            [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+            messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=None,
             max_tokens=1024,
         )
-        return MemberAction.from_obj(_extract_json(text))
+        attempts: list[dict[str, Any]] = []
+        try:
+            return MemberAction.from_obj(_extract_json(text))
+        except (TypeError, ValueError) as exc:
+            attempts.append(_decision_attempt(text, exc, self._last_response_meta))
+
+        repaired = self.chat(
+            [
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Repair the previous response. Return exactly one concise JSON action object, "
+                        "with no Markdown or commentary. Previous invalid response:\n" + _clip_text(text, 6000)
+                    ),
+                },
+            ],
+            system_prompt=_SYSTEM_PROMPT,
+            temperature=None,
+            max_tokens=1024,
+        )
+        try:
+            return MemberAction.from_obj(_extract_json(repaired))
+        except (TypeError, ValueError) as exc:
+            attempts.append(_decision_attempt(repaired, exc, self._last_response_meta))
+            raise DecisionOutputError(attempts) from exc
 
     def chat(
         self,
@@ -253,7 +355,23 @@ class ClaudeAdapter(BaseAdapter):
             timeout=120,
         )
         resp.raise_for_status()
-        return str(resp.json()["content"][0]["text"])
+        payload = resp.json()
+        content = payload.get("content")
+        text = _content_text(content)
+        self._last_response_meta = {
+            "finish_reason": payload.get("stop_reason"),
+            "content_type": type(content).__name__,
+            "content_length": len(text),
+            "reasoning_present": (
+                any(
+                    isinstance(block, dict) and block.get("type") in {"thinking", "reasoning"}
+                    for block in content
+                )
+                if isinstance(content, list)
+                else False
+            ),
+        }
+        return text
 
 
 class PiAdapter(OpenAICompatibleAdapter):
@@ -266,10 +384,19 @@ class PiAdapter(OpenAICompatibleAdapter):
 
 
 def _extract_json(text: Any) -> dict:
+    return _extract_json_value(text, depth=0)
+
+
+def _extract_json_value(text: Any, *, depth: int) -> dict:
     if text is None:
         raise ValueError("empty model output: response content is null")
     if isinstance(text, dict):
         return text
+    if isinstance(text, list):
+        candidate = _select_action_dict(text)
+        if candidate is not None:
+            return candidate
+        raise ValueError("model output JSON array contains no action object")
     if not isinstance(text, str):
         text = str(text)
     text = text.strip()
@@ -279,16 +406,114 @@ def _extract_json(text: Any) -> dict:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
+        if isinstance(obj, list):
+            candidate = _select_action_dict(obj)
+            if candidate is not None:
+                return candidate
+        if isinstance(obj, str) and depth < 2:
+            return _extract_json_value(obj, depth=depth + 1)
     except json.JSONDecodeError:
         pass
-    # find first {...}
+
+    candidates: list[dict[str, Any]] = []
     decoder = json.JSONDecoder()
     for i, ch in enumerate(text):
         if ch == "{":
             try:
                 obj, _ = decoder.raw_decode(text[i:])
                 if isinstance(obj, dict):
-                    return obj
+                    candidates.append(obj)
             except json.JSONDecodeError:
                 continue
+
+    literal_sources = [_strip_code_fence(text), *_balanced_object_slices(text)]
+    for source in literal_sources:
+        try:
+            obj = ast.literal_eval(source)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+        elif isinstance(obj, list):
+            candidates.extend(item for item in obj if isinstance(item, dict))
+
+    candidate = _select_action_dict(candidates)
+    if candidate is not None:
+        return candidate
     raise ValueError("no JSON action found in model output")
+
+
+def _select_action_dict(values: list[Any]) -> dict[str, Any] | None:
+    dictionaries = [value for value in values if isinstance(value, dict)]
+    return next(
+        (value for value in dictionaries if "action" in value or "kind" in value),
+        dictionaries[0] if dictionaries else None,
+    )
+
+
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        first_newline = stripped.find("\n")
+        if first_newline >= 0:
+            return stripped[first_newline + 1 : -3].strip()
+    return stripped
+
+
+def _balanced_object_slices(text: str):
+    start: int | None = None
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(text):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                yield text[start : index + 1]
+                start = None
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
+    if isinstance(content, dict) and isinstance(content.get("text"), str):
+        return content["text"]
+    return str(content)
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = _content_text(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _decision_attempt(text: Any, error: Exception, metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "error": f"{type(error).__name__}: {error}",
+        "preview": _clip_text(text, 800),
+        "response": dict(metadata),
+    }

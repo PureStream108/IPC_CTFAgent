@@ -19,7 +19,7 @@ from backend.core.difficulty import (
 )
 from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
-from backend.members.adapters import BaseAdapter, MemberAction
+from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import Sandbox
@@ -64,6 +64,7 @@ class SolveResult:
     steps: int
     fact_id: str | None = None
     flag: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -88,6 +89,9 @@ class BaseMember:
         self._tool_availability: dict[str, bool] | None = None
         self._missing_tool_counts: dict[str, int] = {}
         self._state_lock = threading.Lock()
+        self._progress_path: str | None = None
+        self._progress_project_id: str | None = None
+        self._progress_save_error_reported = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -141,7 +145,15 @@ class BaseMember:
         mcp_session: MCPRegistrySession,
     ) -> SolveResult:
         d = self.deps
-        d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
+        self._restore_progress(project_id, intent_id)
+        d.logger.project(
+            "member_start",
+            project_id,
+            member=self.name,
+            intent=intent_id,
+            initial=is_initial,
+            restored_observations=len(self.observations),
+        )
         self._claim(project_id, intent_id)
         self._seed_tool_inventory(project_id)
         self._prime_tool_context(project_id, intent_id, category)
@@ -156,10 +168,37 @@ class BaseMember:
             context = self._build_context(project_id, intent_id, category, step, is_initial, evaluate_now)
             try:
                 action = self.adapter.decide(context)
-            except Exception as exc:
-                d.logger.project("member_error", project_id, member=self.name, error=str(exc))
+            except DecisionOutputError as exc:
+                d.logger.llm(
+                    "decision_parse_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    step=step,
+                    attempts=exc.attempts,
+                )
+                d.logger.project(
+                    "member_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=str(exc),
+                    retryable=True,
+                )
                 self._release(project_id, intent_id)
-                return SolveResult(status="failed", steps=step)
+                return SolveResult(status="failed", steps=step, error=str(exc))
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                d.logger.project(
+                    "member_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=error,
+                    retryable=True,
+                )
+                self._release(project_id, intent_id)
+                return SolveResult(status="failed", steps=step, error=error)
             # ``decide`` may be a blocking network call.  An operator can stop
             # the project while it is in flight; honour that interrupt before
             # dispatching the returned shell/MCP action, otherwise the action
@@ -380,6 +419,56 @@ class BaseMember:
             row = edge_store.get_intent(conn, project_id, intent_id)
             if row is not None and row["to_fact_id"] is None and row["worker"] == self.name:
                 edge_store.release_intent(conn, project_id, intent_id)
+
+    def _restore_progress(self, project_id: str, intent_id: str) -> None:
+        safe_intent = re.sub(r"[^A-Za-z0-9_.-]+", "_", intent_id).strip("._") or "intent"
+        self._progress_path = f".ipc/progress/{safe_intent}.json"
+        self._progress_project_id = project_id
+        self._progress_save_error_reported = False
+        self.observations = []
+        try:
+            raw = self.deps.sandbox.read_file(self._progress_path)
+            parsed = json.loads(raw) if raw else []
+            if not isinstance(parsed, list):
+                raise ValueError("progress checkpoint must contain a JSON array")
+            self.observations = [str(item)[:2000] for item in parsed if str(item).strip()][-8:]
+        except Exception as exc:
+            self.deps.logger.project(
+                "member_progress_restore_failed",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            self.observations = []
+            return
+        if self.observations:
+            self.deps.logger.project(
+                "member_progress_restored",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                observations=len(self.observations),
+            )
+
+    def _persist_progress(self) -> None:
+        if self._progress_path is None:
+            return
+        try:
+            self.deps.sandbox.write_file(
+                self._progress_path,
+                json.dumps(self.observations[-8:], ensure_ascii=False),
+            )
+        except Exception as exc:
+            if self._progress_save_error_reported:
+                return
+            self._progress_save_error_reported = True
+            self.deps.logger.project(
+                "member_progress_save_failed",
+                self._progress_project_id or "system",
+                member=self.name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     def _seed_tool_inventory(self, project_id: str) -> None:
         try:
@@ -1005,6 +1094,7 @@ class BaseMember:
 
     def _observe(self, text: str) -> None:
         self.observations.append(text[:2000])
+        self._persist_progress()
 
     def _string_arg(self, value: Any) -> str:
         if value is None:
