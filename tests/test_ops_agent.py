@@ -862,6 +862,7 @@ def test_existing_openai_decide_does_not_gain_chat_only_max_tokens(monkeypatch):
     )
     assert adapter.decide({"step": 1}).kind == "done"
     assert "max_tokens" not in captured
+    assert "thinking" not in captured
 
 
 def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
@@ -911,7 +912,8 @@ def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
     assert action.args["command"] == "file ./target"
     assert len(requests_seen) == 2
     assert all(body["response_format"] == {"type": "json_object"} for body in requests_seen)
-    assert requests_seen[0]["max_tokens"] == 2048
+    assert all(body["thinking"] == {"type": "disabled"} for body in requests_seen)
+    assert requests_seen[0]["max_tokens"] == 4096
     assert requests_seen[0]["temperature"] == 0.0
 
 
@@ -954,6 +956,7 @@ def test_decision_output_error_preserves_safe_response_diagnostics(monkeypatch):
     assert len(caught.value.attempts) == 2
     assert caught.value.attempts[-1]["response"]["finish_reason"] == "length"
     assert caught.value.attempts[-1]["preview"] == "still not an action"
+    assert "finish_reason=length" in str(caught.value)
 
 
 def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):

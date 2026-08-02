@@ -57,6 +57,12 @@ class DecisionOutputError(ValueError):
     def __init__(self, attempts: list[dict[str, Any]]):
         self.attempts = attempts
         detail = attempts[-1].get("error", "invalid model output") if attempts else "invalid model output"
+        response = attempts[-1].get("response", {}) if attempts else {}
+        if response.get("finish_reason"):
+            detail += (
+                f" (finish_reason={response['finish_reason']}, "
+                f"content_length={response.get('content_length', 'unknown')})"
+            )
         super().__init__(
             f"model did not return a valid JSON action after {len(attempts)} attempt(s): {detail}"
         )
@@ -110,6 +116,8 @@ _SYSTEM_PROMPT = (
     "For bash actions, include a non-empty `command` string exactly; do not use `cmd`, `shell`, "
     "or prose-only bash actions. For tool actions, include non-empty `server` and `tool` strings plus "
     "an `args` object when arguments are needed. "
+    "Keep thought under 240 characters and a bash command under 1500 characters. Split long investigations "
+    "across multiple actions instead of returning an oversized command. "
     "You are working inside a short exploration task: each run has only some actions, "
     "so produce a clear result quickly. End with conclude for a confirmed fact, flag for a real flag, "
     "intent for a concrete next direction, or report when blocked; do not silently spin. "
@@ -177,8 +185,9 @@ class OpenAICompatibleAdapter(BaseAdapter):
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if json_mode else 0.4,
-            max_tokens=2048 if json_mode else None,
+            max_tokens=4096 if json_mode else None,
             json_mode=json_mode,
+            thinking="disabled" if json_mode else None,
         )
         attempts: list[dict[str, Any]] = []
         try:
@@ -187,16 +196,18 @@ class OpenAICompatibleAdapter(BaseAdapter):
             attempts.append(_decision_attempt(text, exc, self._last_response_meta))
 
         repair_message = (
-            "Repair the previous response. Return exactly one concise JSON object matching the action "
-            "schema in the system prompt, with no Markdown or commentary. The previous invalid response was:\n"
+            "Repair the previous response. It may have been truncated. Return exactly one shorter JSON object "
+            "matching the action schema, with no Markdown or commentary. Keep thought under 240 characters and "
+            "any bash command under 1500 characters. The previous invalid response was:\n"
             + _clip_text(text, 6000)
         )
         repaired = self._request_chat(
             [*messages, {"role": "user", "content": repair_message}],
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0,
-            max_tokens=2048 if json_mode else 1024,
+            max_tokens=4096 if json_mode else 1024,
             json_mode=json_mode,
+            thinking="disabled" if json_mode else None,
         )
         try:
             return MemberAction.from_obj(_extract_json(repaired))
@@ -218,6 +229,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=False,
+            thinking=None,
         )
 
     def _request_chat(
@@ -228,6 +240,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
         temperature: float | None,
         max_tokens: int | None,
         json_mode: bool,
+        thinking: str | None,
     ) -> str:
         import requests
 
@@ -244,6 +257,8 @@ class OpenAICompatibleAdapter(BaseAdapter):
             request_body["max_tokens"] = max_tokens
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
+        if thinking is not None:
+            request_body["thinking"] = {"type": thinking}
         resp = requests.post(
             self._endpoint(),
             headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"},
@@ -256,11 +271,15 @@ class OpenAICompatibleAdapter(BaseAdapter):
         message = choice.get("message") or {}
         content = message.get("content")
         text = _content_text(content)
+        usage = payload.get("usage") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
         self._last_response_meta = {
             "finish_reason": choice.get("finish_reason"),
             "content_type": type(content).__name__,
             "content_length": len(text),
             "reasoning_present": bool(message.get("reasoning_content") or message.get("reasoning")),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": completion_details.get("reasoning_tokens"),
         }
         return text
 
