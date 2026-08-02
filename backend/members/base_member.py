@@ -363,7 +363,26 @@ class BaseMember:
             except Exception as exc:
                 out = {"error": str(exc)}
             self._observe(f"[mcp:{server}.{tool}] {out}")
-            d.logger.tool("mcp_call", project_id, member=self.name, server=server, tool=tool)
+            artifact = out if isinstance(out, dict) and out.get("artifact_id") else {}
+            sensitive_operation = bool(
+                server == "browser"
+                and (
+                    (tool == "cookies" and args.get("include_values") is True)
+                    or tool == "set_cookie"
+                )
+            )
+            d.logger.tool(
+                "mcp_call",
+                project_id,
+                member=self.name,
+                server=server,
+                tool=tool,
+                sensitive_operation=sensitive_operation,
+                artifact_id=artifact.get("artifact_id"),
+                relative_path=artifact.get("relative_path"),
+                artifact_size=artifact.get("size"),
+                artifact_sha256=artifact.get("sha256"),
+            )
             return DispatchResult()
         if kind == "memory":
             query = self._string_arg(action.args.get("query", ""))

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from backend.core.config import AppConfig, LLMConfig, MemberConfig, load_config, save_config
+from backend.core.config import AppConfig, LLMConfig, MemberConfig, RuntimeConfig, load_config, save_config
 from tests.helpers import write_mock_config
 
 
@@ -21,6 +21,25 @@ def test_mock_is_always_configured():
     assert LLMConfig(api_format="mock").configured is True
     assert LLMConfig(api_format="openai").configured is False
     assert LLMConfig(api_format="openai", api_key="k", base_url="u").configured is True
+
+
+def test_browser_runtime_limits_and_origins_are_validated():
+    runtime = RuntimeConfig(
+        browser_event_limit=1000,
+        browser_response_preview_bytes=16384,
+        browser_allowed_origins=["HTTPS://Example.Test:443/", "http://[::1]:8080"],
+    )
+    assert runtime.browser_allowed_origins == ["https://example.test", "http://[::1]:8080"]
+    with pytest.raises(Exception):
+        RuntimeConfig(browser_event_limit=1001)
+    with pytest.raises(Exception):
+        RuntimeConfig(browser_response_preview_bytes=16385)
+    with pytest.raises(Exception):
+        RuntimeConfig(browser_artifact_max_bytes=50 * 1024 * 1024 + 1)
+    with pytest.raises(Exception):
+        RuntimeConfig(browser_allowed_origins=["file:///tmp/page.html"])
+    with pytest.raises(Exception):
+        RuntimeConfig(browser_allowed_origins=["https://example.test/path"])
 
 
 def test_llm_surface_and_reasoning_settings_are_validated():

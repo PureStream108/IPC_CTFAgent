@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from backend.mcp import reverse_mcp, reverse_worker
 from backend.mcp.mcp_client import MCPClient
 from backend.mcp.mcp_server import SERVER_NAMES, build_mcp_server
 from backend.mcp.reverse_mcp import build_reverse_mcp
-from backend.mcp.shared import build_browser_mcp, build_zap_mcp
+from backend.mcp.shared import _BrowserSession, build_browser_mcp, build_zap_mcp
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
 
@@ -203,7 +204,9 @@ def test_browser_mcp_exposes_stateful_playwright_tools(tmp_path):
 
     assert tool_names(browser) == {
         "navigate", "click", "fill", "press", "eval_js", "get_content",
-        "screenshot", "cookies", "set_cookie",
+        "screenshot", "cookies", "set_cookie", "wait_for", "network_log_start",
+        "network_log_list", "network_log_stop", "console_logs", "page_errors",
+        "upload_file", "download",
     }
     nav = call_tool(browser, "navigate", url="http://challenge")
     assert nav["available"] is True
@@ -213,7 +216,278 @@ def test_browser_mcp_exposes_stateful_playwright_tools(tmp_path):
     shot = call_tool(browser, "screenshot", path=str(tmp_path / "page.png"))
     assert shot["available"] is True
     assert (tmp_path / "page.png").read_bytes() == b"png"
-    assert call_tool(browser, "cookies")["cookies"][0]["name"] == "session"
+    cookie = call_tool(browser, "cookies")["cookies"][0]
+    assert cookie["name"] == "session"
+    assert cookie["value"] == "[REDACTED]"
+    assert call_tool(browser, "cookies", include_values=True)["cookies"][0]["value"] == "abc"
+
+
+def test_browser_session_event_buffers_are_bounded_incremental_and_redacted(tmp_path):
+    session = _BrowserSession(
+        workdir=tmp_path / "member",
+        shared_dir=tmp_path / "shared",
+        artifact_root=tmp_path / "artifacts",
+        event_limit=2,
+        console_limit=1,
+        error_limit=1,
+    )
+    session._active_page_id = "main"
+    session._record_console(
+        "main",
+        SimpleNamespace(
+            type="error",
+            text=(
+                "token=console-secret Authorization: Bearer header-secret\n"
+                "https://target.test/a?api_key=query-secret"
+            ),
+            location={"url": "app.js", "lineNumber": 1},
+        ),
+    )
+    session._record_console(
+        "main", SimpleNamespace(type="warning", text="safe warning", location={})
+    )
+    console = session.console_logs(after_id=None, limit=50, levels=None)
+    assert console["dropped_count"] == 1
+    assert [event["text"] for event in console["events"]] == ["safe warning"]
+
+    session._record_page_error(
+        "main", RuntimeError("Authorization: Bearer error-secret")
+    )
+    errors = session.page_errors(after_id=None, limit=50)
+    assert "error-secret" not in errors["events"][0]["message"]
+
+    class FakeRequest:
+        method = "POST"
+        url = "https://target.test/api?token=request-secret&view=short"
+        resource_type = "fetch"
+        redirected_from = None
+
+    class FakeResponse:
+        status = 200
+        request = FakeRequest()
+
+        async def all_headers(self):
+            return {"content-type": "application/json; charset=utf-8"}
+
+        async def body(self):
+            return b'{"token=body-secret":"visible"}'
+
+    session._network_active = True
+    session._network_capture_preview = True
+    session._network_preview_limit = 4096
+    session._on_request(FakeResponse.request)
+    asyncio.run(session._record_response(FakeResponse()))
+    network = asyncio.run(session.network_log_list(
+        after_id=None, limit=50, url_contains=None, methods=["post"], statuses=[200]
+    ))
+    assert len(network["events"]) == 1
+    event = network["events"][0]
+    assert "request-secret" not in event["url"]
+    assert "body-secret" not in event["response_preview"]
+    assert asyncio.run(session.network_log_list(
+        after_id=event["event_id"], limit=50, url_contains=None, methods=None, statuses=None
+    ))["events"] == []
+
+
+def test_browser_session_enforces_boundaries_and_records_artifacts(tmp_path):
+    member = tmp_path / "member"
+    shared = tmp_path / "shared"
+    artifacts = member / "browser-artifacts"
+    member.mkdir()
+    shared.mkdir()
+    upload = member / "payload.txt"
+    upload.write_text("payload", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    session = _BrowserSession(
+        project_id="proj_001",
+        member="aventurine",
+        workdir=member,
+        shared_dir=shared,
+        artifact_root=artifacts,
+        allowed_origins=["https://target.test"],
+    )
+
+    assert session.validate_url("https://target.test/path") == "https://target.test/path"
+    with pytest.raises(ValueError, match="not allowed"):
+        session.validate_url("https://other.test/path")
+    with pytest.raises(ValueError, match="HTTP"):
+        session.validate_url("file:///etc/passwd")
+
+    class FakeRoute:
+        def __init__(self):
+            self.action = None
+
+        async def abort(self, reason):
+            self.action = ("abort", reason)
+
+        async def continue_(self):
+            self.action = ("continue", None)
+
+    allowed_route = FakeRoute()
+    asyncio.run(
+        session._route_request(allowed_route, SimpleNamespace(url="https://target.test/app.js"))
+    )
+    assert allowed_route.action == ("continue", None)
+    blocked_route = FakeRoute()
+    asyncio.run(
+        session._route_request(blocked_route, SimpleNamespace(url="https://other.test/app.js"))
+    )
+    assert blocked_route.action == ("abort", "blockedbyclient")
+    assert session.validate_upload_paths(["payload.txt"]) == [upload.resolve()]
+    with pytest.raises(ValueError, match="outside"):
+        session.validate_upload_paths([str(outside)])
+    symlink = member / "outside-link.txt"
+    try:
+        symlink.symlink_to(outside)
+    except OSError:
+        pass
+    else:
+        with pytest.raises(ValueError, match="outside"):
+            session.validate_upload_paths([str(symlink)])
+
+    artifact_path = session.new_artifact_path("screenshots", suffix=".png")
+    artifact_path.write_bytes(b"png")
+    artifact = session.record_artifact(
+        tool="screenshot",
+        artifact_type="screenshot",
+        path=artifact_path,
+        url="https://target.test/page?token=metadata-secret",
+    )
+    assert artifact["artifact_id"].startswith("screenshot:")
+    assert artifact["relative_path"].startswith("screenshots/")
+    metadata = json.loads((artifacts / "metadata.jsonl").read_text(encoding="utf-8"))
+    assert metadata["project_id"] == "proj_001"
+    assert metadata["member"] == "aventurine"
+    assert metadata["sha256"] == artifact["sha256"]
+    assert "metadata-secret" not in metadata["url"]
+
+    oversized_session = _BrowserSession(
+        workdir=member,
+        shared_dir=shared,
+        artifact_root=member / "small-artifacts",
+        artifact_max_bytes=2,
+    )
+    oversized = oversized_session.new_artifact_path("downloads", suffix=".bin")
+    oversized.write_bytes(b"too large")
+    with pytest.raises(ValueError, match="per-file limit"):
+        oversized_session.record_artifact(
+            tool="download", artifact_type="download", path=oversized, url="https://target.test"
+        )
+    assert not oversized.exists()
+
+
+def test_browser_phase_one_tools_wait_upload_download_and_artifacts(tmp_path):
+    member = tmp_path / "member"
+    shared = tmp_path / "shared"
+    member.mkdir()
+    shared.mkdir()
+    upload = member / "payload.bin"
+    upload.write_bytes(b"upload")
+
+    class FakeDownload:
+        suggested_filename = "report.txt"
+
+        async def save_as(self, path):
+            Path(path).write_bytes(b"download")
+
+    class FakeDownloadInfo:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        @property
+        def value(self):
+            async def resolve():
+                return FakeDownload()
+
+            return resolve()
+
+    class FakeLocator:
+        def __init__(self, selector):
+            self.selector = selector
+
+        async def inner_text(self):
+            return "ready"
+
+        async def set_input_files(self, paths):
+            self.paths = paths
+
+        async def click(self):
+            return None
+
+    class FakePage:
+        url = "https://target.test/page"
+
+        def locator(self, selector):
+            return FakeLocator(selector)
+
+        async def title(self):
+            return "Ready"
+
+        async def wait_for_selector(self, selector, **kwargs):
+            self.waited_selector = selector
+
+        async def wait_for_url(self, url, **kwargs):
+            self.waited_url = url
+
+        async def wait_for_load_state(self, state, **kwargs):
+            self.waited_state = state
+
+        async def screenshot(self, path, full_page):
+            Path(path).write_bytes(b"png")
+
+        def expect_download(self, **kwargs):
+            return FakeDownloadInfo()
+
+    class FakeContext:
+        async def cookies(self):
+            return []
+
+    class FakeSession(_BrowserSession):
+        def __init__(self):
+            super().__init__(
+                project_id="proj_001",
+                member="aventurine",
+                workdir=member,
+                shared_dir=shared,
+                artifact_root=member / "browser-artifacts",
+                allowed_origins=["https://target.test"],
+            )
+            self.fake_page = FakePage()
+            self.fake_context = FakeContext()
+
+        async def page(self, page_id=None):
+            if page_id not in (None, "main"):
+                raise ValueError(f"unknown page_id: {page_id}")
+            return self.fake_page
+
+        def page_id(self, page=None):
+            return "main"
+
+        async def context(self):
+            return self.fake_context
+
+    server = build_browser_mcp(FakeSession())
+    waited = call_tool(
+        server,
+        "wait_for",
+        selector="#ready",
+        url="**/page",
+        load_state="domcontentloaded",
+    )
+    assert waited["available"] is True
+    assert waited["page_id"] == "main"
+    uploaded = call_tool(server, "upload_file", selector="input[type=file]", paths=["payload.bin"])
+    assert uploaded["files"] == [{"name": "payload.bin", "size": 6}]
+    screenshot = call_tool(server, "screenshot")
+    assert screenshot["artifact_id"].startswith("screenshot:")
+    downloaded = call_tool(server, "download", selector="#download")
+    assert downloaded["artifact_id"].startswith("download:")
+    assert downloaded["suggested_filename"] == "report.txt"
+    assert len((member / "browser-artifacts" / "metadata.jsonl").read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_reverse_mcp_and_zap_contracts(monkeypatch, tmp_path):

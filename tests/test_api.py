@@ -276,6 +276,29 @@ def test_config_api_update_and_redaction(client):
     assert "secretkey" not in str(r.json())  # redacted
 
 
+def test_config_api_updates_validated_browser_runtime(client):
+    response = client.put(
+        "/config",
+        json={
+            "runtime": {
+                "browser_event_limit": 300,
+                "browser_response_preview_bytes": 8192,
+                "browser_allowed_origins": ["HTTPS://Target.Test:443/"],
+            }
+        },
+    )
+    assert response.status_code == 200
+    runtime = response.json()["runtime"]
+    assert runtime["browser_event_limit"] == 300
+    assert runtime["browser_response_preview_bytes"] == 8192
+    assert runtime["browser_allowed_origins"] == ["https://target.test"]
+
+    response = client.put(
+        "/config", json={"runtime": {"browser_response_preview_bytes": 20000}}
+    )
+    assert response.status_code == 400
+
+
 def test_config_runtime_api(client):
     r = client.get("/config/runtime")
     assert r.status_code == 200

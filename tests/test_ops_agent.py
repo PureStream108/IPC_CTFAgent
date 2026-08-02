@@ -125,6 +125,137 @@ def test_chat_stream_forwards_live_events_and_final_response(client, monkeypatch
     assert any(event["label"] == "Tool · Bash" for event in history.json()["events"])
 
 
+def test_openai_chat_stream_runs_in_background_with_live_tool_events(client, monkeypatch):
+    response = client.put(
+        "/api/ops/config",
+        json={
+            "api_format": "openai",
+            "api_surface": "responses",
+            "api_key": "openai-secret-key",
+            "base_url": "https://api.openai.invalid/v1",
+            "model": "openai-model",
+        },
+    )
+    assert response.status_code == 200
+    service = client.app.state.ipc.ops_agent_service
+    calls = []
+    answers = iter(
+        [
+            json.dumps(
+                {
+                    "reply": "",
+                    "workflow": None,
+                    "tool_call": {
+                        "name": "task_sandbox_health",
+                        "arguments": {"project_id": "proj_openai"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "reply": "OpenAI action completed",
+                    "workflow": None,
+                    "tool_call": None,
+                }
+            ),
+        ]
+    )
+
+    class FakeAdapter:
+        def chat(self, messages, **kwargs):
+            calls.append((list(messages), kwargs))
+            return next(answers)
+
+    class FakeTools:
+        def execute(self, name, arguments):
+            assert name == "task_sandbox_health"
+            assert arguments == {"project_id": "proj_openai"}
+            return {"ok": True, "status": "running"}
+
+    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
+    service.tools = FakeTools()
+
+    streamed = client.post("/api/ops/chat/stream", json={"message": "inspect the sandbox"})
+
+    assert streamed.status_code == 200
+    events = [json.loads(line) for line in streamed.text.splitlines() if line.strip()]
+    assert events[0]["type"] == "session"
+    assert events[1]["type"] == "run"
+    assert events[1]["run_id"].startswith("run_")
+    logs = [item["event"] for item in events if item["type"] == "log"]
+    assert any(item["text"] == "OpenAI-compatible IPC started" for item in logs)
+    assert any(item["label"] == "Tool · task_sandbox_health" for item in logs)
+    assert any(item["label"] == "Tool result · task_sandbox_health" for item in logs)
+    completed = next(item["response"] for item in events if item["type"] == "complete")
+    assert completed["reply"] == "OpenAI action completed"
+    assert completed["tool_calls"] == [
+        {"name": "task_sandbox_health", "project_id": "proj_openai", "ok": True}
+    ]
+    assert len(calls) == 2
+    assert "TOOL_RESULT task_sandbox_health" in calls[1][0][-1]["content"]
+    history = client.get(f"/api/ops/sessions/{completed['session_id']}").json()
+    assert history["active_run"] is None
+    assert history["context_mode"] == "ipc_history"
+    assert history["agent_context_ready"] is True
+    assert [item["content"] for item in history["messages"]] == [
+        "inspect the sandbox",
+        "OpenAI action completed",
+    ]
+
+
+def test_openai_chat_stream_can_be_interrupted_without_claude_runner(client, monkeypatch):
+    client.put(
+        "/api/ops/config",
+        json={
+            "api_format": "openai",
+            "api_key": "openai-secret-key",
+            "base_url": "https://api.openai.invalid/v1",
+            "model": "openai-model",
+        },
+    )
+    service = client.app.state.ipc.ops_agent_service
+    entered = threading.Event()
+    release = threading.Event()
+
+    class FakeAdapter:
+        def chat(self, messages, **kwargs):
+            entered.set()
+            assert release.wait(timeout=3)
+            return json.dumps({"reply": "must be discarded", "workflow": None})
+
+    class DisabledRunner:
+        enabled = False
+
+    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
+    service.claude_runner = DisabledRunner()
+    follower = service.chat_stream(message="start an OpenAI action")
+    session_event = next(follower)
+    run_event = next(follower)
+    assert entered.wait(timeout=3)
+
+    interrupted = client.post(
+        "/api/ops/chat/interrupt",
+        json={
+            "session_id": session_event["session_id"],
+            "run_id": run_event["run_id"],
+        },
+    )
+    assert interrupted.status_code == 200
+    assert interrupted.json() == {
+        "ok": True,
+        "run_id": run_event["run_id"],
+        "status": "interrupting",
+    }
+    release.set()
+    remaining = list(follower)
+    completed = next(item["response"] for item in remaining if item["type"] == "complete")
+    assert completed["interrupted"] is True
+    assert "OpenAI 运行日志已保存" in completed["reply"]
+    history = client.get(f"/api/ops/sessions/{session_event['session_id']}").json()
+    assert history["active_run"] is None
+    assert "must be discarded" not in json.dumps(history, ensure_ascii=False)
+
+
 def test_interrupt_chat_requests_runner_cancellation_and_persists_status(client):
     client.put(
         "/api/ops/config",

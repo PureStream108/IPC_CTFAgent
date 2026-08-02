@@ -6,6 +6,7 @@ from contextlib import suppress
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import json
 from time import monotonic
 from typing import Any
 
@@ -487,8 +488,22 @@ class Orchestrator:
             )
             return MCPClient.stdio("docker", args, read_timeout=600)
 
+        runtime = self.state.config.runtime
+        browser_env = {
+            "IPC_BROWSER_PROJECT_ID": project_id,
+            "IPC_BROWSER_MEMBER": member,
+            "IPC_BROWSER_WORKDIR": workdir,
+            "IPC_BROWSER_SHARED_DIR": "/workspace/shared",
+            "IPC_BROWSER_ARTIFACT_ROOT": f"{workdir}/browser-artifacts",
+            "IPC_BROWSER_EVENT_LIMIT": str(runtime.browser_event_limit),
+            "IPC_BROWSER_CONSOLE_LIMIT": str(runtime.browser_console_limit),
+            "IPC_BROWSER_ERROR_LIMIT": str(runtime.browser_error_limit),
+            "IPC_BROWSER_RESPONSE_PREVIEW_BYTES": str(runtime.browser_response_preview_bytes),
+            "IPC_BROWSER_ALLOWED_ORIGINS": json.dumps(runtime.browser_allowed_origins),
+            "IPC_BROWSER_ARTIFACT_MAX_BYTES": str(runtime.browser_artifact_max_bytes),
+        }
         targets = {
-            "browser": target("browser"),
+            "browser": target("browser", env=browser_env),
             "reverse": target("reverse"),
         }
         if self.state.config.runtime.zap_enabled:

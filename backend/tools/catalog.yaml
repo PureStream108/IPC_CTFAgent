@@ -139,10 +139,11 @@ entries:
     kind: mcp
     group: mcps
     title: browser MCP
-    summary: 在任务容器中用 Playwright Chromium 导航、交互和截图。
+    summary: 在独立 Playwright Chromium 会话中进行结构化页面交互、有界脱敏诊断，以及截图和下载产物留存。
     tags: [mcp, browser, playwright, chromium]
     command: ipc-mcp-server browser
     install_path: backend/mcp/shared.py
+    workflow: 优先使用 wait_for、click、fill 等结构化工具；先开始有界网络记录，再交互并按 after_id 增量读取诊断事件，最后用 artifact ID 留存证据。
     example: "ipc-mcp-server browser --transport stdio"
   - id: mcp_reverse
     kind: mcp

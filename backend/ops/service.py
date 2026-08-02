@@ -87,6 +87,10 @@ class WorkflowConfirmationError(OpsAgentError):
     pass
 
 
+class _OpsRunInterrupted(OpsAgentError):
+    """Internal control flow used by API-backed IPC runs."""
+
+
 class OpsAgentService:
     def __init__(self, state: AppState) -> None:
         self.state = state
@@ -95,6 +99,7 @@ class OpsAgentService:
         self.claude_runner = ClaudeCodeRunner()
         self._run_condition = threading.Condition()
         self._run_threads: dict[str, threading.Thread] = {}
+        self._run_backends: dict[str, str] = {}
         self._run_threads_lock = threading.Lock()
         self._recover_stale_runs()
 
@@ -169,13 +174,19 @@ class OpsAgentService:
 
     def session_view(self, session_id: str) -> dict[str, Any]:
         active_run = self.store.active_run(session_id)
+        messages = self.store.list_messages(session_id)
+        config = self.store.load_llm_config()
+        native_session_ready = bool(self.store.claude_session_id(session_id))
         return {
             "session": self.store.get_session(session_id),
-            "messages": self.store.list_messages(session_id),
+            "messages": messages,
             "events": self.store.list_events(session_id),
             "project_ids": self.store.list_session_projects(session_id),
             "active_run": _public_run(active_run) if active_run else None,
-            "agent_context_ready": bool(self.store.claude_session_id(session_id)),
+            "context_mode": "native" if config.api_format == "claudecode" else "ipc_history",
+            "agent_context_ready": (
+                native_session_ready if config.api_format == "claudecode" else bool(messages)
+            ),
         }
 
     def delete_session(self, session_id: str) -> bool:
@@ -190,21 +201,34 @@ class OpsAgentService:
         self.store.get_session(session_id)
         if not _RUN_ID_RE.fullmatch(run_id):
             raise ValueError("invalid IPC run id")
-        if not self.claude_runner.enabled:
+        with self._run_threads_lock:
+            backend = self._run_backends.get(run_id)
+        if backend is None:
+            config = self.store.load_llm_config()
+            backend = "claudecode" if config.api_format == "claudecode" else "api"
+        if backend == "claudecode" and not self.claude_runner.enabled:
             raise OpsAgentUpstreamError("IPC runtime is not configured")
+
         try:
             run = self.store.request_run_cancel(session_id, run_id)
         except KeyError as exc:
             raise ValueError("IPC run does not belong to this conversation") from exc
         if run["status"] != "running":
             return {"ok": False, "run_id": run_id, "status": run["status"]}
-        try:
-            result = self.claude_runner.cancel(run_id)
-        except ClaudeCodeRunnerError as exc:
-            raise OpsAgentUpstreamError(str(exc)) from exc
-        # A cancellation can race the runner process spawn. The durable flag is
-        # authoritative; the worker retries cancellation on its `started` event.
-        if not result.get("ok") and result.get("status") == "not_found":
+
+        if backend == "claudecode":
+            try:
+                result = self.claude_runner.cancel(run_id)
+            except ClaudeCodeRunnerError as exc:
+                raise OpsAgentUpstreamError(str(exc)) from exc
+            # A cancellation can race the runner process spawn. The durable flag is
+            # authoritative; the worker retries cancellation on its `started` event.
+            if not result.get("ok") and result.get("status") == "not_found":
+                result = {"ok": True, "run_id": run_id, "status": "interrupting"}
+        else:
+            # requests-based adapters cannot forcibly terminate an in-flight socket
+            # from another thread. The durable flag stops the run before the next
+            # model/tool round and discards a response that arrives after cancellation.
             result = {"ok": True, "run_id": run_id, "status": "interrupting"}
         self._stream_log(
             session_id,
@@ -266,10 +290,45 @@ class OpsAgentService:
                 known_secret_values=known_secret_values,
             )
 
+        return self._chat_with_api(
+            config=config,
+            session_id=session_id,
+            messages=messages,
+            known_secret_values=known_secret_values,
+        )
+
+    def _chat_with_api(
+        self,
+        *,
+        config,
+        session_id: str,
+        messages: list[dict[str, str]],
+        known_secret_values: dict[str, str],
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the provider-neutral IPC loop over an OpenAI-style adapter.
+
+        With ``run_id`` the same loop is a durable background action: every
+        provider/tool round is persisted for the live log and cancellation is
+        checked at safe boundaries. The direct ``/chat`` endpoint keeps using
+        the synchronous form for API compatibility.
+        """
+
         adapter = make_adapter(config, name="ops-agent")
         parsed: dict[str, Any] = {}
         tool_events: list[dict[str, Any]] = []
         for round_index in range(_MAX_TOOL_ROUNDS):
+            self._raise_if_api_run_cancelled(run_id)
+            if run_id:
+                self._stream_log(
+                    session_id,
+                    run_id=run_id,
+                    event={
+                        "kind": "status",
+                        "label": "OpenAI API",
+                        "text": f"Model request · round {round_index + 1}",
+                    },
+                )
             try:
                 raw = adapter.chat(
                     messages,
@@ -279,6 +338,7 @@ class OpsAgentService:
                 )
             except requests.RequestException as exc:
                 raise OpsAgentUpstreamError(_llm_error_message(exc)) from exc
+            self._raise_if_api_run_cancelled(run_id)
             parsed = _parse_chat_response(raw)
             try:
                 tool_call = _parse_tool_call(parsed.get("tool_call"))
@@ -292,6 +352,20 @@ class OpsAgentService:
                 break
 
             tool_name, tool_arguments = tool_call
+            if run_id:
+                safe_arguments = _replace_secret_values(
+                    json.dumps(tool_arguments, ensure_ascii=False),
+                    known_secret_values,
+                )
+                self._stream_log(
+                    session_id,
+                    run_id=run_id,
+                    event={
+                        "kind": "tool",
+                        "label": f"Tool · {tool_name}",
+                        "text": safe_arguments,
+                    },
+                )
             try:
                 tool_result = self.tools.execute(tool_name, tool_arguments)
             except OpsToolError as exc:
@@ -312,6 +386,17 @@ class OpsAgentService:
             safe_tool_result = _replace_secret_values(
                 json.dumps(tool_result, ensure_ascii=False), known_secret_values
             )
+            if run_id:
+                self._stream_log(
+                    session_id,
+                    run_id=run_id,
+                    event={
+                        "kind": "tool-result",
+                        "label": f"Tool result · {tool_name}",
+                        "text": safe_tool_result,
+                    },
+                )
+            self._raise_if_api_run_cancelled(run_id)
             tool_events.append(
                 {
                     "name": tool_name,
@@ -375,6 +460,10 @@ class OpsAgentService:
             response["proposal_error"] = proposal_error
         return response
 
+    def _raise_if_api_run_cancelled(self, run_id: str | None) -> None:
+        if run_id and self.store.run_cancel_requested(run_id):
+            raise _OpsRunInterrupted("IPC interrupted by operator")
+
     def chat_stream(
         self,
         *,
@@ -395,9 +484,24 @@ class OpsAgentService:
             if not config.configured:
                 raise OpsAgentNotConfigured("configure the IPC API before starting a chat")
 
-            # Keep the endpoint useful if an administrator temporarily selects
-            # another provider in the IPC settings panel.
-            if config.api_format != "claudecode":
+            if config.api_format == "claudecode":
+                session_id, run_id = self._start_claude_code_run(
+                    config=config,
+                    message=message,
+                    session_id=session_id,
+                    secrets_values=secrets_values,
+                )
+            elif config.api_format == "openai":
+                session_id, run_id = self._start_api_run(
+                    config=config,
+                    message=message,
+                    session_id=session_id,
+                    secrets_values=secrets_values,
+                )
+            else:
+                # Preserve the existing synchronous compatibility path for
+                # Anthropic, DeepSeek, Pi, and the local mock adapter. OpenAI
+                # is the API-backed action runtime with durable run semantics.
                 result = self.chat(
                     message=message,
                     session_id=session_id,
@@ -406,18 +510,136 @@ class OpsAgentService:
                 yield {"type": "session", "session_id": result["session_id"]}
                 yield {"type": "complete", "response": result}
                 return
-
-            session_id, run_id = self._start_claude_code_run(
-                config=config,
-                message=message,
-                session_id=session_id,
-                secrets_values=secrets_values,
-            )
             yield {"type": "session", "session_id": session_id}
             yield {"type": "run", "run_id": run_id}
             yield from self._follow_claude_code_run(session_id=session_id, run_id=run_id)
         except (OpsAgentError, ClaudeCodeRunnerError, ValueError) as exc:
             yield {"type": "error", "error": str(exc)}
+
+    def _start_api_run(
+        self,
+        *,
+        config,
+        message: str,
+        session_id: str | None,
+        secrets_values: dict[str, str] | None,
+    ) -> tuple[str, str]:
+        normalized_secrets = _normalize_secrets(secrets_values or {})
+        safe_message = _replace_secret_values(message.strip(), normalized_secrets)
+        if session_id is None:
+            session_id = self.store.create_session(_session_title(safe_message))["id"]
+        else:
+            self.store.get_session(session_id)
+
+        run_id = f"run_{secrets.token_hex(16)}"
+        self.store.create_run(session_id, run_id)
+        try:
+            if normalized_secrets:
+                self.store.save_session_secrets(session_id, normalized_secrets)
+            self.store.append_message(session_id, "user", safe_message)
+            history = self.store.list_messages(session_id, limit=40)
+            available_secrets = sorted(self.store.session_secrets(session_id))
+            messages = [
+                {"role": item["role"], "content": item["content"]}
+                for item in history
+            ]
+            if available_secrets:
+                messages.insert(
+                    0,
+                    {
+                        "role": "user",
+                        "content": "Available structured secret aliases: "
+                        + ", ".join(f"{{{{secret.{name}}}}}" for name in available_secrets),
+                    },
+                )
+            redaction_values = dict(self.store.session_secrets(session_id))
+            if config.api_key:
+                redaction_values["provider_key"] = config.api_key
+            thread = threading.Thread(
+                target=self._run_api_background,
+                kwargs={
+                    "config": config,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "messages": messages,
+                    "redaction_values": redaction_values,
+                },
+                name=f"ipc-{run_id}",
+                daemon=True,
+            )
+            with self._run_threads_lock:
+                self._run_threads[run_id] = thread
+                self._run_backends[run_id] = "api"
+            thread.start()
+        except Exception as exc:
+            with self._run_threads_lock:
+                self._run_threads.pop(run_id, None)
+                self._run_backends.pop(run_id, None)
+            safe_error = _replace_secret_values(str(exc), {"provider_key": config.api_key})
+            self.store.finish_run(run_id, status="error", error=safe_error)
+            raise
+        return session_id, run_id
+
+    def _run_api_background(
+        self,
+        *,
+        config,
+        session_id: str,
+        run_id: str,
+        messages: list[dict[str, str]],
+        redaction_values: dict[str, str],
+    ) -> None:
+        try:
+            self._stream_log(
+                session_id,
+                run_id=run_id,
+                event={
+                    "kind": "status",
+                    "label": "IPC",
+                    "text": "OpenAI-compatible IPC started",
+                },
+            )
+            response = self._chat_with_api(
+                config=config,
+                session_id=session_id,
+                messages=messages,
+                known_secret_values=redaction_values,
+                run_id=run_id,
+            )
+            self._stream_log(
+                session_id,
+                run_id=run_id,
+                event={"kind": "result", "label": "IPC", "text": "completed"},
+            )
+            self.store.finish_run(run_id, status="completed", response=response)
+        except _OpsRunInterrupted:
+            response = self._finish_interrupted_api_chat(session_id=session_id)
+            self.store.finish_run(run_id, status="interrupted", response=response)
+        except Exception as exc:
+            safe_error = _replace_secret_values(str(exc), redaction_values).strip()
+            if not safe_error:
+                safe_error = "IPC API run failed"
+            self._stream_log(
+                session_id,
+                run_id=run_id,
+                event={"kind": "stderr", "label": "OpenAI API", "text": safe_error[:12_000]},
+            )
+            self.store.finish_run(run_id, status="error", error=safe_error)
+        finally:
+            with self._run_threads_lock:
+                self._run_threads.pop(run_id, None)
+                self._run_backends.pop(run_id, None)
+            self._notify_run_followers()
+
+    def _finish_interrupted_api_chat(self, *, session_id: str) -> dict[str, Any]:
+        reply = "IPC 已被操作员打断；已产生的 OpenAI 运行日志已保存。"
+        self.store.append_message(session_id, "assistant", reply)
+        return {
+            "session_id": session_id,
+            "reply": reply,
+            "proposals": [],
+            "interrupted": True,
+        }
 
     def _start_claude_code_run(
         self,
@@ -463,8 +685,12 @@ class OpsAgentService:
             )
             with self._run_threads_lock:
                 self._run_threads[run_id] = thread
+                self._run_backends[run_id] = "claudecode"
             thread.start()
         except Exception as exc:
+            with self._run_threads_lock:
+                self._run_threads.pop(run_id, None)
+                self._run_backends.pop(run_id, None)
             safe_error = _replace_secret_values(str(exc), {"provider_key": config.api_key})
             self.store.finish_run(run_id, status="error", error=safe_error)
             raise
@@ -504,6 +730,7 @@ class OpsAgentService:
         finally:
             with self._run_threads_lock:
                 self._run_threads.pop(run_id, None)
+                self._run_backends.pop(run_id, None)
             self._notify_run_followers()
 
     def _consume_claude_code_stream(

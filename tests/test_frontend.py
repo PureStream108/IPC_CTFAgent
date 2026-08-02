@@ -39,7 +39,10 @@ def test_index_served(client):
     assert "First-time setup" in body
     assert 'await this.authRequest("POST","/auth/setup"' in body
     assert 'await this.authRequest("POST","/auth/login"' in body
-    assert "Persistent action agent powered by Claude Code" in body
+    assert "Claude Code action agent with native session context" in body
+    assert "OpenAI-compatible action agent with durable IPC history" in body
+    assert "Claude Code (native)" in body
+    assert "OpenAI-compatible API" in body
     assert "IPC live log" in body
     assert "Archived" in body
     assert "Interrupt & Send" in body

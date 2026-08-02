@@ -1,11 +1,11 @@
 category: web
 tools:
   - name: browser
-    description: Stateful Playwright browser MCP with rendering, interaction, cookies, JavaScript, and screenshots.
+    description: Stateful Playwright browser MCP with rendering, structured interaction, bounded diagnostics, uploads, downloads, and artifact-backed screenshots.
     path: task-container
     exec: mcp:browser
     tags: [browser, playwright, javascript, web]
-    when_to_use: Render JavaScript applications, interact with forms, or preserve a login session across requests.
+    when_to_use: Render JavaScript applications, wait for asynchronous UI state, inspect redacted network/console errors, interact with forms, transfer files, or preserve a login session across requests. Prefer structured browser tools over eval_js.
   - name: zap
     description: OWASP ZAP spider and active-scan MCP reached from the task container over the shared network.
     path: task-container

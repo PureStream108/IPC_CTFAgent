@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -91,6 +92,37 @@ class RuntimeConfig(BaseModel):
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
     zap_enabled: bool = False
+    browser_event_limit: int = Field(default=200, gt=0, le=1000)
+    browser_console_limit: int = Field(default=100, gt=0, le=1000)
+    browser_error_limit: int = Field(default=50, gt=0, le=1000)
+    browser_response_preview_bytes: int = Field(default=4096, gt=0, le=16384)
+    browser_allowed_origins: list[str] = Field(default_factory=list)
+    browser_artifact_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0, le=50 * 1024 * 1024)
+
+    @field_validator("browser_allowed_origins")
+    @classmethod
+    def _validate_browser_origins(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw in values:
+            value = raw.strip()
+            parts = urlsplit(value)
+            if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+                raise ValueError("browser allowed origins must use HTTP(S)")
+            if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
+                raise ValueError("browser allowed origins must contain only scheme, host, and optional port")
+            try:
+                port = parts.port
+            except ValueError as exc:
+                raise ValueError("browser allowed origin contains an invalid port") from exc
+            host = parts.hostname.lower()
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            default_port = 80 if parts.scheme.lower() == "http" else 443
+            suffix = f":{port}" if port is not None and port != default_port else ""
+            origin = f"{parts.scheme.lower()}://{host}{suffix}"
+            if origin not in normalized:
+                normalized.append(origin)
+        return normalized
 
 
 class AppConfig(BaseModel):

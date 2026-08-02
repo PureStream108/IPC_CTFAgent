@@ -4,7 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from backend.api.deps import get_state
-from backend.core.config import ApiFormat, ApiSurface, CATEGORIES, MemberConfig, ReasoningEffort
+from backend.core.config import (
+    ApiFormat,
+    ApiSurface,
+    CATEGORIES,
+    MemberConfig,
+    ReasoningEffort,
+    RuntimeConfig,
+)
 from backend.core.state import AppState
 
 router = APIRouter(tags=["config"])
@@ -21,6 +28,12 @@ class LLMUpdate(BaseModel):
 
 class RuntimeUpdate(BaseModel):
     zap_enabled: bool | None = None
+    browser_event_limit: int | None = None
+    browser_console_limit: int | None = None
+    browser_error_limit: int | None = None
+    browser_response_preview_bytes: int | None = None
+    browser_allowed_origins: list[str] | None = None
+    browser_artifact_max_bytes: int | None = None
 
 
 class ConfigUpdate(BaseModel):
@@ -68,6 +81,12 @@ def _config_view(state: AppState) -> dict:
         ],
         "runtime": {
             "zap_enabled": cfg.runtime.zap_enabled,
+            "browser_event_limit": cfg.runtime.browser_event_limit,
+            "browser_console_limit": cfg.runtime.browser_console_limit,
+            "browser_error_limit": cfg.runtime.browser_error_limit,
+            "browser_response_preview_bytes": cfg.runtime.browser_response_preview_bytes,
+            "browser_allowed_origins": cfg.runtime.browser_allowed_origins,
+            "browser_artifact_max_bytes": cfg.runtime.browser_artifact_max_bytes,
         },
         "startup_errors": cfg.startup_errors(),
     }
@@ -155,8 +174,15 @@ def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
         cfg.log_enabled = body.log_enabled
     if body.diamond is not None:
         _apply(cfg.diamond, body.diamond)
-    if body.runtime is not None and body.runtime.zap_enabled is not None:
-        cfg.runtime.zap_enabled = body.runtime.zap_enabled
+    if body.runtime is not None:
+        runtime_values = {
+            **cfg.runtime.model_dump(),
+            **body.runtime.model_dump(exclude_none=True),
+        }
+        try:
+            cfg.runtime = RuntimeConfig.model_validate(runtime_values)
+        except ValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if remove_names:
         cfg.members = [member for member in cfg.members if member.name not in remove_names]
     if normalized_updates:
