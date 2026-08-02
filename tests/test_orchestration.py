@@ -170,6 +170,13 @@ def test_full_solve_pipeline_to_completed(state):
     # WP file exists
     assert Path(row["wp_path"]).exists()
     assert Path(row["wp_path"]).name == "Demo.md"
+    wp_content = Path(row["wp_path"]).read_text(encoding="utf-8")
+    assert "```python" in wp_content
+    assert row["flag"] in wp_content
+    assert "The CTF challenge is complete" not in wp_content
+    assert (state.wp_export_dir / "Demo.md").is_file()
+    for folder in state.logger.KINDS.values():
+        assert (state.log_export_dir / folder / "Demo.log").is_file()
     # memory was written (4 categories may not all fill, but at least exploit+knowledge)
     assert len(state.memory.all()) >= 1
     # completion graph links
@@ -373,6 +380,9 @@ def test_task_slot_queue_starts_next_project_after_release(state):
     orch.stop_project(project_ids[0])
     orch._tick()
 
+    deadline = time.time() + 2
+    while Lifecycle(state.db).status(project_ids[2]) != "running" and time.time() < deadline:
+        time.sleep(0.01)
     assert Lifecycle(state.db).status(project_ids[2]) == "running"
     assert state.limiter.active_tasks() == sorted(project_ids[1:])
     assert list(orch._pending_projects) == []
@@ -386,14 +396,18 @@ def test_orchestrator_builds_task_container_mcp_targets(state):
     orch = Orchestrator(state, max_workers=1)
     targets = orch._container_mcps("proj_001", "aventurine")
 
-    assert set(targets) == {"browser", "reverse", "zap"}
+    assert set(targets) == {"browser", "reverse"}
     reverse_args = targets["reverse"].target.args
     assert reverse_args == [
         "exec", "-i", "-w", "/workspace/aventurine", "ipc-task-proj_001",
         "python3", "-m", "backend.mcp.mcp_server", "reverse",
     ]
-    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
     assert targets["reverse"].read_timeout == 600
+
+    state.config.runtime.zap_enabled = True
+    targets = orch._container_mcps("proj_001", "aventurine")
+    assert set(targets) == {"browser", "reverse", "zap"}
+    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
     orch.shutdown()
 
 
@@ -480,4 +494,53 @@ def test_reap_finished_future_removes_crashed_task_index(state):
         assert (pid, "i999") not in orch._task_index
     entries = state.logger.read_log("project", pid, None)
     assert any(entry["event"] == "member_task_crash" and entry["intent"] == "i999" for entry in entries)
+    orch.shutdown()
+
+
+def test_failed_member_is_backed_off_before_same_intent_is_dispatched(state):
+    from backend.core.orchestrator import Orchestrator
+    from backend.members.base_member import SolveResult
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        intent = edge_store.create_intent(conn, pid, ["origin"], "inspect binary", "diamond")
+
+    future = Future()
+    future.set_result(
+        SolveResult(
+            status="failed",
+            steps=4,
+            error="model did not return a valid JSON action",
+        )
+    )
+    orch = Orchestrator(state, max_workers=1)
+    with orch._lock:
+        orch._task_index[(pid, intent.id)] = future
+
+    orch._reap_finished_futures()
+
+    key = (pid, intent.id)
+    assert orch._member_failure_counts[key] == 1
+    assert orch._member_retry_not_before[key] > time.monotonic()
+    assert orch.runtime_status(pid)["phase"] == "degraded"
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    assert launched == []
+
+    orch._member_retry_not_before[key] = time.monotonic() - 1
+    orch._dispatch_project(pid)
+    assert launched == [(pid, "aventurine", intent.id, "web", False)]
+    entries = state.logger.read_log("project", pid, None)
+    assert any(
+        entry["event"] == "member_task_retry_scheduled"
+        and entry["delay_seconds"] == 10
+        for entry in entries
+    )
     orch.shutdown()

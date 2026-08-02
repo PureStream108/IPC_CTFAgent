@@ -19,11 +19,11 @@ from backend.core.difficulty import (
 )
 from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
-from backend.members.adapters import BaseAdapter, MemberAction
+from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import Sandbox
-from backend.tools.tool_mcp import build_category_tools_mcp
+from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
 from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
 
@@ -64,6 +64,7 @@ class SolveResult:
     steps: int
     fact_id: str | None = None
     flag: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -88,6 +89,9 @@ class BaseMember:
         self._tool_availability: dict[str, bool] | None = None
         self._missing_tool_counts: dict[str, int] = {}
         self._state_lock = threading.Lock()
+        self._progress_path: str | None = None
+        self._progress_project_id: str | None = None
+        self._progress_save_error_reported = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -108,8 +112,20 @@ class BaseMember:
         category: str,
         is_initial: bool = False,
     ) -> SolveResult:
-        category_tools = build_category_tools_mcp(self.deps.registry, category)
-        extra_mcps: dict[str, MCPRegistryTarget] = {"tools": category_tools}
+        available_mcps = self._available_mcp_names()
+        category_tools = build_category_tools_mcp(
+            self.deps.registry,
+            category,
+            available_mcps=available_mcps,
+        )
+        tool_search = build_tool_search_mcp(
+            self.deps.registry,
+            available_mcps=available_mcps,
+        )
+        extra_mcps: dict[str, MCPRegistryTarget] = {
+            "tools": category_tools,
+            "tool_search": tool_search,
+        }
         extra_mcps.update(self.deps.container_mcps or {})
         async with self.deps.mcps.session(extra_mcps) as mcp_session:
             return await self._solve_with_mcp(
@@ -129,7 +145,15 @@ class BaseMember:
         mcp_session: MCPRegistrySession,
     ) -> SolveResult:
         d = self.deps
-        d.logger.project("member_start", project_id, member=self.name, intent=intent_id, initial=is_initial)
+        self._restore_progress(project_id, intent_id)
+        d.logger.project(
+            "member_start",
+            project_id,
+            member=self.name,
+            intent=intent_id,
+            initial=is_initial,
+            restored_observations=len(self.observations),
+        )
         self._claim(project_id, intent_id)
         self._seed_tool_inventory(project_id)
         self._prime_tool_context(project_id, intent_id, category)
@@ -144,10 +168,51 @@ class BaseMember:
             context = self._build_context(project_id, intent_id, category, step, is_initial, evaluate_now)
             try:
                 action = self.adapter.decide(context)
-            except Exception as exc:
-                d.logger.project("member_error", project_id, member=self.name, error=str(exc))
+            except DecisionOutputError as exc:
+                d.logger.llm(
+                    "decision_parse_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    step=step,
+                    attempts=exc.attempts,
+                )
+                d.logger.project(
+                    "member_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=str(exc),
+                    retryable=True,
+                )
                 self._release(project_id, intent_id)
-                return SolveResult(status="failed", steps=step)
+                return SolveResult(status="failed", steps=step, error=str(exc))
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                d.logger.project(
+                    "member_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=error,
+                    retryable=True,
+                )
+                self._release(project_id, intent_id)
+                return SolveResult(status="failed", steps=step, error=error)
+            # ``decide`` may be a blocking network call.  An operator can stop
+            # the project while it is in flight; honour that interrupt before
+            # dispatching the returned shell/MCP action, otherwise the action
+            # could recreate a task container that ``stop_project`` removed.
+            if self._stop.is_set():
+                self._release(project_id, intent_id)
+                d.logger.project(
+                    "member_stopped",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    steps=step,
+                )
+                return SolveResult(status="stopped", steps=step)
             d.logger.llm("decide", project_id, member=self.name, step=step,
                          thought=action.thought, action=action.kind)
             self._heartbeat(project_id, intent_id)
@@ -308,7 +373,9 @@ class BaseMember:
             return DispatchResult()
         if kind == "tool_search":
             query = self._string_arg(action.args.get("query", ""))
-            tools = d.registry.search(query)
+            tools = d.registry.search(
+                query, available_mcps=self._available_mcp_names()
+            )
             self._observe(f"[tool_search:{query}] " + ", ".join(t.name for t in tools))
             d.logger.tool("tool_search", project_id, member=self.name, query=query)
             return DispatchResult()
@@ -353,6 +420,56 @@ class BaseMember:
             if row is not None and row["to_fact_id"] is None and row["worker"] == self.name:
                 edge_store.release_intent(conn, project_id, intent_id)
 
+    def _restore_progress(self, project_id: str, intent_id: str) -> None:
+        safe_intent = re.sub(r"[^A-Za-z0-9_.-]+", "_", intent_id).strip("._") or "intent"
+        self._progress_path = f".ipc/progress/{safe_intent}.json"
+        self._progress_project_id = project_id
+        self._progress_save_error_reported = False
+        self.observations = []
+        try:
+            raw = self.deps.sandbox.read_file(self._progress_path)
+            parsed = json.loads(raw) if raw else []
+            if not isinstance(parsed, list):
+                raise ValueError("progress checkpoint must contain a JSON array")
+            self.observations = [str(item)[:2000] for item in parsed if str(item).strip()][-8:]
+        except Exception as exc:
+            self.deps.logger.project(
+                "member_progress_restore_failed",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            self.observations = []
+            return
+        if self.observations:
+            self.deps.logger.project(
+                "member_progress_restored",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                observations=len(self.observations),
+            )
+
+    def _persist_progress(self) -> None:
+        if self._progress_path is None:
+            return
+        try:
+            self.deps.sandbox.write_file(
+                self._progress_path,
+                json.dumps(self.observations[-8:], ensure_ascii=False),
+            )
+        except Exception as exc:
+            if self._progress_save_error_reported:
+                return
+            self._progress_save_error_reported = True
+            self.deps.logger.project(
+                "member_progress_save_failed",
+                self._progress_project_id or "system",
+                member=self.name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def _seed_tool_inventory(self, project_id: str) -> None:
         try:
             self.deps.sandbox.write_file(
@@ -379,7 +496,9 @@ class BaseMember:
             query = " ".join(part for part in (category, intent_desc, goal) if part).strip()
             if not query:
                 return
-            tools = self.deps.registry.search(query)[:5]
+            tools = self.deps.registry.search(
+                query, available_mcps=self._available_mcp_names()
+            )[:5]
         except Exception as exc:
             self.deps.logger.project(
                 "member_tool_context_prime_failed",
@@ -824,6 +943,13 @@ class BaseMember:
 
     # ---- context ----
 
+    def _available_mcp_names(self) -> list[str]:
+        return list(
+            dict.fromkeys(
+                [*self.deps.mcps.names(), *(self.deps.container_mcps or {})]
+            )
+        )
+
     def _build_context(self, project_id, intent_id, category, step, is_initial, evaluate_now) -> dict:
         d = self.deps
         with d.db.connect() as conn:
@@ -831,7 +957,13 @@ class BaseMember:
         if detail is None:
             raise RuntimeError(f"project {project_id} not found")
         assigned = next((i for i in detail.intents if i.id == intent_id), None)
-        exposed = [t.to_dict() for t in d.registry.exposed_for(category)]
+        available_mcps = self._available_mcp_names()
+        exposed = [
+            tool.to_dict()
+            for tool in d.registry.exposed_for(
+                category, available_mcps=available_mcps
+            )
+        ]
         cli_availability = self._probe_cli_tools()
         reports = detail.reports[-8:]
         sibling_insights = [
@@ -914,8 +1046,10 @@ class BaseMember:
                 "available": [name for name, ok in cli_availability.items() if ok],
                 "missing": [name for name, ok in cli_availability.items() if not ok],
             },
-            "available_mcps": list(dict.fromkeys([*d.mcps.names(), *(d.container_mcps or {})])),
-            "public_mcps": list(PUBLIC_MCPS),
+            "available_mcps": available_mcps,
+            "public_mcps": [
+                name for name in PUBLIC_MCPS if name in available_mcps
+            ],
             "available_languages": list(LANGUAGES),
             "attachment_true": attachment_true,
             "attachments": attachments,
@@ -960,6 +1094,7 @@ class BaseMember:
 
     def _observe(self, text: str) -> None:
         self.observations.append(text[:2000])
+        self._persist_progress()
 
     def _string_arg(self, value: Any) -> str:
         if value is None:

@@ -125,6 +125,8 @@ def project_meta(row: sqlite3.Row) -> ProjectMeta:
         flag=row["flag"],
         wp_path=row["wp_path"],
         log_filename=row["log_filename"],
+        runtime_phase=row["runtime_phase"],
+        runtime_error=row["runtime_error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         reason=reason_from_row(row),
@@ -181,6 +183,22 @@ def set_status(conn: sqlite3.Connection, project_id: str, status: str) -> None:
     conn.execute(
         "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
         (status, utcnow(), project_id),
+    )
+
+
+def set_runtime_phase(
+    conn: sqlite3.Connection,
+    project_id: str,
+    phase: str,
+    error: str | None = None,
+) -> None:
+    """Publish a concise solver startup/runtime phase for UI and MCP clients."""
+
+    safe_phase = str(phase or "idle").strip()[:80] or "idle"
+    safe_error = str(error).strip()[:2_000] if error else None
+    conn.execute(
+        "UPDATE projects SET runtime_phase = ?, runtime_error = ?, updated_at = ? WHERE id = ?",
+        (safe_phase, safe_error, utcnow(), project_id),
     )
 
 

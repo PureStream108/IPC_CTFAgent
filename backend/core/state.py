@@ -104,10 +104,14 @@ class AppState:
     def reload_config(self) -> None:
         self.config = load_config(self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+        if self.orchestrator is not None:
+            self.orchestrator.reload_config()
 
     def save_config(self) -> None:
         save_config(self.config, self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+        if self.orchestrator is not None:
+            self.orchestrator.reload_config()
 
     def close(self) -> None:
         """Release resources owned by the application state."""

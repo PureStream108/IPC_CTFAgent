@@ -7,6 +7,7 @@ from fastapi.responses import Response
 
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
+from backend.core.archive import list_archived_projects, project_archive_id
 from backend.core.state import AppState
 from backend.filename_util import numbered_filename
 
@@ -25,12 +26,15 @@ def _completed_writeups(state: AppState) -> list[dict]:
         ).fetchall()
     used: set[str] = set()
     out: list[dict] = []
+    live_archive_ids: set[str] = set()
     for row in rows:
         path = Path(row["wp_path"])
         if not path.exists():
             continue
         filename = numbered_filename(row["title"], ".md", used, fallback=row["id"])
         used.add(filename)
+        archive_id = project_archive_id(str(row["id"]), str(row["created_at"]))
+        live_archive_ids.add(archive_id)
         out.append(
             {
                 "project_id": row["id"],
@@ -38,6 +42,24 @@ def _completed_writeups(state: AppState) -> list[dict]:
                 "filename": filename,
                 "content": path.read_text(encoding="utf-8"),
                 "updated_at": row["updated_at"],
+                "archive_id": archive_id,
+                "archived": False,
+            }
+        )
+    for archive in list_archived_projects(state):
+        if archive["archive_id"] in live_archive_ids:
+            continue
+        path = state.wp_export_dir / archive["wp_filename"]
+        out.append(
+            {
+                "project_id": f"archive:{archive['archive_id']}",
+                "source_project_id": archive["project_id"],
+                "title": archive["title"],
+                "filename": archive["wp_filename"],
+                "content": path.read_text(encoding="utf-8"),
+                "updated_at": archive["archived_at"],
+                "archive_id": archive["archive_id"],
+                "archived": True,
             }
         )
     return out

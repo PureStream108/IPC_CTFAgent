@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from backend.blackboard import edge_store, graph_store, node_store
@@ -9,13 +11,44 @@ from backend.core.logging_util import IPCLogger
 from backend.members.adapters import MemberAction, _extract_json, make_adapter
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
-from backend.mcp.mcp_client import MCPRegistry
+from backend.mcp.mcp_client import MCPClient, MCPRegistry, MCPRegistrySession
 from backend.mcp.shared import build_browser_mcp
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.sandbox import LocalSandbox
 from backend.tools.tool_registry import ToolRegistry
+
+
+def test_mcp_registry_opens_servers_lazily():
+    class CountingClient(MCPClient):
+        def __init__(self):
+            self.entered = 0
+            self.exited = 0
+
+        async def __aenter__(self):
+            self.entered += 1
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.exited += 1
+
+        async def list_tools(self):
+            return []
+
+    first = CountingClient()
+    unused = CountingClient()
+
+    async def run():
+        async with MCPRegistrySession({"first": first, "unused": unused}) as session:
+            assert first.entered == unused.entered == 0
+            assert await session.list_tools("first") == []
+            assert first.entered == 1
+            assert unused.entered == 0
+
+    asyncio.run(run())
+    assert first.exited == 1
+    assert unused.exited == 0
 
 
 @pytest.fixture
@@ -71,6 +104,19 @@ def test_adapter_rejects_empty_model_output_cleanly():
         _extract_json("")
 
 
+@pytest.mark.parametrize(
+    ("raw", "kind"),
+    [
+        ("```json\n{'action': 'bash', 'command': 'id',}\n```", "bash"),
+        ('"{\\"action\\":\\"done\\",\\"reason\\":\\"ok\\"}"', "done"),
+        ('[{"note":"draft"},{"action":"memory","query":"heap"}]', "memory"),
+        ('analysis {"note":"not an action"} then {"action":"done","reason":"ok"}', "done"),
+    ],
+)
+def test_adapter_extracts_common_non_strict_json_shapes(raw, kind):
+    assert MemberAction.from_obj(_extract_json(raw)).kind == kind
+
+
 def test_initial_member_solves_to_flag(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -86,6 +132,60 @@ def test_initial_member_solves_to_flag(deps):
     assert detail.project.flag == "flag{test}"
     # a goal edge exists
     assert any(i.to == "goal" for i in detail.intents)
+
+
+def test_member_interrupt_after_model_call_prevents_returned_action(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+
+    class InterruptingAdapter:
+        def decide(self, context):
+            member.stop()
+            return MemberAction.from_obj(
+                {"action": "bash", "command": "printf unsafe > should-not-exist"}
+            )
+
+    member.adapter = InterruptingAdapter()
+    result = member.solve(pid, iid, "web", is_initial=True)
+
+    assert result.status == "stopped"
+    assert not (d.sandbox.workspace / "should-not-exist").exists()
+
+
+def test_member_restores_observations_after_failed_model_call(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 3
+    first = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+
+    class FailingAfterEvidence:
+        calls = 0
+
+        def decide(self, context):
+            self.calls += 1
+            if self.calls == 1:
+                return MemberAction.from_obj(
+                    {"action": "bash", "command": "echo checkpoint-evidence"}
+                )
+            raise RuntimeError("temporary gateway failure")
+
+    first.adapter = FailingAfterEvidence()
+    assert first.solve(pid, iid, "web", is_initial=True).status == "failed"
+
+    captured = {}
+    second = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+
+    class CaptureContext:
+        def decide(self, context):
+            captured.update(context)
+            return MemberAction.from_obj({"action": "done", "reason": "checkpoint verified"})
+
+    second.adapter = CaptureContext()
+    assert second.solve(pid, iid, "web", is_initial=False).status == "done"
+    assert any("checkpoint-evidence" in item for item in captured["recent_observations"])
+    entries = d.logger.read_log("project", pid, None)
+    assert any(entry["event"] == "member_progress_restored" for entry in entries)
 
 
 def test_followup_member_concludes(deps):
@@ -236,6 +336,8 @@ def test_scripted_member_category_tools_mcp(deps):
         graph_store.create_hint(conn, pid, "check /flag before deeper recon", "human")
     context = member._build_context(pid, iid, "web", 1, False, False)
     assert "browser" in context["public_mcps"]
+    assert "zap" not in context["public_mcps"]
+    assert "zap" not in {tool["name"] for tool in context["exposed_tools"]}
     assert "python" in context["available_languages"]
     assert context["hints"][0]["content"] == "check /flag before deeper recon"
     assert "member_tool_inventory" in context

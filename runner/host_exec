@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -lt 1 ]]; then
+  echo "usage: ipc-host-exec COMMAND" >&2
+  exit 2
+fi
+
+command="$*"
+image="${IPC_HOST_EXEC_IMAGE:-ipc-ctfagent:latest}"
+timeout_seconds="${IPC_HOST_EXEC_TIMEOUT:-120}"
+quoted_command="$(printf '%q' "$command")"
+
+exec docker run --rm \
+  --privileged \
+  --pid=host \
+  --network=host \
+  -v /:/host \
+  "$image" \
+  sh -lc "timeout -k 5s ${timeout_seconds}s chroot /host /bin/bash -lc ${quoted_command}"

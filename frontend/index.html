@@ -41,6 +41,8 @@
     .catalog-markdown code { border-radius: .25rem; background: #f1f5f9; padding: .1rem .3rem; color: #4338ca; }
     .catalog-markdown pre code { background: transparent; padding: 0; color: inherit; }
     .catalog-markdown a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
+    .ops-chat-scroll { scrollbar-gutter: stable; overscroll-behavior: contain; scrollbar-width: thin; }
+    .ops-log-scroll { scrollbar-gutter: stable; overscroll-behavior: contain; scrollbar-width: thin; }
   </style>
   <script>
     tailwind.config = {
@@ -55,7 +57,57 @@
     }
   </script>
 </head>
-<body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden" x-data="ipcApp()" x-init="init()">
+<body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden" x-data="ipcApp()" x-init="init()" x-cloak>
+  <div class="fixed inset-0 z-[100] bg-slate-50 flex items-center justify-center p-5" x-show="authReady && !auth.authenticated">
+    <div class="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-7 shadow-xl shadow-slate-200/60">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="h-11 w-11 rounded-xl border border-slate-200 bg-white shadow-sm flex items-center justify-center overflow-hidden">
+          <img src="/static/ipc.png" alt="IPC" class="h-9 w-9 object-contain">
+        </div>
+        <div>
+          <div class="text-lg font-semibold text-slate-700">IPC CTF Agent</div>
+          <div class="text-xs text-slate-400" x-text="auth.setup_required ? 'First-time setup' : 'Administrator login'"></div>
+        </div>
+      </div>
+
+      <form x-show="auth.setup_required" @submit.prevent="completeSetup()" class="space-y-4">
+        <div class="rounded-xl border border-brand-100 bg-brand-50/70 px-3 py-2.5 text-xs leading-relaxed text-brand-700">
+          Create the local administrator password first. After setup, IPC opens endpoint configuration so no API key is required before the WebUI starts.
+        </div>
+        <label class="block text-xs text-slate-500">Administrator
+          <input class="mt-1 w-full rounded-xl px-3 py-2 text-sm bg-slate-50" value="admin" disabled>
+        </label>
+        <label class="block text-xs text-slate-500">Password
+          <input type="password" autocomplete="new-password" minlength="12" maxlength="1024" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="setupForm.password" placeholder="At least 12 characters">
+        </label>
+        <label class="block text-xs text-slate-500">Confirm password
+          <input type="password" autocomplete="new-password" minlength="12" maxlength="1024" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="setupForm.confirm" placeholder="Repeat password">
+        </label>
+        <p class="text-xs text-rose-600" x-show="authError" x-text="authError"></p>
+        <button class="btn w-full rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-50" :disabled="authBusy || setupForm.password.length < 12 || setupForm.password !== setupForm.confirm">
+          <span x-text="authBusy ? 'Creating administrator...' : 'Create administrator'"></span>
+        </button>
+      </form>
+
+      <form x-show="!auth.setup_required" @submit.prevent="login()" class="space-y-4">
+        <label class="block text-xs text-slate-500">Username
+          <input autocomplete="username" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="loginForm.username">
+        </label>
+        <label class="block text-xs text-slate-500">Password
+          <input type="password" autocomplete="current-password" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="loginForm.password">
+        </label>
+        <p class="text-xs text-rose-600" x-show="authError" x-text="authError"></p>
+        <button class="btn w-full rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-50" :disabled="authBusy || !loginForm.password">
+          <span x-text="authBusy ? 'Signing in...' : 'Sign in'"></span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 z-[99] bg-slate-50 flex items-center justify-center text-sm text-slate-400" x-show="!authReady">
+    Loading IPC...
+  </div>
+
   <header class="bg-white/80 backdrop-blur border-b border-slate-200/60 px-4 py-2.5 flex items-center gap-3 shrink-0">
     <button type="button" @click="sidebarOpen=!sidebarOpen" class="h-8 w-8 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center justify-center" title="Toggle projects">
       <svg x-show="sidebarOpen" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
@@ -91,7 +143,9 @@
     </div>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalLogs()">Logs</button>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalWP()">WP</button>
+    <button class="h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition inline-flex items-center" @click="openOpsAgent()">IPC</button>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">IPC</button>
+    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center" @click="logout()" title="Sign out">Logout</button>
   </header>
 
   <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
@@ -114,6 +168,9 @@
         <span class="px-2 py-1 rounded-lg chip uppercase tracking-wide" x-text="current.project.category"></span>
         <span class="truncate max-w-[320px]" x-text="current.project.title"></span>
         <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.status"></span>
+        <span x-show="current.project.runtime_phase && current.project.runtime_phase!=='idle'"
+          class="rounded-md bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700"
+          x-text="current.project.runtime_phase"></span>
         <span class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-slate-500">
           <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 7v5l3 3"/><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Z"/></svg>
           <span class="uppercase tracking-wide text-[10px] text-slate-400">Elapsed</span>
@@ -147,6 +204,8 @@
               <span x-text="p.member_count + 'M'"></span>
               <span x-text="p.fact_count + 'F'"></span>
             </div>
+            <div x-show="p.runtime_phase && !['idle','ready','completed','stopped'].includes(p.runtime_phase)"
+              class="mt-1.5 truncate font-mono text-[10px] text-sky-600" x-text="p.runtime_phase"></div>
           </button>
         </template>
         <div x-show="projects.length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
@@ -166,6 +225,12 @@
           <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.wp_path" @click="openWP()">WP</button>
           <button class="btn-ghost btn-danger h-7 px-2.5 rounded-lg text-xs" @click="deleteProject()">Delete</button>
         </div>
+        <template x-if="current && (current.project.runtime_error || !['idle','ready','completed','stopped'].includes(current.project.runtime_phase))">
+          <div class="absolute top-14 left-3 z-10 max-w-[34rem] rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
+            <div class="font-mono font-semibold text-sky-700" x-text="'IPC startup: '+current.project.runtime_phase"></div>
+            <div x-show="current.project.runtime_error" class="mt-1 break-words text-rose-600" x-text="current.project.runtime_error"></div>
+          </div>
+        </template>
         <template x-if="current && current.project.reason">
           <div class="absolute top-14 right-3 z-10 max-w-80">
             <div class="relative overflow-hidden rounded-2xl border border-sky-200/80 bg-white/95 px-3.5 py-3 shadow-lg shadow-sky-100/60 backdrop-blur">
@@ -463,7 +528,7 @@
   </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showIPC" x-cloak>
-    <div class="panel rounded-2xl w-[600px] max-h-[90vh] overflow-y-auto p-5">
+    <div class="panel rounded-2xl w-[720px] max-h-[90vh] overflow-y-auto p-5">
       <div class="flex items-center justify-between mb-4">
         <div class="text-lg font-semibold text-slate-700">IPC - Agent Endpoints</div>
         <button class="btn-ghost px-2.5 py-1 rounded-lg text-xs" @click="runHealth()">Health check</button>
@@ -479,8 +544,40 @@
           </div>
           <template x-for="m in cfg.members" :key="m.name">
             <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
-              <div class="text-sm font-semibold text-slate-700 mb-2 capitalize" x-text="m.name"></div>
+              <div class="flex items-center justify-between mb-2">
+                <div class="text-sm font-semibold text-slate-700 capitalize">
+                  <span x-text="m.name"></span>
+                  <span class="text-[10px] ml-1" :class="health[m.name]?(health[m.name].ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health[m.name]?(health[m.name].ok?'healthy':'unreachable'):''"></span>
+                </div>
+                <button class="text-[11px] text-rose-500 hover:text-rose-700" @click="removeMember(m.name)">Remove</button>
+              </div>
               <div x-html="llmFields(m.name, m)"></div>
+            </div>
+          </template>
+          <div class="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-3 mb-3">
+            <div class="text-xs font-semibold text-slate-600 mb-2">Add Member</div>
+            <div class="flex gap-2">
+              <input class="flex-1 rounded-lg px-2.5 py-1.5 text-sm" x-model="newMemberName" @keydown.enter.prevent="addMember()" placeholder="aventurine">
+              <button class="btn px-3 py-1.5 rounded-lg text-xs" @click="addMember()">Add</button>
+            </div>
+            <div class="mt-1.5 text-[10px] text-slate-400">Use lowercase letters, numbers, underscores, or hyphens.</div>
+          </div>
+          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3" x-show="cfg.runtime">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <div class="text-sm font-semibold text-slate-700">Optional OWASP ZAP</div>
+                <div class="mt-1 text-[11px] leading-relaxed text-slate-400">Disabled by default, so normal startup does not pull the large ZAP image. Enable the Compose <code>zap</code> profile before turning this on.</div>
+              </div>
+              <label class="inline-flex items-center gap-2 text-xs text-slate-500 shrink-0">
+                <input type="checkbox" x-model="cfg.runtime.zap_enabled"> Enabled
+              </label>
+            </div>
+          </div>
+          <template x-if="opsCfg">
+            <div class="rounded-2xl border border-brand-100 bg-brand-50/30 p-3 mb-3">
+              <div class="text-sm font-semibold text-slate-700 mb-1">IPC action agent <span class="text-[10px]" :class="health.ops_agent?(health.ops_agent.ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health.ops_agent?(health.ops_agent.ok?'healthy':'unreachable'):''"></span></div>
+          <div class="text-[11px] text-slate-400 mb-2">Used by the separate action Agent for platform integration and privileged diagnostics.</div>
+              <div x-html="llmFields('ops_agent', opsCfg)"></div>
             </div>
           </template>
           <div class="flex justify-end gap-2 mt-3">
@@ -584,7 +681,8 @@
               :class="selectedLogProjectId===item.project_id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
               @click="selectedLogProjectId=item.project_id">
               <div class="flex items-center justify-between gap-2">
-                <span class="text-[11px] font-mono text-slate-400" x-text="item.project_id"></span>
+                <span class="text-[11px] font-mono text-slate-400" x-text="item.source_project_id || item.project_id"></span>
+                <span x-show="item.archived" class="text-[9px] rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700">Archived</span>
                 <span class="text-[10px] chip px-1.5 py-0.5 rounded-full" x-text="logEntryCount(item)"></span>
               </div>
               <div class="mt-1 text-sm font-semibold break-words [overflow-wrap:anywhere]" x-text="item.title"></div>
@@ -646,7 +744,10 @@
             <button class="w-full text-left rounded-xl p-3 mb-1 transition"
               :class="selectedCompletedWPId===item.project_id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
               @click="selectedCompletedWPId=item.project_id">
-              <div class="text-[11px] font-mono text-slate-400" x-text="item.project_id"></div>
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-mono text-slate-400" x-text="item.source_project_id || item.project_id"></span>
+                <span x-show="item.archived" class="text-[9px] rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700">Archived</span>
+              </div>
               <div class="mt-1 text-sm font-semibold break-words [overflow-wrap:anywhere]" x-text="item.title"></div>
               <div class="mt-1 text-[10px] text-slate-400 truncate" x-text="item.filename"></div>
             </button>
@@ -664,6 +765,144 @@
             </div>
           </template>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-3" x-show="showOps" x-cloak>
+    <div class="panel rounded-2xl w-[1240px] max-w-[98vw] h-[90vh] overflow-hidden flex flex-col">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+        <div>
+          <div class="text-lg font-semibold text-slate-700">IPC</div>
+          <div class="text-[11px] text-slate-400">Persistent action agent powered by Claude Code, with IPC MCP tools and host-root maintenance access.</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in IPC'"></span>
+          <button x-show="opsBusy" x-cloak class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50" :disabled="opsInterrupting" @click="interruptOpsRun()" x-text="opsInterrupting?'Interrupting…':'Interrupt IPC'"></button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">IPC config</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false">Close</button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-[220px_minmax(360px,1fr)_350px] min-h-0 flex-1">
+        <aside class="border-r border-slate-100 bg-slate-50/70 p-3 overflow-y-auto">
+          <button class="btn w-full rounded-lg px-3 py-2 text-xs mb-3 disabled:opacity-40" :disabled="opsBusy" @click="newOpsSession()">+ New conversation</button>
+          <template x-for="session in opsSessions" :key="session.id">
+            <div class="group rounded-xl border mb-2 transition" :class="opsSessionId===session.id?'border-brand-200 bg-brand-50':'border-transparent hover:border-slate-200 hover:bg-white'">
+              <button class="w-full text-left px-3 pt-2.5 pb-1 disabled:opacity-40" :disabled="opsBusy && opsSessionId!==session.id" @click="selectOpsSession(session.id)">
+                <div class="text-xs font-medium text-slate-700 break-words" x-text="session.title"></div>
+                <div class="text-[10px] text-slate-400 mt-1" x-text="formatTime(session.updated_at)"></div>
+              </button>
+              <button class="px-3 pb-2 text-[10px] text-rose-400 opacity-0 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-20" :disabled="opsBusy && opsSessionId===session.id" @click="deleteOpsSession(session.id)">Delete</button>
+            </div>
+          </template>
+          <div class="text-xs text-slate-400 text-center py-8" x-show="opsSessions.length===0">No conversations yet.</div>
+        </aside>
+
+        <section class="min-w-0 min-h-0 flex flex-col bg-white">
+          <div class="relative flex-1 min-h-0">
+            <div class="h-full overflow-y-auto p-5 space-y-3 ops-chat-scroll" x-ref="opsMessages" @scroll="updateOpsScrollState()">
+              <div class="rounded-2xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400" x-show="opsMessages.length===0">
+                Ask IPC to inspect a task sandbox, run host diagnostics, connect a CTF platform, or solve a challenge with durable logs and a writeup.
+              </div>
+              <template x-for="message in opsMessages" :key="message.id || message.created_at">
+                <div class="flex" :class="message.role==='user'?'justify-end':'justify-start'">
+                  <div class="max-w-[88%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap break-words"
+                    :class="message.role==='user'?'bg-brand-500 text-white rounded-br-md':'bg-slate-100 text-slate-700 rounded-bl-md'"
+                    x-text="message.content"></div>
+                </div>
+              </template>
+              <div class="rounded-2xl border border-slate-800 bg-slate-950 p-3 shadow-inner" x-show="opsLiveEvents.length" x-cloak>
+                <div class="flex items-center justify-between gap-2 mb-2">
+                  <div class="flex items-center gap-2 text-[11px] font-semibold text-slate-200">
+                    <span class="h-2 w-2 rounded-full" :class="opsBusy?'bg-emerald-400 animate-pulse':'bg-slate-500'"></span>
+                    IPC live log
+                    <span class="font-normal text-slate-500" x-text="opsLiveEvents.length+' events'"></span>
+                  </div>
+                  <button class="text-[10px] text-slate-400 hover:text-white" @click="opsLiveEvents=[]">Clear</button>
+                </div>
+                <div class="max-h-72 overflow-y-auto space-y-1 ops-log-scroll" x-ref="opsLogs">
+                  <template x-for="(event,index) in opsLiveEvents" :key="event.id || index">
+                    <div class="rounded-lg px-2 py-1 font-mono text-[11px] leading-relaxed" :class="event.kind==='tool'?'bg-cyan-950/70 text-cyan-200':event.kind==='tool-result'?'bg-emerald-950/60 text-emerald-200':event.kind==='stderr'?'bg-rose-950/60 text-rose-200':'text-slate-300'">
+                      <div class="flex items-start gap-2">
+                        <span class="shrink-0 text-slate-500" x-text="event.label"></span>
+                        <pre class="min-w-0 whitespace-pre-wrap break-words" x-text="event.text"></pre>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <div class="flex justify-start" x-show="opsBusy"><div class="rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 text-xs text-slate-400">IPC is executing tools...</div></div>
+            </div>
+            <button x-show="!opsAtBottom && opsMessages.length" x-cloak @click="scrollOpsToLatest(true)"
+              class="absolute bottom-4 right-5 rounded-full border border-brand-200 bg-white px-3 py-1.5 text-xs text-brand-600 shadow-md hover:bg-brand-50">
+              ↓ Latest
+            </button>
+          </div>
+          <div class="border-t border-slate-100 p-3 space-y-2">
+            <div class="flex gap-2 items-end">
+              <textarea class="flex-1 rounded-xl px-3 py-2 text-sm resize-none" rows="3" x-model="opsInput" @keydown.ctrl.enter.prevent="sendOpsMessage()" placeholder="Describe the platform API, task, or credentials for IPC."></textarea>
+              <button class="btn rounded-xl px-4 py-2.5 text-sm disabled:opacity-40" :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()" x-text="opsBusy?'Interrupt & Send':'Send'"></button>
+            </div>
+            <div class="text-[10px] text-slate-400">Ctrl+Enter to send. Chat content is retained in this conversation.</div>
+          </div>
+        </section>
+
+        <aside class="border-l border-slate-100 bg-slate-50/50 p-3 overflow-y-auto">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Workflows</div>
+            <button class="text-[11px] text-brand-600" @click="loadOpsWorkflows()">Refresh</button>
+          </div>
+          <div class="flex gap-1.5 overflow-x-auto pb-2 mb-2">
+            <template x-for="workflow in opsWorkflows" :key="workflow.id">
+              <button class="shrink-0 rounded-lg border px-2.5 py-1.5 text-[11px]" :class="opsWorkflowId===workflow.id?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 bg-white text-slate-500'" @click="selectOpsWorkflow(workflow.id)" x-text="workflow.name"></button>
+            </template>
+          </div>
+          <template x-if="selectedOpsWorkflow()">
+            <div class="space-y-3">
+              <div class="rounded-xl border border-slate-200 bg-white p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="text-sm font-semibold text-slate-700" x-text="selectedOpsWorkflow().name"></div>
+                  <span class="rounded-full px-2 py-0.5 text-[10px]" :class="selectedOpsWorkflow().status==='confirmed'?'bg-emerald-50 text-emerald-700':'bg-amber-50 text-amber-700'" x-text="selectedOpsWorkflow().status"></span>
+                </div>
+                <div class="mt-2 text-[10px] text-slate-400 break-all" x-text="selectedOpsWorkflow().spec.challenges.list_url"></div>
+                <div class="mt-1 text-[10px] text-slate-400" x-show="selectedOpsWorkflow().spec.submit" x-text="selectedOpsWorkflow().spec.submit?.method+' '+selectedOpsWorkflow().spec.submit?.url"></div>
+                <pre class="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-900 p-2 text-[10px] text-slate-300 whitespace-pre-wrap" x-text="JSON.stringify(selectedOpsWorkflow().spec,null,2)"></pre>
+              </div>
+
+              <div class="rounded-xl border border-slate-200 bg-white p-3">
+                <div class="text-xs font-semibold text-slate-600 mb-2">Workflow secret</div>
+                <div class="flex flex-wrap gap-1 mb-2">
+                  <template x-for="secret in selectedOpsWorkflow().secrets" :key="secret.name"><span class="rounded-md px-2 py-0.5 text-[10px]" :class="secret.secret_set?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-600'" x-text="secret.name+(secret.secret_set?' set':' missing')"></span></template>
+                </div>
+                <div class="flex gap-1.5">
+                  <input class="w-28 rounded-lg px-2 py-1 text-xs" x-model="workflowSecret.name" placeholder="alias">
+                  <input type="password" class="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs" x-model="workflowSecret.value" placeholder="value">
+                  <button class="btn-ghost rounded-lg px-2 py-1 text-xs" @click="saveWorkflowSecret()">Set</button>
+                </div>
+              </div>
+
+              <div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3" x-show="!workflowTokens[selectedOpsWorkflow().id]">
+                <div class="text-[11px] leading-relaxed text-amber-800">Review every URL, method and template above, then type:</div>
+                <code class="block my-2 text-[10px] text-amber-900 break-all" x-text="selectedOpsWorkflow().confirmation_phrase"></code>
+                <input class="w-full rounded-lg px-2 py-1 text-xs" x-model="opsConfirmInput" placeholder="confirmation phrase">
+                <button class="mt-2 btn w-full rounded-lg px-2 py-1.5 text-xs disabled:opacity-40" :disabled="opsConfirmInput!==selectedOpsWorkflow().confirmation_phrase" @click="confirmOpsWorkflow()">Authorize workflow</button>
+              </div>
+
+              <div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 space-y-2" x-show="workflowTokens[selectedOpsWorkflow().id]">
+                <div class="text-[11px] text-emerald-700">Execution capability is held only in this browser tab.</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <button class="btn-ghost rounded-lg px-2 py-1.5 text-xs" @click="executeOpsWorkflow('preview')">Preview</button>
+                  <button class="btn-ghost rounded-lg px-2 py-1.5 text-xs" @click="executeOpsWorkflow('import')">Import all</button>
+                </div>
+                <button class="btn w-full rounded-lg px-2 py-1.5 text-xs" x-show="selectedOpsWorkflow().spec.submit" @click="submitFoundFlags()">Submit all found flags</button>
+                <button class="w-full text-[10px] text-rose-500" @click="revokeOpsWorkflow()">Revoke capability</button>
+              </div>
+              <pre class="rounded-xl border border-slate-200 bg-white p-3 text-[10px] text-slate-500 whitespace-pre-wrap max-h-48 overflow-auto" x-show="opsResult" x-text="JSON.stringify(opsResult,null,2)"></pre>
+            </div>
+          </template>
+          <div class="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-400" x-show="opsWorkflows.length===0">No workflow proposal yet.</div>
+        </aside>
       </div>
     </div>
   </div>
@@ -689,36 +928,122 @@
       categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
-      showGlobalLogs: false, showGlobalWP: false,
+      showGlobalLogs: false, showGlobalWP: false, showOps: false,
+      authReady: false, authBusy: false, authError: "",
+      auth: {setup_required:false, authenticated:false, username:null},
+      setupForm: {password:"", confirm:""}, loginForm: {username:"admin", password:""},
+      _appStarted: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       newHint: { content:"", creator:"human" },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
-      cfg: null, health: {}, memories: [], wpText: "", toast: "",
+      cfg: null, opsCfg: null, health: {}, memories: [], wpText: "", toast: "",
+      newMemberName: "", _removedMembers: [],
       memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
+      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsRunId: null, opsQueuedMessage: null, opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAtBottom: true,
+      opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
+      opsConfirmInput: "", opsResult: null,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
         window._ipc = this;
-        await this.loadProjects();
-        await this.loadBroadcasts();
-        const st = await this.api("GET","/logs/status"); this.logEnabled = st.enabled;
-        if (this.projects.length) this.openProject(this.projects[0].id);
-        this._clock = setInterval(()=>{ this.nowMs = Date.now(); }, 1000);
-        this._poll = setInterval(()=>this.tick(), 2500);
+        try {
+          this.auth = await this.authRequest("GET", "/auth/status");
+        } catch (error) {
+          this.authError = "Authentication service is unavailable.";
+        } finally {
+          this.authReady = true;
+        }
+        if (this.auth.authenticated) await this.startApp();
+      },
+      async authRequest(method, path, body) {
+        const options={method,headers:{},credentials:"same-origin"};
+        if(body!==undefined){ options.headers["Content-Type"]="application/json"; options.body=JSON.stringify(body); }
+        const response=await fetch(path,options);
+        const text=await response.text();
+        let data; try{ data=text?JSON.parse(text):null; }catch(error){ data=text; }
+        if(!response.ok) throw new Error((data&&data.detail)||("error "+response.status));
+        return data;
+      },
+      async completeSetup(){
+        if(this.setupForm.password!==this.setupForm.confirm){ this.authError="Passwords do not match."; return; }
+        this.authBusy=true; this.authError="";
+        try{
+          this.auth=await this.authRequest("POST","/auth/setup",{password:this.setupForm.password});
+          this.setupForm={password:"",confirm:""};
+          await this.startApp();
+          await this.openIPCConfig();
+        }catch(error){ this.authError=error.message; }
+        finally{ this.authBusy=false; }
+      },
+      async login(){
+        this.authBusy=true; this.authError="";
+        try{
+          this.auth=await this.authRequest("POST","/auth/login",this.loginForm);
+          this.loginForm.password="";
+          await this.startApp();
+        }catch(error){ this.authError=error.message; }
+        finally{ this.authBusy=false; }
+      },
+      async logout(){
+        try{ await this.authRequest("POST","/auth/logout"); }catch(error){}
+        this.stopApp();
+        this.auth={setup_required:false,authenticated:false,username:null};
+        this.authError=""; this.loginForm.password="";
+        this.showIPC=false; this.showMemory=false; this.showGlobalLogs=false; this.showGlobalWP=false; this.showOps=false;
+        this.clearAppData();
+      },
+      clearAppData(){
+        this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
+        this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
+        this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
+        this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
+        if(this.cy){ this.cy.destroy(); this.cy=null; }
+      },
+      async startApp(){
+        if(this._appStarted) return;
+        this._appStarted=true;
+        try{
+          await this.loadProjects();
+          await this.loadBroadcasts();
+          const status=await this.api("GET","/logs/status"); this.logEnabled=status.enabled;
+          if(this.projects.length) await this.openProject(this.projects[0].id);
+          this._clock=setInterval(()=>{ this.nowMs=Date.now(); },1000);
+          this._poll=setInterval(()=>this.tick(),2500);
+        }catch(error){
+          this._appStarted=false;
+          if(this.auth.authenticated) this.flash(error.message||"Failed to load IPC");
+        }
+      },
+      stopApp(){
+        if(this._clock) clearInterval(this._clock);
+        if(this._poll) clearInterval(this._poll);
+        if(this._flowTimer) clearInterval(this._flowTimer);
+        this._clock=null; this._poll=null; this._flowTimer=null; this._appStarted=false;
       },
       async tick() {
+        if(!this.auth.authenticated) return;
         this.nowMs = Date.now();
-        await this.loadProjects(); await this.loadBroadcasts();
-        if (this.selectedId) { await this.loadProject(this.selectedId); this.renderGraph(false); }
+        try{
+          await this.loadProjects(); await this.loadBroadcasts();
+          if (this.selectedId) { await this.loadProject(this.selectedId); this.renderGraph(false); }
+          if (this.selectedId && this.sideTab==='log') await this.loadLog();
+          if(this.showOps && this.opsRunId && !this.opsStreaming) await this.pollOpsRun();
+        }catch(error){}
       },
       async api(method, path, body) {
-        const opt = { method, headers: {} };
+        const opt = { method, headers: {}, credentials:"same-origin" };
         if (body !== undefined) { opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
         const r = await fetch(path, opt);
         if (r.status===204) return null;
         const txt = await r.text();
         let data; try { data = txt ? JSON.parse(txt) : null; } catch(e){ data = txt; }
+        if(r.status===401 || r.status===428){
+          this.stopApp();
+          this.clearAppData();
+          try{ this.auth=await this.authRequest("GET","/auth/status"); }catch(error){ this.auth={setup_required:r.status===428,authenticated:false,username:null}; }
+          this.authError=r.status===428?"Initial administrator setup is required.":"Your session expired. Sign in again.";
+        }
         if (!r.ok) { this.flash((data&&data.detail)||("error "+r.status)); throw new Error(txt); }
         return data;
       },
@@ -781,8 +1106,8 @@
         this.renderGraph(false);
         this.flash("hint added");
       },
-      async startSolve(){ await this.api("POST","/projects/"+this.selectedId+"/start"); this.flash("solving started"); await this.loadProject(this.selectedId); this.renderGraph(); },
-      async resumeSolve(){ await this.api("POST","/projects/"+this.selectedId+"/resume"); this.flash("resumed"); await this.loadProject(this.selectedId); this.renderGraph(); },
+      async startSolve(){ const r=await this.api("POST","/projects/"+this.selectedId+"/start"); this.flash("IPC queued: "+(r.phase||r.status)); await this.loadProject(this.selectedId); this.renderGraph(); },
+      async resumeSolve(){ const r=await this.api("POST","/projects/"+this.selectedId+"/resume"); this.flash("IPC queued: "+(r.phase||r.status)); await this.loadProject(this.selectedId); this.renderGraph(); },
       async reopenProject(){ await this.api("POST","/projects/"+this.selectedId+"/reopen"); this.flash("reopened"); await this.loadProject(this.selectedId); this.renderGraph(); },
       async stopSolve(){ await this.api("POST","/projects/"+this.selectedId+"/stop"); await this.loadProject(this.selectedId); },
       async stopAll(){ await this.api("POST","/projects/stop-all"); await this.loadProjects(); },
@@ -1193,26 +1518,278 @@
       selectedCompletedWP(){ return this.completedWPs.find(x=>x.project_id===this.selectedCompletedWPId)||this.completedWPs[0]||null; },
       async deriveWP(){ const r=await this.api("POST","/wp/derive"); this.flash("exported: "+r.dir); },
 
-      async openIPCConfig(){ this.cfg=await this.api("GET","/config"); this.health={}; this.showIPC=true; },
+      async openOpsAgent(){
+        this.showOps=true; this.opsResult=null;
+        try{
+          this.opsCfg=await this.api("GET","/api/ops/config");
+          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+          if(this.opsSessionId) await this.selectOpsSession(this.opsSessionId);
+        }catch(error){}
+      },
+      async loadOpsSessions(){
+        const data=await this.api("GET","/api/ops/sessions");
+        this.opsSessions=data.sessions||[];
+        if(this.opsSessionId&&!this.opsSessions.some(session=>session.id===this.opsSessionId)) this.opsSessionId=null;
+        if(!this.opsSessionId&&this.opsSessions.length) this.opsSessionId=this.opsSessions[0].id;
+      },
+      async selectOpsSession(sessionId,preserveLive=false){
+        const data=await this.api("GET","/api/ops/sessions/"+encodeURIComponent(sessionId));
+        this.opsSessionId=sessionId; this.opsMessages=data.messages||[];
+        if(!preserveLive || (data.events||[]).length) this.opsLiveEvents=data.events||[];
+        const active=data.active_run||null;
+        if(active){
+          this.opsRunId=active.id; this.opsBusy=true;
+          this.opsInterrupting=!!active.cancel_requested;
+        }else if(!this.opsStreaming){
+          this.opsRunId=null; this.opsBusy=false; this.opsInterrupting=false;
+        }
+        this.scrollOpsToLatest(false);
+        this.scrollOpsLogsToLatest();
+      },
+      async pollOpsRun(){
+        if(!this.showOps || !this.opsSessionId || !this.opsRunId || this.opsStreaming) return;
+        const sessionId=this.opsSessionId, runId=this.opsRunId;
+        try{
+          await this.selectOpsSession(sessionId,true);
+          if(this.opsSessionId!==sessionId) return;
+          if(!this.opsRunId || this.opsRunId!==runId){
+            await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+            const queued=this.opsQueuedMessage;
+            this.opsQueuedMessage=null;
+            if(queued){ this.opsInput=queued; await this.sendOpsMessage(); }
+          }
+        }catch(error){}
+      },
+      opsIsAtBottom(){
+        const element=this.$refs.opsMessages;
+        return !element || element.scrollHeight-element.scrollTop-element.clientHeight<32;
+      },
+      updateOpsScrollState(){ this.opsAtBottom=this.opsIsAtBottom(); },
+      scrollOpsToLatest(smooth=false){
+        this.$nextTick(()=>{
+          const element=this.$refs.opsMessages; if(!element) return;
+          element.scrollTo({top:element.scrollHeight,behavior:smooth?'smooth':'auto'});
+          this.opsAtBottom=true;
+        });
+      },
+      scrollOpsLogsToLatest(){
+        this.$nextTick(()=>{
+          const element=this.$refs.opsLogs;
+          if(element) element.scrollTop=element.scrollHeight;
+        });
+      },
+      pushOpsLiveEvent(event){
+        if(!event||!event.text) return;
+        const last=this.opsLiveEvents[this.opsLiveEvents.length-1];
+        if(last && last.kind===event.kind && last.label===event.label && (event.kind==='text' || event.kind==='tool-input')){
+          last.text=(last.text||'')+event.text;
+          this.opsLiveEvents=[...this.opsLiveEvents];
+          this.scrollOpsLogsToLatest();
+          return;
+        }
+        this.opsLiveEvents.push({...event,id:"ops-log-"+Date.now()+"-"+this.opsLiveEvents.length});
+        this.scrollOpsLogsToLatest();
+        this.scrollOpsToLatest(true);
+      },
+      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; },
+      async deleteOpsSession(sessionId){
+        if(!confirm("Delete this conversation?")) return;
+        await this.api("DELETE","/api/ops/sessions/"+encodeURIComponent(sessionId));
+        if(this.opsSessionId===sessionId){ this.opsSessionId=null; this.opsMessages=[]; }
+        await this.loadOpsSessions();
+        if(this.opsSessionId) await this.selectOpsSession(this.opsSessionId);
+      },
+      async interruptOpsRun(){
+        if(!this.opsBusy) return true;
+        this.opsInterrupting=true;
+        if(!this.opsRunId || !this.opsSessionId){ this.opsInterrupting=false; return false; }
+        try{
+          const result=await this.api("POST","/api/ops/chat/interrupt",{session_id:this.opsSessionId,run_id:this.opsRunId});
+          if(!result.ok && result.status!=="interrupting") this.flash("IPC run is no longer active");
+          return !!result.ok;
+        }catch(error){
+          this.opsInterrupting=false;
+          this.flash(error.message||"could not interrupt IPC");
+          return false;
+        }
+      },
+      async sendOpsMessage(){
+        const message=this.opsInput.trim(); if(!message||!this.opsCfg?.configured) return;
+        if(this.opsBusy){
+          this.opsQueuedMessage=message;
+          this.opsInput="";
+          await this.interruptOpsRun();
+          return;
+        }
+        this.opsBusy=true;
+        this.opsStreaming=true;
+        this.opsInterrupting=false; this.opsRunId=null;
+        if(!this.opsSessionId) this.opsLiveEvents=[];
+        const temporary={id:"temp-"+Date.now(),role:"user",content:message,created_at:new Date().toISOString()};
+        this.opsMessages.push(temporary);
+        this.scrollOpsToLatest(true);
+        this.opsInput="";
+        try{
+          const legacyOpsChatPath="/api/ops/chat";
+          const chatPayload={message,session_id:this.opsSessionId};
+          const response=await fetch("/api/ops/chat/stream",{
+            method:"POST",
+            headers:{"Content-Type":"application/json","Accept":"application/x-ndjson"},
+            credentials:"same-origin",
+            body:JSON.stringify(chatPayload)
+          });
+          if(!response.ok){
+            const text=await response.text(); let data=null;
+            try{ data=text?JSON.parse(text):null; }catch(error){}
+            throw new Error((data&&data.detail)||("error "+response.status));
+          }
+          let completed=null, buffer="";
+          const processEvent=(event)=>{
+            if(!event||typeof event!=="object") return;
+            if(event.type==="session") this.opsSessionId=event.session_id;
+            else if(event.type==="run"){
+              this.opsRunId=event.run_id;
+              if(this.opsInterrupting) this.interruptOpsRun();
+            }
+            else if(event.type==="log") this.pushOpsLiveEvent(event.event);
+            else if(event.type==="complete") completed=event.response;
+            else if(event.type==="error") throw new Error(event.error||"IPC stream failed");
+          };
+          if(!response.body) processEvent({type:"complete",response:await this.api("POST",legacyOpsChatPath,chatPayload)});
+          else{
+            const reader=response.body.getReader(), decoder=new TextDecoder();
+            while(true){
+              const chunk=await reader.read();
+              if(chunk.done) break;
+              buffer+=decoder.decode(chunk.value,{stream:true});
+              const lines=buffer.split(/\r?\n/); buffer=lines.pop()||"";
+              for(const line of lines){ if(line.trim()) processEvent(JSON.parse(line)); }
+            }
+            buffer+=decoder.decode();
+            if(buffer.trim()) processEvent(JSON.parse(buffer));
+          }
+          if(!completed) throw new Error("IPC stream ended without a final response");
+          const responseData=completed;
+          this.opsSessionId=responseData.session_id||this.opsSessionId;
+          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+          await this.selectOpsSession(responseData.session_id,true);
+          if(responseData.proposal_error) this.flash(responseData.proposal_error);
+          if((responseData.proposals||[]).length){ this.opsWorkflowId=responseData.proposals[0].id; this.opsConfirmInput=""; }
+        }catch(error){
+          this.opsMessages=this.opsMessages.filter(item=>item!==temporary);
+          this.flash(error.message||"IPC stream failed");
+        }finally{
+          const queued=this.opsQueuedMessage;
+          this.opsBusy=false; this.opsStreaming=false; this.opsInterrupting=false; this.opsRunId=null; this.opsQueuedMessage=null;
+          if(queued){ this.opsInput=queued; await this.sendOpsMessage(); }
+        }
+      },
+      async loadOpsWorkflows(){
+        const data=await this.api("GET","/api/ops/workflows");
+        this.opsWorkflows=data.workflows||[];
+        if(this.opsWorkflowId&&!this.opsWorkflows.some(workflow=>workflow.id===this.opsWorkflowId)) this.opsWorkflowId=null;
+        if(!this.opsWorkflowId&&this.opsWorkflows.length) this.opsWorkflowId=this.opsWorkflows[0].id;
+      },
+      selectedOpsWorkflow(){ return this.opsWorkflows.find(workflow=>workflow.id===this.opsWorkflowId)||null; },
+      selectOpsWorkflow(workflowId){ this.opsWorkflowId=workflowId; this.opsConfirmInput=""; this.opsResult=null; this.workflowSecret={name:"",value:""}; },
+      async saveWorkflowSecret(){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
+        const name=this.workflowSecret.name.trim().toLowerCase(), value=this.workflowSecret.value;
+        if(!/^[a-z][a-z0-9_]{0,63}$/.test(name)||!value){ this.flash("enter a valid workflow secret"); return; }
+        const updated=await this.api("PUT","/api/ops/workflows/"+workflow.id+"/secrets",{secrets:{[name]:value}});
+        this.opsWorkflows=this.opsWorkflows.map(item=>item.id===updated.id?updated:item);
+        this.workflowSecret={name:"",value:""}; this.flash("workflow secret saved");
+      },
+      async confirmOpsWorkflow(){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
+        const response=await this.api("POST","/api/ops/workflows/"+workflow.id+"/confirm",{confirmation_phrase:this.opsConfirmInput});
+        this.workflowTokens={...this.workflowTokens,[workflow.id]:response.execution_token};
+        this.opsWorkflows=this.opsWorkflows.map(item=>item.id===workflow.id?response.workflow:item);
+        this.opsConfirmInput=""; this.flash("workflow authorized");
+      },
+      async executeOpsWorkflow(operation){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
+        const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
+        this.opsResult=await this.api("POST","/api/ops/workflows/"+workflow.id+"/execute",{execution_token,operation});
+        if(operation==="import") await this.loadProjects();
+      },
+      async submitFoundFlags(){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
+        const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
+        const flags=await this.api("GET","/api/flags");
+        const candidates=flags.filter(item=>item.external_id&&item.flag);
+        if(!candidates.length){ this.flash("no imported project has a flag yet"); return; }
+        const results=[];
+        for(const item of candidates){
+          try{
+            results.push(await this.api("POST","/api/ops/workflows/"+workflow.id+"/execute",{execution_token,operation:"submit",project_id:item.project_id}));
+          }catch(error){ results.push({external_id:item.external_id,accepted:false,error:"submission failed"}); }
+        }
+        this.opsResult={operation:"submit_found_flags",results};
+      },
+      async revokeOpsWorkflow(){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
+        const updated=await this.api("POST","/api/ops/workflows/"+workflow.id+"/revoke");
+        const tokens={...this.workflowTokens}; delete tokens[workflow.id]; this.workflowTokens=tokens;
+        this.opsWorkflows=this.opsWorkflows.map(item=>item.id===workflow.id?updated:item);
+        this.opsResult=null; this.flash("workflow revoked");
+      },
+
+      async openIPCConfig(){
+        this.cfg=await this.api("GET","/config");
+        try{ this.opsCfg=await this.api("GET","/api/ops/config"); }catch(error){ this.opsCfg=null; }
+        this.health={}; this._edits={}; this._removedMembers=[]; this.showIPC=true;
+      },
+      escapeAttr(value){ return String(value??"").replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;"); },
       llmFields(name, obj){
-        const fmt=["mock","openai","claudecode","deepseek","pi"].map(f=>`<option value="${f}" ${obj.api_format===f?"selected":""}>${f}</option>`).join("");
+        const fmt=["mock","openai","anthropic","claudecode","deepseek","pi"].map(f=>`<option value="${f}" ${obj.api_format===f?"selected":""}>${f}</option>`).join("");
+        const surface=["auto","chat_completions","responses"].map(f=>`<option value="${f}" ${(obj.api_surface||"auto")===f?"selected":""}>${f}</option>`).join("");
+        const reasoning=["auto","none","minimal","low","medium","high","xhigh","max"].map(f=>`<option value="${f}" ${(obj.reasoning_effort||"auto")===f?"selected":""}>${f}</option>`).join("");
         return `<div class="grid grid-cols-2 gap-2 text-xs text-slate-500">
           <label>Format<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_format',this.value)">${fmt}</select></label>
-          <label>Model<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${obj.model||''}" oninput="window._ipc.setField('${name}','model',this.value)"/></label>
-          <label class="col-span-2">Base URL<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${obj.base_url||''}" oninput="window._ipc.setField('${name}','base_url',this.value)"/></label>
-          <label class="col-span-2">API Key <span class="text-slate-400">(${obj.api_key_set?'set: '+obj.api_key_preview:'unset'})</span>
+          <label>Model<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${this.escapeAttr(obj.model||'')}" oninput="window._ipc.setField('${name}','model',this.value)"/></label>
+          <label title="OpenAI-compatible APIs only">API surface<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_surface',this.value)">${surface}</select></label>
+          <label title="Use auto unless a reasoning model needs an explicit effort">Reasoning<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','reasoning_effort',this.value)">${reasoning}</select></label>
+          <label class="col-span-2">Base URL<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${this.escapeAttr(obj.base_url||'')}" oninput="window._ipc.setField('${name}','base_url',this.value)"/></label>
+          <label class="col-span-2">API Key <span class="text-slate-400">(${obj.api_key_set?'set: '+this.escapeAttr(obj.api_key_preview):'unset'})</span>
             <input type="password" class="w-full rounded-lg px-2 py-1 mt-0.5" placeholder="leave blank to keep" oninput="window._ipc.setField('${name}','api_key',this.value)"/></label>
         </div>`;
       },
       _edits: {},
       setField(name, field, value){ (this._edits[name]=this._edits[name]||{})[field]=value; },
+      addMember(){
+        const name=this.newMemberName.trim().toLowerCase();
+        if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)){ this.flash("invalid member name"); return; }
+        if(["diamond","ops_agent"].includes(name)||this.cfg.members.some(member=>member.name===name)){ this.flash("member already exists"); return; }
+        const member={name,api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key_set:false,api_key_preview:"",base_url:"",model:"",configured:false};
+        this.cfg.members.push(member);
+        this._edits[name]={api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key:"",base_url:"",model:""};
+        this._removedMembers=this._removedMembers.filter(item=>item!==name);
+        this.newMemberName="";
+      },
+      removeMember(name){
+        this.cfg.members=this.cfg.members.filter(member=>member.name!==name);
+        delete this._edits[name];
+        if(!this._removedMembers.includes(name)) this._removedMembers.push(name);
+      },
       async saveIPC(){
         const body={}; if(this._edits.diamond) body.diamond=this._edits.diamond;
-        const members={}; for(const k in this._edits){ if(k!=="diamond") members[k]=this._edits[k]; }
+        const members={}; for(const k in this._edits){ if(!["diamond","ops_agent"].includes(k)) members[k]=this._edits[k]; }
         if(Object.keys(members).length) body.members=members;
-        this.cfg=await this.api("PUT","/config",body); this._edits={}; this.flash("config saved");
+        if(this._removedMembers.length) body.remove_members=[...this._removedMembers];
+        if(this.cfg.runtime) body.runtime={zap_enabled:!!this.cfg.runtime.zap_enabled};
+        this.cfg=await this.api("PUT","/config",body);
+        if(this._edits.ops_agent) this.opsCfg=await this.api("PUT","/api/ops/config",this._edits.ops_agent);
+        this._edits={}; this._removedMembers=[]; this.flash("config saved");
       },
-      async runHealth(){ const r=await this.api("POST","/config/health"); this.health=r.results; this.flash("health checked"); },
+      async runHealth(){
+        const result=await this.api("POST","/config/health"); this.health=result.results;
+        if(this.opsCfg?.configured){
+          try{ this.health={...this.health,ops_agent:await this.api("POST","/api/ops/config/health")}; }
+          catch(error){ this.health={...this.health,ops_agent:{ok:false}}; }
+        }
+        this.flash("health checked");
+      },
 
       async openMemory(){
         this.memories=await this.api("GET","/memory");

@@ -95,6 +95,8 @@ class ProjectMeta(BaseModel):
     flag: str | None = None
     wp_path: str | None = None
     log_filename: str | None = None
+    runtime_phase: str = "idle"
+    runtime_error: str | None = None
     created_at: str
     updated_at: str
     reason: ProjectReason | None = None

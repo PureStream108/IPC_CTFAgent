@@ -273,6 +273,25 @@ def test_task_sandbox_clears_container_on_start_failure(monkeypatch):
     assert sb._container is None
 
 
+def test_task_sandbox_reports_missing_task_image(monkeypatch):
+    from docker.errors import ImageNotFound, NotFound
+
+    class FakeContainers:
+        def get(self, name):
+            raise NotFound("missing container")
+
+        def run(self, **kwargs):
+            raise ImageNotFound("missing image")
+
+    client = types.SimpleNamespace(containers=FakeContainers())
+    sandbox = task_sandbox.TaskSandbox(project_id="missing", image="ipc-task:latest")
+    monkeypatch.setattr(sandbox, "_docker", lambda: client)
+    monkeypatch.setattr(sandbox, "_shared_network_name", lambda: None)
+
+    with pytest.raises(RuntimeError, match="build the ipc-task-image service first"):
+        sandbox.start()
+
+
 def test_task_sandbox_initializes_shared_workspace_and_copies_attachments(tmp_path, monkeypatch):
     from docker.errors import NotFound
 

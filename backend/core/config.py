@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,10 +13,15 @@ Category = Literal["pwn", "reverse", "crypto", "web", "misc", "ai", "osint"]
 CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
 
 # Supported LLM wire formats. base_url is always user-provided.
-ApiFormat = Literal["openai", "claudecode", "deepseek", "pi", "mock"]
+# ``anthropic`` is the raw Messages API; ``claudecode`` keeps the separate
+# Claude Code action runtime used by IPC.
+ApiFormat = Literal["openai", "anthropic", "claudecode", "deepseek", "pi", "mock"]
+ApiSurface = Literal["auto", "chat_completions", "responses"]
+ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # Default member names. These are worker identities, not different roles.
 MEMBER_NAMES: tuple[str, ...] = ("aventurine", "pearl", "jade", "topaz")
+MEMBER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
@@ -29,6 +35,13 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     base_url: str = ""
     model: str = ""
+    # OpenAI-compatible providers vary in which generation endpoint they
+    # implement.  ``auto`` negotiates and caches a working endpoint, while the
+    # explicit values are useful for strict gateways and future model families.
+    api_surface: ApiSurface = "auto"
+    # Kept provider-neutral in configuration.  Adapters translate this to
+    # ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat).
+    reasoning_effort: ReasoningEffort = "auto"
 
     @property
     def configured(self) -> bool:
@@ -40,6 +53,17 @@ class LLMConfig(BaseModel):
 
 class MemberConfig(LLMConfig):
     name: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        name = value.strip().lower()
+        if name and not MEMBER_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                "member name must start with a letter and contain only lowercase letters, "
+                "numbers, underscores, or hyphens (max 32 characters)"
+            )
+        return name
 
 
 class LimitsConfig(BaseModel):
@@ -66,6 +90,7 @@ class RuntimeConfig(BaseModel):
     sandbox_backend: Literal["local", "docker"] = "docker"
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
+    zap_enabled: bool = False
 
 
 class AppConfig(BaseModel):
@@ -84,7 +109,6 @@ class AppConfig(BaseModel):
         for idx, m in enumerate(members):
             if not m.name:
                 m.name = MEMBER_NAMES[idx] if idx < len(MEMBER_NAMES) else f"member{idx}"
-            m.name = m.name.strip().lower()
         names = [m.name for m in members]
         if len(set(names)) != len(names):
             raise ValueError("member names must be unique")
@@ -156,6 +180,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     env_log = os.environ.get("IPC_LOG_ENABLED")
     if env_log is not None:
         cfg.log_enabled = env_log.strip().lower() in ("1", "true", "yes", "on")
+    env_zap = os.environ.get("IPC_ZAP_ENABLED")
+    if env_zap is not None and env_zap.strip():
+        cfg.runtime.zap_enabled = env_zap.strip().lower() in ("1", "true", "yes", "on")
     return cfg
 
 

@@ -5,7 +5,7 @@ import pytest
 
 from backend.blackboard import graph_store
 from backend.server.app import create_app
-from tests.helpers import write_mock_config
+from tests.helpers import setup_test_auth, write_mock_config
 
 
 @pytest.fixture
@@ -14,6 +14,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("IPC_ROOT", str(tmp_path))
     app = create_app(root=tmp_path)
     with TestClient(app) as test_client:
+        setup_test_auth(test_client)
         test_client.app.state.ipc.config_dir = config_dir
         test_client.app.state.ipc.reload_config()
         yield test_client

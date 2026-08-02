@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from backend.core.config import LLMConfig
 from backend.members.adapters import BaseAdapter, MemberAction
 
@@ -12,6 +14,23 @@ class MockAdapter(BaseAdapter):
 
     def health(self) -> dict:
         return {"ok": True, "status": 200, "format": "mock"}
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+    ) -> str:
+        latest = messages[-1]["content"] if messages else ""
+        return json.dumps(
+            {
+                "reply": f"Mock Ops Agent received: {latest}",
+                "workflow": None,
+            },
+            ensure_ascii=False,
+        )
 
     def decide(self, context: dict) -> MemberAction:
         if self._script is not None:

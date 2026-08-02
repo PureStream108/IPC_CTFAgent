@@ -3,6 +3,15 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+TEST_ADMIN_PASSWORD = "test administrator password"
+
+
+def setup_test_auth(client: TestClient) -> None:
+    response = client.post("/auth/setup", json={"password": TEST_ADMIN_PASSWORD})
+    assert response.status_code == 201, response.text
+
 
 def write_mock_config(config_dir: Path) -> Path:
     """Create a hermetic mock config directory for tests."""

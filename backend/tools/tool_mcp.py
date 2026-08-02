@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from typing import Any, Callable, Collection
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.tools.tool_registry import ToolRegistry
@@ -10,6 +10,7 @@ from backend.tools.tool_registry import ToolRegistry
 def build_tool_search_mcp(
     registry: ToolRegistry,
     *,
+    available_mcps: Collection[str] | None = None,
     lifespan: Callable | None = None,
 ) -> MCPServer:
     server = create_mcp_server(
@@ -26,7 +27,12 @@ def build_tool_search_mcp(
         ),
     )
     async def tool_search(query: str, limit: int = 8) -> list[dict[str, Any]]:
-        tools = await asyncio.to_thread(registry.search, query, limit=limit)
+        tools = await asyncio.to_thread(
+            registry.search,
+            query,
+            limit=limit,
+            available_mcps=available_mcps,
+        )
         return [t.to_dict() for t in tools]
 
     return server
@@ -36,6 +42,7 @@ def build_category_tools_mcp(
     registry: ToolRegistry,
     category: str,
     *,
+    available_mcps: Collection[str] | None = None,
     lifespan: Callable | None = None,
 ) -> MCPServer:
     server = create_mcp_server(
@@ -43,7 +50,7 @@ def build_category_tools_mcp(
         f"Tools exposed for a {category} challenge plus how to invoke them",
         lifespan=lifespan,
     )
-    exposed = registry.exposed_for(category)
+    exposed = registry.exposed_for(category, available_mcps=available_mcps)
 
     @server.tool(
         name="list_tools",
@@ -57,7 +64,7 @@ def build_category_tools_mcp(
         description="Get the invocation command + path for a named tool.",
     )
     async def get_tool(name: str) -> dict[str, Any]:
-        tool = registry.get(name)
+        tool = registry.get(name, available_mcps=available_mcps)
         if tool is None:
             return {"error": f"no tool named {name}"}
         return {"name": tool.name, "exec": tool.exec, "path": tool.path, "when_to_use": tool.when_to_use}

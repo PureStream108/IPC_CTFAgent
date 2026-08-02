@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG GITHUB_MIRROR=https://github.com
 
 RUN set -eux; \
     cp /etc/apt/sources.list /etc/apt/sources.list.orig; \
@@ -102,7 +103,8 @@ RUN set -eux; \
     && chmod +x /usr/local/bin/cado-nfs
 
 # radare2 is not consistently available from Ubuntu 22.04 apt repos.
-RUN git clone --depth=1 https://github.com/radareorg/radare2 /tmp/r2 \
+RUN git config --global url."${GITHUB_MIRROR}/".insteadOf "https://github.com/" \
+    && git clone --depth=1 ${GITHUB_MIRROR}/radareorg/radare2 /tmp/r2 \
     && cd /tmp/r2 && bash sys/install.sh --install \
     && ldconfig \
     && rm -rf /tmp/r2
@@ -125,21 +127,21 @@ RUN pip3 install --no-cache-dir \
 # Extra CTF tools. These are intentionally cloned here instead of copied from
 # IPC_CTFAgent/tools, so Docker builds do not upload the local tools directory.
 RUN mkdir -p /opt/ipc-tools/tools \
-    && git clone --depth=1 https://github.com/sqlmapproject/sqlmap.git /opt/ipc-tools/tools/sqlmap/sqlmapproject-sqlmap-03be590 \
-    && git clone --depth=1 https://github.com/maurosoria/dirsearch.git /opt/ipc-tools/tools/dirsearch/dirsearch \
-    && git clone --depth=1 https://github.com/commixproject/commix.git /opt/ipc-tools/tools/commix \
-    && git clone --depth=1 https://github.com/Ekultek/WhatWaf.git /opt/ipc-tools/tools/WhatWaf \
-    && git clone --depth=1 https://github.com/Marven11/Fenjing.git /opt/ipc-tools/tools/Fenjing \
+    && git clone --depth=1 ${GITHUB_MIRROR}/sqlmapproject/sqlmap.git /opt/ipc-tools/tools/sqlmap/sqlmapproject-sqlmap-03be590 \
+    && git clone --depth=1 ${GITHUB_MIRROR}/maurosoria/dirsearch.git /opt/ipc-tools/tools/dirsearch/dirsearch \
+    && git clone --depth=1 ${GITHUB_MIRROR}/commixproject/commix.git /opt/ipc-tools/tools/commix \
+    && git clone --depth=1 ${GITHUB_MIRROR}/Ekultek/WhatWaf.git /opt/ipc-tools/tools/WhatWaf \
+    && git clone --depth=1 ${GITHUB_MIRROR}/Marven11/Fenjing.git /opt/ipc-tools/tools/Fenjing \
     && mkdir -p /opt/ipc-tools/tools/RSASIGN /opt/ipc-tools/tools/shiro550 \
-    && git clone --depth=1 --branch release https://github.com/silentsignal/rsa_sign2n.git /opt/ipc-tools/tools/RSASIGN/rsa_sign2n-release \
-    && git clone --depth=1 https://github.com/WiIs0n/Flask-cookie-generation-based-on-PIN-code.git /opt/ipc-tools/tools/Flask-cookie-generation-based-on-PIN-code-main \
-    && git clone --depth=1 https://github.com/noraj/flask-session-cookie-manager.git /opt/ipc-tools/tools/flask-session-cookie/flask-session-cookie-manager-master \
-    && git clone --depth=1 https://github.com/synacktiv/php_filter_chain_generator.git /opt/ipc-tools/tools/Php_chain/php_filter_chain_generator \
-    && git clone --depth=1 https://github.com/chishaxie/BlindWaterMark.git /opt/ipc-tools/tools/BlindWaterMark \
-    && git clone --depth=1 https://github.com/X1r0z/JNDIMap.git /opt/ipc-tools/tools/JNDIMap/JNDIMap-main \
-    && git clone --depth=1 https://github.com/frohoff/ysoserial.git /opt/ipc-tools/tools/ysoserial-master \
-    && git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool.git /opt/RsaCtfTool \
-    && wget -q -O /opt/ipc-tools/tools/shiro550/shiro_attack-5.1.1-zulu-8-jfx.jar https://github.com/SummerSec/ShiroAttack2/releases/download/v5.1.1/shiro_attack-5.1.1-zulu-8-jfx.jar \
+    && git clone --depth=1 --branch release ${GITHUB_MIRROR}/silentsignal/rsa_sign2n.git /opt/ipc-tools/tools/RSASIGN/rsa_sign2n-release \
+    && git clone --depth=1 ${GITHUB_MIRROR}/WiIs0n/Flask-cookie-generation-based-on-PIN-code.git /opt/ipc-tools/tools/Flask-cookie-generation-based-on-PIN-code-main \
+    && git clone --depth=1 ${GITHUB_MIRROR}/noraj/flask-session-cookie-manager.git /opt/ipc-tools/tools/flask-session-cookie/flask-session-cookie-manager-master \
+    && git clone --depth=1 ${GITHUB_MIRROR}/synacktiv/php_filter_chain_generator.git /opt/ipc-tools/tools/Php_chain/php_filter_chain_generator \
+    && git clone --depth=1 ${GITHUB_MIRROR}/chishaxie/BlindWaterMark.git /opt/ipc-tools/tools/BlindWaterMark \
+    && git clone --depth=1 ${GITHUB_MIRROR}/X1r0z/JNDIMap.git /opt/ipc-tools/tools/JNDIMap/JNDIMap-main \
+    && git clone --depth=1 ${GITHUB_MIRROR}/frohoff/ysoserial.git /opt/ipc-tools/tools/ysoserial-master \
+    && git clone --depth=1 ${GITHUB_MIRROR}/RsaCtfTool/RsaCtfTool.git /opt/RsaCtfTool \
+    && wget -q -O /opt/ipc-tools/tools/shiro550/shiro_attack-5.1.1-zulu-8-jfx.jar ${GITHUB_MIRROR}/SummerSec/ShiroAttack2/releases/download/v5.1.1/shiro_attack-5.1.1-zulu-8-jfx.jar \
     && (pip3 install --no-cache-dir /opt/ipc-tools/tools/Fenjing /opt/RsaCtfTool || true) \
     && (pip3 install --no-cache-dir -r /opt/ipc-tools/tools/dirsearch/dirsearch/requirements.txt || true) \
     && gem install --no-document one_gadget \
@@ -169,10 +171,18 @@ ENV PATH="/opt/java21/bin:${PATH}"
 ARG GHIDRA_VERSION=12.1.2
 ARG GHIDRA_DATE=20260605
 ARG GHIDRA_TAG=Ghidra_12.1.2_build
-ARG GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
+ARG GHIDRA_URL=${GITHUB_MIRROR}/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
+ARG GHIDRA_DIRECT_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
 ARG GHIDRA_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
-RUN wget -qO /tmp/ghidra.zip "${GHIDRA_URL}" \
-    && echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
+RUN set -eux; \
+    downloaded=0; \
+    for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"; do \
+        rm -f /tmp/ghidra.zip; \
+        if wget --timeout=30 --tries=3 -O /tmp/ghidra.zip "${url}"; then downloaded=1; break; fi; \
+    done; \
+    test "${downloaded}" = 1; \
+    test -s /tmp/ghidra.zip; \
+    echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
     && unzip -q /tmp/ghidra.zip -d /opt \
     && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
     && rm -f /tmp/ghidra.zip \
@@ -185,7 +195,7 @@ RUN wget -qO /tmp/ghidra.zip "${GHIDRA_URL}" \
 # silently produce empty UNKNOWN wheels, so use an explicit build toolchain.
 RUN pip3 install --no-cache-dir --upgrade "setuptools>=68" "packaging>=24" wheel \
     && pip3 install --no-cache-dir --no-build-isolation \
-        "git+https://github.com/radareorg/radare2-r2pipe.git@d87a5759b1c1a522f0f7e59baa938f80415fd038#subdirectory=python"
+        "git+${GITHUB_MIRROR}/radareorg/radare2-r2pipe.git@d87a5759b1c1a522f0f7e59baa938f80415fd038#subdirectory=python"
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 ENV IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
 

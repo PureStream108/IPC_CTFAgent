@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
@@ -47,12 +48,21 @@ class PlatformAdapter(ABC):
 
 
 class HttpJsonAdapter(PlatformAdapter):
-    def __init__(self, mapping: FieldMapping, *, timeout: float = 30) -> None:
+    def __init__(
+        self,
+        mapping: FieldMapping,
+        *,
+        timeout: float = 30,
+        request_get: Callable[..., Any] | None = None,
+        max_attachment_bytes: int | None = None,
+    ) -> None:
         self.mapping = mapping
         self.timeout = timeout
+        self._request_get = request_get or requests.get
+        self.max_attachment_bytes = max_attachment_bytes
 
     def fetch_challenges(self) -> list[PlatformChallenge]:
-        response = requests.get(
+        response = self._request_get(
             self.mapping.list_url,
             headers=self.mapping.headers,
             timeout=self.timeout,
@@ -112,16 +122,27 @@ class HttpJsonAdapter(PlatformAdapter):
                 fallback=f"attachment-{index}",
             )
             target = destination / filename
-            response = requests.get(
+            response = self._request_get(
                 url,
                 headers=self.mapping.headers,
                 timeout=self.timeout,
                 stream=True,
             )
             response.raise_for_status()
-            with target.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
+            written = 0
+            try:
+                with target.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if self.max_attachment_bytes is not None and written > self.max_attachment_bytes:
+                            raise ValueError(
+                                f"attachment exceeds {self.max_attachment_bytes} byte limit: {url}"
+                            )
                         handle.write(chunk)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
             downloaded.append(target)
         return downloaded

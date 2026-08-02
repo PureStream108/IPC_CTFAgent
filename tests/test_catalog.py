@@ -13,7 +13,7 @@ from backend.memory.memory_store import MemoryStore
 from backend.server.app import create_app
 from backend.tools.catalog import CATALOG_DOCS_PATH, CatalogEntry, ToolCatalog
 from backend.tools.tool_registry import LANGUAGES, ToolRegistry
-from tests.helpers import write_mock_config
+from tests.helpers import setup_test_auth, write_mock_config
 
 
 def _call_tool(server, name: str, **arguments):
@@ -155,6 +155,7 @@ def test_catalog_web_api_and_path_traversal(tmp_path, monkeypatch):
     monkeypatch.setenv("IPC_ROOT", str(tmp_path))
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
+        setup_test_auth(client)
         tree = client.get("/memory/catalog")
         assert tree.status_code == 200
         assert len(tree.json()["children"]) == 4
