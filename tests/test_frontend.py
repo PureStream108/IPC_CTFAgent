@@ -53,6 +53,9 @@ def test_index_served(client):
     assert "confirmOpsWorkflow" in body
     assert "submitFoundFlags" in body
     assert "addMember" in body
+    assert "API surface" in body
+    assert "chat_completions" in body
+    assert "anthropic" in body
     assert "cfg.runtime.zap_enabled" in body
     assert "工具目录" in body
     assert "经验记忆" in body

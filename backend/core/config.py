@@ -13,7 +13,11 @@ Category = Literal["pwn", "reverse", "crypto", "web", "misc", "ai", "osint"]
 CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
 
 # Supported LLM wire formats. base_url is always user-provided.
-ApiFormat = Literal["openai", "claudecode", "deepseek", "pi", "mock"]
+# ``anthropic`` is the raw Messages API; ``claudecode`` keeps the separate
+# Claude Code action runtime used by IPC.
+ApiFormat = Literal["openai", "anthropic", "claudecode", "deepseek", "pi", "mock"]
+ApiSurface = Literal["auto", "chat_completions", "responses"]
+ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 # Default member names. These are worker identities, not different roles.
 MEMBER_NAMES: tuple[str, ...] = ("aventurine", "pearl", "jade", "topaz")
@@ -31,6 +35,13 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     base_url: str = ""
     model: str = ""
+    # OpenAI-compatible providers vary in which generation endpoint they
+    # implement.  ``auto`` negotiates and caches a working endpoint, while the
+    # explicit values are useful for strict gateways and future model families.
+    api_surface: ApiSurface = "auto"
+    # Kept provider-neutral in configuration.  Adapters translate this to
+    # ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat).
+    reasoning_effort: ReasoningEffort = "auto"
 
     @property
     def configured(self) -> bool:

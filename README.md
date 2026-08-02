@@ -164,6 +164,8 @@ log_enabled: true
 
 diamond:
   api_format: openai
+  api_surface: auto
+  reasoning_effort: auto
   api_key: sk-...
   base_url: https://your-endpoint.example/v1
   model: your-model
@@ -171,6 +173,8 @@ diamond:
 members:
   - name: aventurine
     api_format: openai
+    api_surface: auto
+    reasoning_effort: auto
     api_key: sk-...
     base_url: https://your-endpoint.example/v1
     model: your-model
@@ -191,6 +195,8 @@ limits:
   max_concurrent_tasks: 5
   network: true
 ```
+
+`api_surface: auto` 会在 OpenAI-compatible Chat Completions 与 Responses 之间选择并缓存可用协议；也可显式固定为 `chat_completions` 或 `responses`。`reasoning_effort` 默认 `auto`，需要固定推理预算时可设置为 `none`、`low`、`medium`、`high`、`xhigh` 或 `max`。原生 Anthropic Messages API 使用 `api_format: anthropic`，Claude Code 行动运行时仍使用 `api_format: claudecode`。
 
 支持的 `api_format` 包括 `openai`、`claudecode`、`deepseek`、`pi` 和 `mock`。未显式填写模型时，默认值来自 [backend/config/models.yaml](backend/config/models.yaml)，不要在测试或文档中硬编码某个历史默认模型。
 

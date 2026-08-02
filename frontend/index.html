@@ -1742,10 +1742,14 @@
       },
       escapeAttr(value){ return String(value??"").replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;"); },
       llmFields(name, obj){
-        const fmt=["mock","openai","claudecode","deepseek","pi"].map(f=>`<option value="${f}" ${obj.api_format===f?"selected":""}>${f}</option>`).join("");
+        const fmt=["mock","openai","anthropic","claudecode","deepseek","pi"].map(f=>`<option value="${f}" ${obj.api_format===f?"selected":""}>${f}</option>`).join("");
+        const surface=["auto","chat_completions","responses"].map(f=>`<option value="${f}" ${(obj.api_surface||"auto")===f?"selected":""}>${f}</option>`).join("");
+        const reasoning=["auto","none","minimal","low","medium","high","xhigh","max"].map(f=>`<option value="${f}" ${(obj.reasoning_effort||"auto")===f?"selected":""}>${f}</option>`).join("");
         return `<div class="grid grid-cols-2 gap-2 text-xs text-slate-500">
           <label>Format<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_format',this.value)">${fmt}</select></label>
           <label>Model<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${this.escapeAttr(obj.model||'')}" oninput="window._ipc.setField('${name}','model',this.value)"/></label>
+          <label title="OpenAI-compatible APIs only">API surface<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_surface',this.value)">${surface}</select></label>
+          <label title="Use auto unless a reasoning model needs an explicit effort">Reasoning<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','reasoning_effort',this.value)">${reasoning}</select></label>
           <label class="col-span-2">Base URL<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${this.escapeAttr(obj.base_url||'')}" oninput="window._ipc.setField('${name}','base_url',this.value)"/></label>
           <label class="col-span-2">API Key <span class="text-slate-400">(${obj.api_key_set?'set: '+this.escapeAttr(obj.api_key_preview):'unset'})</span>
             <input type="password" class="w-full rounded-lg px-2 py-1 mt-0.5" placeholder="leave blank to keep" oninput="window._ipc.setField('${name}','api_key',this.value)"/></label>
@@ -1757,9 +1761,9 @@
         const name=this.newMemberName.trim().toLowerCase();
         if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)){ this.flash("invalid member name"); return; }
         if(["diamond","ops_agent"].includes(name)||this.cfg.members.some(member=>member.name===name)){ this.flash("member already exists"); return; }
-        const member={name,api_format:"openai",api_key_set:false,api_key_preview:"",base_url:"",model:"",configured:false};
+        const member={name,api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key_set:false,api_key_preview:"",base_url:"",model:"",configured:false};
         this.cfg.members.push(member);
-        this._edits[name]={api_format:"openai",api_key:"",base_url:"",model:""};
+        this._edits[name]={api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key:"",base_url:"",model:""};
         this._removedMembers=this._removedMembers.filter(item=>item!==name);
         this.newMemberName="";
       },

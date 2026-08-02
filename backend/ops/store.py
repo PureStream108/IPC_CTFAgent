@@ -134,6 +134,8 @@ class OpsStore:
             secret_data = self._read_secrets()
         data = {
             "api_format": public.get("api_format", "openai"),
+            "api_surface": public.get("api_surface", "auto"),
+            "reasoning_effort": public.get("reasoning_effort", "auto"),
             "base_url": public.get("base_url", ""),
             "model": public.get("model", ""),
             "api_key": secret_data.get("llm_api_key", ""),
@@ -144,6 +146,8 @@ class OpsStore:
         self,
         *,
         api_format: str | None = None,
+        api_surface: str | None = None,
+        reasoning_effort: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
@@ -152,6 +156,10 @@ class OpsStore:
         update: dict[str, Any] = {}
         if api_format is not None:
             update["api_format"] = api_format
+        if api_surface is not None:
+            update["api_surface"] = api_surface
+        if reasoning_effort is not None:
+            update["reasoning_effort"] = reasoning_effort
         if base_url is not None:
             update["base_url"] = base_url.strip()
         if model is not None:
@@ -165,6 +173,8 @@ class OpsStore:
                 self.config_path,
                 {
                     "api_format": validated.api_format,
+                    "api_surface": validated.api_surface,
+                    "reasoning_effort": validated.reasoning_effort,
                     "base_url": validated.base_url,
                     "model": validated.model,
                 },

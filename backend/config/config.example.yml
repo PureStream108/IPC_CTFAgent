@@ -1,26 +1,36 @@
 log_enabled: true
 diamond:
   api_format: deepseek
+  api_surface: auto
+  reasoning_effort: auto
   api_key: 
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
 members:
 - api_format: deepseek
+  api_surface: auto
+  reasoning_effort: auto
   api_key: 
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
   name: aventurine
 - api_format: deepseek
+  api_surface: auto
+  reasoning_effort: auto
   api_key: 
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
   name: pearl
 - api_format: deepseek
+  api_surface: auto
+  reasoning_effort: auto
   api_key: 
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
   name: jade
 - api_format: deepseek
+  api_surface: auto
+  reasoning_effort: auto
   api_key:
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash

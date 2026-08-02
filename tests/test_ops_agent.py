@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
@@ -865,6 +866,184 @@ def test_existing_openai_decide_does_not_gain_chat_only_max_tokens(monkeypatch):
     assert "thinking" not in captured
 
 
+def test_gpt_56_auto_uses_responses_structured_output(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "summary": []},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"action":"bash","command":"id"}',
+                            }
+                        ],
+                    },
+                ],
+                "usage": {
+                    "output_tokens": 42,
+                    "output_tokens_details": {"reasoning_tokens": 3},
+                },
+            }
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="openai",
+            api_key="key",
+            base_url="https://api.openai.com",
+            model="gpt-5.6",
+        )
+    )
+
+    action = adapter.decide({"step": 1})
+
+    assert action.kind == "bash"
+    assert calls[0][0] == "https://api.openai.com/v1/responses"
+    body = calls[0][1]["json"]
+    assert "input" in body and "messages" not in body
+    assert body["max_output_tokens"] == 4096
+    assert body["reasoning"] == {"effort": "none"}
+    assert body["text"]["format"]["type"] == "json_schema"
+    assert "temperature" not in body
+    assert adapter._last_response_meta["surface"] == "responses"
+    assert adapter._last_response_meta["reasoning_tokens"] == 3
+
+
+def test_gpt_56_auto_falls_back_to_chat_and_caches_surface(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs["json"]))
+        if url.endswith("/responses"):
+            return FakeResponse(404, {"error": {"message": "unknown endpoint"}})
+        return FakeResponse(
+            200,
+            {"choices": [{"finish_reason": "stop", "message": {"content": '{"action":"done","reason":"ok"}'}}]},
+        )
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="openai",
+            api_key="key",
+            base_url="https://gateway.invalid/v1",
+            model="gpt-5.6",
+        )
+    )
+
+    assert adapter.decide({"step": 1}).kind == "done"
+    assert adapter.decide({"step": 2}).kind == "done"
+
+    assert calls[0][0].endswith("/v1/responses")
+    assert calls[1][0].endswith("/v1/chat/completions")
+    assert calls[1][1]["max_completion_tokens"] == 4096
+    assert calls[1][1]["reasoning_effort"] == "none"
+    assert calls[2][0].endswith("/v1/chat/completions")
+    assert sum(url.endswith("/responses") for url, _ in calls) == 1
+
+
+def test_openai_structured_output_degrades_from_schema_to_json_mode(monkeypatch):
+    requests_seen = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, **kwargs):
+        requests_seen.append(kwargs["json"])
+        if len(requests_seen) == 1:
+            return FakeResponse(
+                400,
+                {"error": {"message": "response_format json_schema is not supported"}},
+            )
+        return FakeResponse(
+            200,
+            {"choices": [{"message": {"content": '{"action":"done","reason":"ok"}'}}]},
+        )
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="openai",
+            api_surface="chat_completions",
+            api_key="key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5.6",
+        )
+    )
+
+    assert adapter.decide({"step": 1}).kind == "done"
+    assert requests_seen[0]["response_format"]["type"] == "json_schema"
+    assert requests_seen[1]["response_format"] == {"type": "json_object"}
+
+
+def test_openai_does_not_retry_auth_or_rate_limit_errors(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        status_code = 401
+
+        def raise_for_status(self):
+            raise requests.HTTPError("HTTP 401", response=self)
+
+        def json(self):
+            return {"error": {"message": "invalid API key"}}
+
+    def fake_post(url, **kwargs):
+        nonlocal calls
+        calls += 1
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="openai",
+            api_key="secret-never-log",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5.6",
+        )
+    )
+
+    with pytest.raises(requests.HTTPError):
+        adapter.decide({"step": 1})
+    assert calls == 1
+
+
 def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
     requests_seen = []
     contents = iter(
@@ -960,7 +1139,7 @@ def test_decision_output_error_preserves_safe_response_diagnostics(monkeypatch):
 
 
 def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):
-    captured = {}
+    captured = {"json": {}, "headers": {}}
 
     class FakeResponse:
         def raise_for_status(self):
@@ -970,7 +1149,9 @@ def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):
             return {"content": [{"text": '{"action":"done","reason":"ok"}'}]}
 
     def fake_post(url, **kwargs):
-        captured.update(kwargs["json"])
+        captured["url"] = url
+        captured["json"].update(kwargs["json"])
+        captured["headers"].update(kwargs["headers"])
         return FakeResponse()
 
     monkeypatch.setattr("requests.post", fake_post)
@@ -983,5 +1164,40 @@ def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):
         )
     )
     assert adapter.decide({"step": 1}).kind == "done"
-    assert captured["max_tokens"] == 1024
-    assert "temperature" not in captured
+    assert captured["json"]["max_tokens"] == 1024
+    assert "temperature" not in captured["json"]
+    assert captured["headers"]["x-api-key"] == "key"
+    assert captured["url"] == "https://llm.invalid/v1/messages"
+
+
+def test_anthropic_adapter_joins_text_blocks_and_ignores_thinking(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "content": [
+                    {"type": "thinking", "thinking": "hidden"},
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"output_tokens": 2},
+            }
+
+    monkeypatch.setattr("requests.post", lambda url, **kwargs: FakeResponse())
+    adapter = ClaudeAdapter(
+        LLMConfig(
+            api_format="anthropic",
+            api_key="key",
+            base_url="https://anthropic.invalid/v1/messages",
+            model="claude-model",
+        )
+    )
+
+    assert adapter.chat([{"role": "user", "content": "hello"}]) == "first\nsecond"
+    assert adapter._last_response_meta["reasoning_present"] is True
+    assert adapter._last_response_meta["completion_tokens"] == 2

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from backend.api.deps import get_state
-from backend.core.config import ApiFormat, CATEGORIES, MemberConfig
+from backend.core.config import ApiFormat, ApiSurface, CATEGORIES, MemberConfig, ReasoningEffort
 from backend.core.state import AppState
 
 router = APIRouter(tags=["config"])
@@ -12,6 +12,8 @@ router = APIRouter(tags=["config"])
 
 class LLMUpdate(BaseModel):
     api_format: ApiFormat | None = None
+    api_surface: ApiSurface | None = None
+    reasoning_effort: ReasoningEffort | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
@@ -42,6 +44,8 @@ def _config_view(state: AppState) -> dict:
         "categories": list(CATEGORIES),
         "diamond": {
             "api_format": cfg.diamond.api_format,
+            "api_surface": cfg.diamond.api_surface,
+            "reasoning_effort": cfg.diamond.reasoning_effort,
             "api_key_set": bool(cfg.diamond.api_key),
             "api_key_preview": _redact(cfg.diamond.api_key),
             "base_url": cfg.diamond.base_url,
@@ -52,6 +56,8 @@ def _config_view(state: AppState) -> dict:
             {
                 "name": m.name,
                 "api_format": m.api_format,
+                "api_surface": m.api_surface,
+                "reasoning_effort": m.reasoning_effort,
                 "api_key_set": bool(m.api_key),
                 "api_key_preview": _redact(m.api_key),
                 "base_url": m.base_url,
@@ -109,6 +115,10 @@ def get_runtime_config(state: AppState = Depends(get_state)):
 def _apply(llm, upd: LLMUpdate) -> None:
     if upd.api_format is not None:
         llm.api_format = upd.api_format
+    if upd.api_surface is not None:
+        llm.api_surface = upd.api_surface
+    if upd.reasoning_effort is not None:
+        llm.reasoning_effort = upd.reasoning_effort
     if upd.api_key is not None:
         llm.api_key = upd.api_key
     if upd.base_url is not None:

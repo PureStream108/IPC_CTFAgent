@@ -23,6 +23,16 @@ def test_mock_is_always_configured():
     assert LLMConfig(api_format="openai", api_key="k", base_url="u").configured is True
 
 
+def test_llm_surface_and_reasoning_settings_are_validated():
+    cfg = LLMConfig(api_surface="responses", reasoning_effort="low")
+    assert cfg.api_surface == "responses"
+    assert cfg.reasoning_effort == "low"
+    with pytest.raises(Exception):
+        LLMConfig(api_surface="legacy-completions")
+    with pytest.raises(Exception):
+        LLMConfig(reasoning_effort="ultra")
+
+
 def test_diamond_without_creds_blocks_startup():
     cfg = AppConfig(
         diamond=LLMConfig(api_format="openai"),  # no creds
@@ -70,12 +80,16 @@ def test_save_and_reload_roundtrip(tmp_path: Path):
     cfg.diamond.api_format = "openai"
     cfg.diamond.api_key = "secret"
     cfg.diamond.base_url = "https://example.test/v1"
+    cfg.diamond.api_surface = "responses"
+    cfg.diamond.reasoning_effort = "low"
     out_dir = tmp_path / "saved"
     save_config(cfg, out_dir)
     reloaded = load_config(out_dir)
     assert reloaded.diamond.api_key == "secret"
     assert reloaded.diamond.base_url == "https://example.test/v1"
     assert reloaded.diamond.api_format == "openai"
+    assert reloaded.diamond.api_surface == "responses"
+    assert reloaded.diamond.reasoning_effort == "low"
 
 
 def test_models_yaml_fills_empty_model(tmp_path: Path):

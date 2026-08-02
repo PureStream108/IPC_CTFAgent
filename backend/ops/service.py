@@ -141,6 +141,8 @@ class OpsAgentService:
         config = self.store.load_llm_config()
         return {
             "api_format": config.api_format,
+            "api_surface": config.api_surface,
+            "reasoning_effort": config.reasoning_effort,
             "api_key_set": bool(config.api_key),
             "api_key_preview": _redact(config.api_key),
             "base_url": config.base_url,

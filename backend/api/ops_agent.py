@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.api.deps import get_state
-from backend.core.config import ApiFormat
+from backend.core.config import ApiFormat, ApiSurface, ReasoningEffort
 from backend.core.state import AppState
 from backend.ops.network import NetworkPolicyError
 from backend.ops.service import (
@@ -28,6 +28,8 @@ class OpsConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_format: ApiFormat | None = None
+    api_surface: ApiSurface | None = None
+    reasoning_effort: ReasoningEffort | None = None
     api_key: str | None = Field(default=None, max_length=16_384)
     base_url: str | None = Field(default=None, max_length=2048)
     model: str | None = Field(default=None, max_length=256)
