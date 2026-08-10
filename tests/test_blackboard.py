@@ -8,7 +8,7 @@ from backend.blackboard.db import Database
 
 @pytest.fixture
 def db(tmp_path):
-    database = Database(tmp_path / "graph.db").configure()
+    database = Database().configure()
     return database
 
 
@@ -31,12 +31,21 @@ def test_intent_lifecycle_claim_conclude(db):
         pid = graph_store.create_project(conn, "T", "o", "g", "pwn")
         intent = edge_store.create_intent(conn, pid, ["origin"], "explore web", "diamond")
         assert intent.worker is None and intent.to is None
-        edge_store.claim_intent(conn, pid, intent.id, "aventurine")
+        token = edge_store.claim_intent(conn, pid, intent.id, "aventurine")
+        assert token
     with db.connect() as conn:
         row = edge_store.get_intent(conn, pid, intent.id)
         assert row["worker"] == "aventurine"
         fact = node_store.create_fact(conn, pid, "found a clue")
-        edge_store.conclude_intent(conn, pid, intent.id, "aventurine", fact.id)
+        assert edge_store.conclude_intent(
+            conn,
+            pid,
+            intent.id,
+            "aventurine",
+            fact.id,
+            lease_owner="aventurine",
+            lease_token=token,
+        )
     with db.connect() as conn:
         model = edge_store.intent_to_model(conn, edge_store.get_intent(conn, pid, intent.id), pid)
         assert model.to == fact.id
@@ -59,7 +68,7 @@ def test_expire_workers_releases_stale_claims(db):
         intent = edge_store.create_intent(conn, pid, ["origin"], "x", "diamond", worker="pearl")
         # backdate heartbeat
         conn.execute(
-            "UPDATE intents SET last_heartbeat_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+            "UPDATE intents SET last_heartbeat_at = '2000-01-01T00:00:00Z' WHERE id = %s",
             (intent.id,),
         )
         edge_store.expire_workers(conn, timeout=30, project_id=pid)
@@ -110,35 +119,15 @@ def test_broadcast(db):
     assert bs[0].title == "Pwnme"
 
 
-def test_database_migrates_external_id_column(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.execute(
-        """
-        CREATE TABLE projects (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            category TEXT NOT NULL DEFAULT 'misc',
-            status TEXT NOT NULL DEFAULT 'created',
-            flag TEXT,
-            wp_path TEXT,
-            log_filename TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            reason_worker TEXT,
-            reason_trigger TEXT,
-            reason_started_at TEXT,
-            reason_last_heartbeat_at TEXT
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    database = Database(path).configure()
-
-    with database.connect() as migrated:
-        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(projects)")}
-    assert "external_id" in columns
+def test_database_bootstrap_exposes_external_id_and_lease_columns(db):
+    with db.connect() as connection:
+        columns = {
+            row["column_name"]
+            for row in connection.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'projects'
+                """
+            )
+        }
+    assert {"external_id", "lease_owner", "lease_token", "flag_verified_at"} <= columns

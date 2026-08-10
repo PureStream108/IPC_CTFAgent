@@ -17,9 +17,15 @@ def _health(args) -> int:
     from backend.members.adapters import health_check
 
     cfg = load_config()
-    print("Diamond:", health_check(cfg.diamond))
+    if cfg.diamond.configured:
+        print("Diamond:", health_check(cfg.diamond))
+    else:
+        print("Diamond: skipped (API key/base URL not configured)")
     for m in cfg.members:
-        print(f"{m.name}:", health_check(m))
+        if m.configured:
+            print(f"{m.name}:", health_check(m))
+        else:
+            print(f"{m.name}: skipped (API key/base URL not configured)")
     return 0
 
 

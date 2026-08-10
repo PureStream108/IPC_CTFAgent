@@ -12,6 +12,8 @@ from backend.blackboard.models import (
     ReportRequest,
 )
 from backend.core.state import AppState
+from backend.core.ipc import FlagConflictError, accept_verified_flag
+from backend.core.postprocess_store import enqueue_postprocess
 
 router = APIRouter(tags=["solve"])
 
@@ -22,8 +24,8 @@ def start_solving(project_id: str, state: AppState = Depends(get_state)):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] in ("completed",):
-            raise HTTPException(409, "Project already completed")
+        if row["status"] == "solved":
+            raise HTTPException(409, "Project already solved")
     errors = state.config.startup_errors()
     if errors:
         raise HTTPException(400, "; ".join(errors))
@@ -41,13 +43,9 @@ def reopen_project(project_id: str, state: AppState = Depends(get_state)):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] != "completed":
-            raise HTTPException(409, "Only completed projects can be reopened")
-        graph_store.set_status(conn, project_id, "stopped")
-        graph_store.set_runtime_phase(conn, project_id, "stopped")
-        graph_store.clear_reason(conn, project_id)
-    state.logger.project("reopened", project_id)
-    return {"status": "stopped", "project_id": project_id}
+        if row["status"] == "solved":
+            raise HTTPException(409, "Solved projects are immutable; create a new project to retry")
+        raise HTTPException(409, "Only terminal failed projects can be resumed")
 
 
 @router.post("/projects/{project_id}/stop")
@@ -56,11 +54,13 @@ def stop_solving(project_id: str, state: AppState = Depends(get_state)):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] == "completed":
-            raise HTTPException(409, "Completed projects cannot be stopped")
+        if row["status"] == "solved":
+            raise HTTPException(409, "Solved projects cannot be stopped")
         graph_store.set_status(conn, project_id, "stopped")
         conn.execute(
-            "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
+            "UPDATE intents SET worker = NULL, lease_owner = NULL, lease_token = NULL, "
+            "lease_expires_at = NULL, last_heartbeat_at = NULL "
+            "WHERE project_id = %s AND concluded_at IS NULL",
             (project_id,),
         )
         graph_store.clear_reason(conn, project_id)
@@ -75,7 +75,7 @@ def stop_all(state: AppState = Depends(get_state)):
     stopped = []
     with state.db.connect() as conn:
         rows = conn.execute(
-            "SELECT id FROM projects WHERE status NOT IN ('completed','stopped')"
+            "SELECT id FROM projects WHERE status NOT IN ('solved','stopped')"
         ).fetchall()
         ids = [r["id"] for r in rows]
     for pid in ids:
@@ -93,8 +93,10 @@ def resume_solving(project_id: str, state: AppState = Depends(get_state)):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
+        if row["status"] not in ("stopped", "timeout", "infra_error", "failed"):
+            raise HTTPException(409, "Only stopped or failed projects can resume")
         if row["status"] != "stopped":
-            raise HTTPException(409, "Only stopped projects can resume")
+            graph_store.set_status(conn, project_id, "stopped")
     errors = state.config.startup_errors()
     if errors:
         raise HTTPException(400, "; ".join(errors))
@@ -135,24 +137,32 @@ def complete_project(project_id: str, body: CompleteRequest, state: AppState = D
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] in ("completed",):
-            raise HTTPException(409, "Project already completed")
         for fid in body.from_:
             if not node_store.fact_exists(conn, project_id, fid):
                 raise HTTPException(404, f"Fact {fid} not found")
         if "goal" in body.from_:
             raise HTTPException(400, "goal cannot be used in from")
-        intent = edge_store.create_intent(conn, project_id, body.from_, body.description, body.worker, worker=body.worker)
-        # Point the intent's to_fact_id to 'goal' to mark completion.
-        conn.execute(
-            "UPDATE intents SET to_fact_id = 'goal', concluded_at = ? WHERE id = ? AND project_id = ?",
-            (intent.created_at, intent.id, project_id),
-        )
-        if body.flag:
-            graph_store.set_flag(conn, project_id, body.flag)
-        graph_store.set_status(conn, project_id, "flag_found")
-        graph_store.add_link(conn, project_id, f"fact:{body.from_[0]}", "flag", "flag")
-        intent_model = edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent.id), project_id)
+        if not body.flag:
+            raise HTTPException(400, "A flag is required to complete a project")
+        try:
+            intent = edge_store.complete_goal_intent(
+                conn, project_id, body.from_, body.description, body.worker, body.worker
+            )
+            accept_verified_flag(
+                conn,
+                project_id,
+                body.flag,
+                source=f"api:{body.worker}",
+            )
+            enqueue_postprocess(conn, project_id)
+            graph_store.add_link(conn, project_id, f"fact:{body.from_[0]}", "flag", "flag")
+            intent_model = edge_store.intent_to_model(
+                conn, edge_store.get_intent(conn, project_id, intent.id), project_id
+            )
+        except FlagConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     state.logger.project("flag_found", project_id, worker=body.worker, flag=body.flag)
     if state.orchestrator is not None:
         state.orchestrator.on_flag_found(project_id)

@@ -25,6 +25,9 @@ class ResourceManager:
     def sandbox_for(self, project_id: str, member: str, env: dict | None = None):
         return self.pool.get(project_id, member, env)
 
+    def preflight_project(self, project_id: str, env: dict | None = None) -> None:
+        self.pool.preflight(project_id, env)
+
     def release_project(self, project_id: str) -> None:
         self.pool.stop_project(project_id)
         self.limiter.release(project_id)

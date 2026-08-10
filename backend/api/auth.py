@@ -61,16 +61,11 @@ def _client_key(request: Request) -> str:
 
 @router.get("/status")
 def auth_status(request: Request, manager: AuthManager = Depends(get_auth_manager)) -> dict:
-    if manager.configuration_error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="authentication configuration is unavailable",
-        )
-    authenticated = manager.verify_session(request.cookies.get(SESSION_COOKIE_NAME))
+    # Authentication is intentionally disabled for the trusted Docker UI.
     return {
-        "setup_required": manager.setup_required,
-        "authenticated": authenticated,
-        "username": "admin" if authenticated else None,
+        "setup_required": False,
+        "authenticated": True,
+        "username": None,
     }
 
 

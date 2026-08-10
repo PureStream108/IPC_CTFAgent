@@ -121,7 +121,9 @@ def test_catalog_validation_rejects_duplicate_missing_and_broken_documents(tmp_p
 
 
 def test_catalog_mcp_search_browse_and_read(tmp_path):
-    store = MemoryStore(tmp_path / "memory.db").configure()
+    from backend.persistence.database import Database
+
+    store = MemoryStore(Database().configure()).configure()
     server = build_memory_mcp(store, catalog=ToolCatalog.load())
     try:
         for query, expected in (

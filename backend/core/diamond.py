@@ -6,7 +6,7 @@ from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.config import AppConfig, MemberConfig
 from backend.core.difficulty import extra_members_for_difficulty, normalize_difficulty
 from backend.core.logging_util import IPCLogger
-from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, write_wp
+from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, generate_wp_content, write_wp
 from backend.members.adapters import make_adapter
 
 BOOTSTRAP_DESC = "Bootstrap: Starting"
@@ -176,7 +176,7 @@ class Diamond:
             for kind in ("project", "tool", "llm", "memory")
         }
         generator = None
-        if self.config.diamond.api_format != "mock":
+        if self.config.diamond.configured and self.config.diamond.api_format != "mock":
             adapter = make_adapter(self.config.diamond, name="diamond")
 
             def generator(prompt: str) -> str:
@@ -196,6 +196,32 @@ class Diamond:
         )
         self.logger.project("diamond_wp_written", project_id, path=path)
         return path
+
+    def generate_wp_content(self, project_id: str) -> tuple[str, str]:
+        """Generate a final writeup while leaving persistence to a fenced caller."""
+
+        evidence_logs = {
+            kind: self.logger.read_log(kind, project_id, limit=160)
+            for kind in ("project", "tool", "llm", "memory")
+        }
+        generator = None
+        if self.config.diamond.configured and self.config.diamond.api_format != "mock":
+            adapter = make_adapter(self.config.diamond, name="diamond")
+
+            def generator(prompt: str) -> str:
+                return adapter.chat(
+                    [{"role": "user", "content": prompt}],
+                    system_prompt=WRITEUP_SYSTEM_PROMPT,
+                    temperature=0.1,
+                    max_tokens=8192,
+                )
+
+        return generate_wp_content(
+            self.db,
+            project_id,
+            generator=generator,
+            evidence_logs=evidence_logs,
+        )
 
     def draw_completion(self, project_id: str) -> None:
         """Draw the WP -> Diamond -> IPC return lines after flag (Seed.md 流程图)."""

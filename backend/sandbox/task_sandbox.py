@@ -9,6 +9,12 @@ import threading
 from pathlib import Path, PurePosixPath
 
 from backend.sandbox.docker_manager import _load_docker_sdk
+from backend.sandbox.errors import (
+    DockerConfigurationError,
+    DockerImageError,
+    SandboxStartupError,
+    classify_docker_startup_error,
+)
 from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
@@ -57,6 +63,8 @@ class TaskSandbox:
         self.attachments_dir = Path(attachments_dir) if attachments_dir is not None else None
         self._container = None
         self._client = None
+        self._sdk = None
+        self._preflight_complete = False
         self._container_name = task_container_name(project_id)
         self._shared_network: str | None = None
         self._lock = threading.RLock()
@@ -67,8 +75,32 @@ class TaskSandbox:
     def _docker(self):
         if self._client is None:
             docker = _load_docker_sdk()
-            self._client = docker.from_env()
+            try:
+                client = docker.from_env()
+            except Exception as exc:
+                raise classify_docker_startup_error(
+                    exc,
+                    "configure Docker client",
+                ) from exc
+            self._sdk = docker
+            self._client = client
+        if not self._preflight_complete:
+            ping = getattr(self._client, "ping", None)
+            if callable(ping):
+                try:
+                    ping()
+                except Exception as exc:
+                    raise classify_docker_startup_error(
+                        exc,
+                        "contact Docker daemon",
+                    ) from exc
+            self._preflight_complete = True
         return self._client
+
+    def preflight(self) -> None:
+        """Validate Docker configuration/socket/daemon before solver reasoning."""
+
+        self._docker()
 
     def _shared_network_name(self) -> str | None:
         configured = os.environ.get("IPC_MEMBER_DOCKER_NETWORK", "").strip()
@@ -99,46 +131,68 @@ class TaskSandbox:
             from docker.errors import ImageNotFound, NotFound
 
             try:
-                container = client.containers.get(self._container_name)
-                container.reload()
-                if getattr(container, "status", "running") != "running":
-                    container.start()
-            except NotFound:
-                run_kwargs = {
-                    "image": self.image,
-                    "command": ["sleep", "infinity"],
-                    "detach": True,
-                    "name": self._container_name,
-                    "working_dir": "/",
-                    "extra_hosts": {"host.docker.internal": "host-gateway"},
-                }
-                if self.network:
-                    self._shared_network = self._shared_network_name()
-                    if self._shared_network:
-                        run_kwargs["network"] = self._shared_network
-                    else:
-                        run_kwargs["network_mode"] = "bridge"
-                else:
-                    run_kwargs["network_mode"] = "none"
                 try:
-                    container = client.containers.run(**run_kwargs)
-                except ImageNotFound as exc:
-                    raise RuntimeError(
-                        f"task image '{self.image}' is unavailable; build the ipc-task-image service first"
+                    container = client.containers.get(self._container_name)
+                    container.reload()
+                    if getattr(container, "status", "running") != "running":
+                        container.start()
+                except NotFound:
+                    run_kwargs = {
+                        "image": self.image,
+                        "command": ["sleep", "infinity"],
+                        "detach": True,
+                        "name": self._container_name,
+                        "working_dir": "/",
+                        "extra_hosts": {"host.docker.internal": "host-gateway"},
+                    }
+                    if self.network:
+                        self._shared_network = self._shared_network_name()
+                        if self._shared_network:
+                            run_kwargs["network"] = self._shared_network
+                        else:
+                            run_kwargs["network_mode"] = "bridge"
+                    else:
+                        run_kwargs["network_mode"] = "none"
+                    try:
+                        container = client.containers.run(**run_kwargs)
+                    except ImageNotFound as exc:
+                        raise DockerImageError(
+                            f"task image '{self.image}' is unavailable; "
+                            "build the ipc-task-image service first",
+                            operation="create task container",
+                        ) from exc
+                    except Exception as exc:
+                        raise classify_docker_startup_error(
+                            exc,
+                            "create task container",
+                        ) from exc
+                except Exception as exc:
+                    if isinstance(exc, SandboxStartupError):
+                        raise
+                    raise classify_docker_startup_error(
+                        exc,
+                        "inspect or start task container",
                     ) from exc
-            else:
-                networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-                self._shared_network = next((name for name in networks if name != "bridge"), None)
+                else:
+                    networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+                    self._shared_network = next(
+                        (name for name in networks if name != "bridge"), None
+                    )
 
-            self._container = container
-            try:
+                self._container = container
                 self._init_workspace(container)
                 self._copy_attachments()
-            except Exception:
+            except Exception as exc:
                 with suppress(Exception):
-                    container.remove(force=True)
+                    if "container" in locals():
+                        container.remove(force=True)
                 self._container = None
-                raise
+                if isinstance(exc, SandboxStartupError):
+                    raise
+                raise classify_docker_startup_error(
+                    exc,
+                    "initialize task container",
+                ) from exc
 
     def _init_workspace(self, container) -> None:
         setup = (
@@ -150,7 +204,10 @@ class TaskSandbox:
         res = container.exec_run(["bash", "-lc", setup], workdir="/")
         if res.exit_code not in (0, None):
             detail = self._decode_output(res.output)
-            raise RuntimeError(f"failed to initialize task workspace: {detail.strip()}")
+            raise DockerConfigurationError(
+                f"failed to initialize task workspace: {detail.strip()}",
+                operation="initialize task container",
+            )
 
     @staticmethod
     def _decode_output(output) -> str:

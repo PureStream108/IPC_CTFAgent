@@ -13,7 +13,9 @@ from backend.memory.memory_store import MemoryStore
 
 @pytest.fixture
 def store(tmp_path):
-    return MemoryStore(tmp_path / "memory.db", export_dir=tmp_path / "mem").configure()
+    from backend.persistence.database import Database
+
+    return MemoryStore(Database().configure(), export_dir=tmp_path / "mem").configure()
 
 
 def _seed(store):
@@ -50,10 +52,10 @@ def test_search_category_filter(store):
     assert results[0][0].title == "sqlmap basics"
 
 
-def test_persistence_across_instances(store, tmp_path):
+def test_persistence_across_instances(store):
     _seed(store)
-    # New instance pointing at same db file should see the memories.
-    store2 = MemoryStore(tmp_path / "memory.db").configure()
+    # A second store sharing the PostgreSQL database sees committed memories.
+    store2 = MemoryStore(store.db).configure()
     assert len(store2.all()) == 4
 
 

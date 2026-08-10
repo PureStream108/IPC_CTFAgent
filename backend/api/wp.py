@@ -20,7 +20,7 @@ def _completed_writeups(state: AppState) -> list[dict]:
             """
             SELECT id, title, status, wp_path, updated_at, created_at
             FROM projects
-            WHERE status = 'completed' AND wp_path IS NOT NULL
+            WHERE status = 'solved' AND wp_path IS NOT NULL
             ORDER BY created_at, id
             """
         ).fetchall()

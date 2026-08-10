@@ -16,7 +16,7 @@ class OpsToolError(RuntimeError):
 
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_ACTIVE_PROJECT_STATES = {"running", "flag_found", "wp_writing", "memory_writing"}
+_ACTIVE_PROJECT_STATES = {"running", "flag_found"}
 _OPS_MEMBER = "ops-agent"
 _MAX_COMMAND_LENGTH = 32_000
 _MAX_OUTPUT_LENGTH = 16_000

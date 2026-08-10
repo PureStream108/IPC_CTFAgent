@@ -88,7 +88,10 @@ def create_app(root: str | Path | None = None) -> FastAPI:
                     try:
                         webui_proxy_manager.close_all()
                     finally:
-                        state.close()
+                        try:
+                            state.close()
+                        finally:
+                            auth_manager.close()
 
     app = FastAPI(title="IPC_CTFAgent", description="Multi-agent CTF solver", lifespan=lifespan)
     app.state.auth = auth_manager
@@ -123,7 +126,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
 
     @app.get("/health", include_in_schema=False)
     def health():
-        return {"status": "ok", "setup_required": auth_manager.setup_required}
+        return {"status": "ok", "setup_required": False}
 
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")

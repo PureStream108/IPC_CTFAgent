@@ -4,13 +4,23 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from mcp.server.transport_security import TransportSecuritySettings
+
 from mcp.server.fastmcp import Context
 
-from backend.blackboard import graph_store
+from backend.blackboard import edge_store, graph_store
 from backend.core.config import CATEGORIES
-from backend.core.archive import archive_completed_project
+from backend.core.ipc import (
+    FlagConflictError,
+    accept_verified_flag,
+    assert_flag_compatible,
+)
+from backend.core.postprocess_store import (
+    complete_existing_job,
+    enqueue_postprocess,
+)
 from backend.core.state import AppState
-from backend.core.wp_writer import write_wp_content
+from backend.core.wp_writer import persist_validated_writeup, write_wp_content
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor
@@ -158,6 +168,9 @@ operator request.""",
     # The runner reaches this server over the compose network as ipc-app:8000.
     # Retain FastMCP's DNS-rebinding checks while accepting that internal host.
     security = server.settings.transport_security
+    if security is None:
+        security = TransportSecuritySettings()
+        server.settings.transport_security = security
     if "ipc-app:8000" not in security.allowed_hosts:
         security.allowed_hosts.append("ipc-app:8000")
     if "testserver" not in security.allowed_hosts:
@@ -208,7 +221,7 @@ class _Tools:
             source="claude-code-mcp",
         )
         if session_id:
-            OpsStore(self.state.root).link_session_project(session_id, project_id)
+            OpsStore(self.state.root, self.state.db).link_session_project(session_id, project_id)
         result = self.start_solver(project_id)
         result["message"] = (
             "Project is linked and IPC solver startup is queued. Poll ipc_solver_status, "
@@ -244,7 +257,7 @@ class _Tools:
             active_members = [
                 row["name"]
                 for row in conn.execute(
-                    "SELECT name FROM agents WHERE project_id = ? AND role = 'member' AND state = 'active' ORDER BY name",
+                    "SELECT name FROM agents WHERE project_id = %s AND role = 'member' AND state = 'active' ORDER BY name",
                     (project_id,),
                 ).fetchall()
             ]
@@ -259,12 +272,14 @@ class _Tools:
         self._require_project(project_id)
         with self.state.db.connect() as conn:
             row = graph_store.get_project_row(conn, project_id)
-            if row["status"] == "completed":
-                return {"ok": False, "project_id": project_id, "error": "completed projects cannot be stopped"}
+            if row["status"] == "solved":
+                return {"ok": False, "project_id": project_id, "error": "solved projects cannot be stopped"}
             graph_store.set_status(conn, project_id, "stopped")
             graph_store.set_runtime_phase(conn, project_id, "stopped")
             conn.execute(
-                "UPDATE intents SET worker = NULL WHERE project_id = ? AND concluded_at IS NULL",
+                "UPDATE intents SET worker = NULL, lease_owner = NULL, lease_token = NULL, "
+                "lease_expires_at = NULL, last_heartbeat_at = NULL "
+                "WHERE project_id = %s AND concluded_at IS NULL",
                 (project_id,),
             )
             graph_store.clear_reason(conn, project_id)
@@ -297,24 +312,62 @@ class _Tools:
 
     def finalize_challenge(self, project_id: str, flag: str, markdown: str) -> dict[str, Any]:
         self._require_project(project_id)
-        flag = _required_text(flag, "flag", 2048)
         try:
-            path = write_wp_content(
-                self.state.db,
-                project_id,
-                self.state.wp_dir,
-                markdown,
-                expected_flag=flag,
-                require_complete=True,
-            )
+            flag = _required_text(flag, "flag", 2048)
+        except ValueError as exc:
+            return {"ok": False, "project_id": project_id, "error": str(exc)}
+        rollback_file: Callable[[], None] | None = None
+        try:
+            with self.state.db.connect() as conn:
+                # Hold the project row lock across the compatibility check,
+                # filesystem write, graph completion, and Flag commit.  A
+                # losing concurrent finalizer fails before touching the WP.
+                assert_flag_compatible(conn, project_id, flag)
+                path, rollback_file = persist_validated_writeup(
+                    conn,
+                    project_id,
+                    self.state.wp_dir,
+                    markdown,
+                    expected_flag=flag,
+                )
+                source = conn.execute(
+                    "SELECT id FROM facts WHERE project_id = %s AND id <> 'goal' "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+                source_id = source["id"] if source else "origin"
+                edge_store.complete_goal_intent(
+                    conn,
+                    project_id,
+                    [source_id],
+                    "flag captured by IPC action agent",
+                    "ops-agent",
+                    "ops-agent",
+                )
+                accept_verified_flag(
+                    conn,
+                    project_id,
+                    flag,
+                    source="ops-agent",
+                )
+                enqueue_postprocess(conn, project_id)
+                complete_existing_job(conn, project_id, "writeup")
+                graph_store.set_runtime_phase(conn, project_id, "solved")
+        except FlagConflictError as exc:
+            return {"ok": False, "project_id": project_id, "conflict": True, "error": str(exc)}
         except (RuntimeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc)}
-        with self.state.db.connect() as conn:
-            graph_store.set_flag(conn, project_id, flag)
-            graph_store.set_status(conn, project_id, "completed")
-            graph_store.set_runtime_phase(conn, project_id, "completed")
+            if rollback_file is not None:
+                rollback_file()
+            return {"ok": False, "project_id": project_id, "error": str(exc)}
+        except Exception:
+            if rollback_file is not None:
+                rollback_file()
+            raise
         if self.state.orchestrator is not None:
-            self.state.orchestrator.stop_project(project_id)
+            self.state.orchestrator.on_flag_found(project_id)
+        with self.state.db.connect() as conn:
+            project = graph_store.get_project_row(conn, project_id)
+        postprocess_status = project["postprocess_status"] if project is not None else "pending"
         self.state.logger.project(
             "ops_agent_challenge_finalized",
             project_id,
@@ -322,31 +375,13 @@ class _Tools:
             wp_path=path,
             flag_captured=True,
         )
-        try:
-            archive = archive_completed_project(self.state, project_id)
-        except (OSError, ValueError) as exc:
-            self.state.logger.project(
-                "ops_agent_archive_failed",
-                project_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            return {
-                "ok": False,
-                "project_id": project_id,
-                "status": "completed",
-                "wp_path": path,
-                "error": f"challenge completed but durable archive failed: {exc}",
-            }
         return {
             "ok": True,
             "project_id": project_id,
-            "status": "completed",
+            "status": "solved",
+            "postprocess_status": postprocess_status,
             "wp_path": path,
-            "archive": {
-                "wp_filename": archive["wp_filename"],
-                "log_filename": archive["log_filename"],
-            },
-            "message": "The challenge is durably archived and available to the IPC Logs and WP pages.",
+            "message": "Flag verified. Memory and archive processing continue asynchronously.",
         }
 
     def task_sandbox_health(self, project_id: str) -> dict[str, Any]:

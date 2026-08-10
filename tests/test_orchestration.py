@@ -9,6 +9,14 @@ import pytest
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.diamond import Diamond
 from backend.core.lifecycle import Lifecycle, LifecycleError
+from backend.core.postprocess_store import (
+    claim_next_job,
+    complete_job,
+    complete_existing_job,
+    enqueue_postprocess,
+    fail_job,
+    recover_expired_jobs,
+)
 from backend.core.state import AppState
 from tests.helpers import write_mock_config
 
@@ -19,7 +27,12 @@ def state(tmp_path, monkeypatch):
     st = AppState(root=tmp_path, config_dir=cfgdir)
     st.pool.backend = "local"
     st.network.backend = "local"
-    return st
+    try:
+        yield st
+    finally:
+        if st.orchestrator is not None:
+            st.orchestrator.shutdown()
+        st.close()
 
 
 def _make_project(state, category="web"):
@@ -28,35 +41,35 @@ def _make_project(state, category="web"):
     return pid
 
 
-def test_app_state_clean_start_wipes_runtime_state(tmp_path, monkeypatch):
+def test_app_state_clean_start_wipes_files_but_preserves_postgres(tmp_path, monkeypatch):
     cfgdir = write_mock_config(tmp_path / "config")
 
-    data_dir = tmp_path / "data"
     st = AppState(root=tmp_path, config_dir=cfgdir)
     with st.db.connect() as conn:
         graph_store.create_project(conn, "Old", "origin", "goal", "web")
-    (tmp_path / "logs" / "project_logs").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "logs" / "project_logs" / "Old.json").write_text("old\n", encoding="utf-8")
-    (tmp_path / "projects" / "proj_001" / "attachments").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "projects" / "proj_001" / "attachments" / "x.txt").write_text("x", encoding="utf-8")
-    (tmp_path / "memory" / "export").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "memory" / "export" / "memory.md").write_text("old", encoding="utf-8")
-    (tmp_path / "wp").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "wp" / "Old.md").write_text("old", encoding="utf-8")
+    (st.logs_dir / "project_logs").mkdir(parents=True, exist_ok=True)
+    (st.logs_dir / "project_logs" / "Old.json").write_text("old\n", encoding="utf-8")
+    (st.projects_dir / "proj_001" / "attachments").mkdir(parents=True, exist_ok=True)
+    (st.projects_dir / "proj_001" / "attachments" / "x.txt").write_text("x", encoding="utf-8")
+    (st.export_dir / "memory" / "memory.md").parent.mkdir(parents=True, exist_ok=True)
+    (st.export_dir / "memory" / "memory.md").write_text("old", encoding="utf-8")
+    (st.wp_dir / "Old.md").write_text("old", encoding="utf-8")
+    st.close()
 
     monkeypatch.setenv("IPC_CLEAN_START", "1")
     cleaned = AppState(root=tmp_path, config_dir=cfgdir)
-
-    with cleaned.db.connect() as conn:
-        assert graph_store.project_summaries(conn) == []
-        next_id = graph_store.create_project(conn, "New", "origin", "goal", "web")
-    assert next_id == "proj_001"
-    assert not (tmp_path / "logs" / "project_logs" / "Old.json").exists()
-    assert not (tmp_path / "projects" / "proj_001" / "attachments" / "x.txt").exists()
-    assert not (tmp_path / "memory" / "export" / "memory.md").exists()
-    assert not (tmp_path / "wp" / "Old.md").exists()
-    # Operational state is held in RAM, so no database files reach the disk.
-    assert not data_dir.exists()
+    try:
+        with cleaned.db.connect() as conn:
+            summaries = graph_store.project_summaries(conn)
+            assert [project.title for project in summaries] == ["Old"]
+            next_id = graph_store.create_project(conn, "New", "origin", "goal", "web")
+        assert next_id == "proj_002"
+        assert not (st.logs_dir / "project_logs" / "Old.json").exists()
+        assert not (st.projects_dir / "proj_001" / "attachments" / "x.txt").exists()
+        assert (st.export_dir / "memory" / "memory.md").exists()
+        assert not (st.wp_dir / "Old.md").exists()
+    finally:
+        cleaned.close()
 
 
 def test_lifecycle_transitions(state):
@@ -67,7 +80,7 @@ def test_lifecycle_transitions(state):
     assert lc.status(pid) == "running"
     lc.transition(pid, "flag_found")
     with pytest.raises(LifecycleError):
-        lc.transition(pid, "completed")  # must go through wp/memory writing
+        lc.transition(pid, "completed")  # project states end at solved
 
 
 def test_diamond_initial_assignment(state):
@@ -145,8 +158,8 @@ def test_diamond_medium_difficulty_adds_one_helper(state):
     assert assignments[0].member != "aventurine"
 
 
-def test_full_solve_pipeline_to_completed(state):
-    """End-to-end: start -> initial solver -> WP -> memory -> IPC -> completed -> broadcast."""
+def test_full_solve_pipeline_to_solved(state):
+    """End-to-end: start -> solver -> verified Flag -> asynchronous postprocess."""
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "web")
@@ -154,18 +167,27 @@ def test_full_solve_pipeline_to_completed(state):
     state.orchestrator = orch
     orch.start_project(pid)
     orch.wait(pid, timeout=20)
-    # settle
+    # Flag verification is synchronous; postprocess remains asynchronous.
     for _ in range(40):
-        if Lifecycle(state.db).status(pid) == "completed":
+        if Lifecycle(state.db).status(pid) == "solved":
             break
         time.sleep(0.1)
     status = Lifecycle(state.db).status(pid)
-    assert status == "completed", f"status was {status}"
-    with state.db.connect() as conn:
-        row = graph_store.get_project_row(conn, pid)
-        assert row["flag"]
-        assert row["wp_path"]
-        broadcasts = graph_store.list_broadcasts(conn)
+    assert status == "solved", f"status was {status}"
+    deadline = time.monotonic() + 10
+    row = None
+    broadcasts = []
+    while time.monotonic() < deadline:
+        with state.db.connect() as conn:
+            row = graph_store.get_project_row(conn, pid)
+            broadcasts = graph_store.list_broadcasts(conn)
+        if row is not None and row["postprocess_status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert row is not None
+    assert row["flag"]
+    assert row["wp_path"]
+    assert row["postprocess_status"] == "completed"
     assert any(b.project_id == pid for b in broadcasts)
     # WP file exists
     assert Path(row["wp_path"]).exists()
@@ -185,6 +207,66 @@ def test_full_solve_pipeline_to_completed(state):
     kinds = {link.kind for link in detail.agent_links}
     assert "return" in kinds  # Diamond -> IPC
     orch.shutdown()
+    state.orchestrator = None
+
+
+def test_postprocess_worker_fencing_rejects_stale_completion(state):
+    """A reclaimed postprocess job cannot be completed by its old worker."""
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "solved")
+        enqueue_postprocess(conn, pid)
+        stale = claim_next_job(conn, "worker-old", lease_seconds=120)
+        assert stale is not None
+        conn.execute(
+            "UPDATE postprocess_jobs SET lease_expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE id = %s",
+            (stale.id,),
+        )
+        # Expiry itself fences the worker; recovery/reclaim is not required to
+        # make the stale token invalid.
+        assert complete_job(conn, stale) is False
+        assert complete_existing_job(
+            conn, pid, stale.kind, lease_token=stale.lease_token
+        ) is False
+        assert fail_job(conn, stale, "late worker failure") is False
+        expired = conn.execute(
+            "SELECT status, locked_by, lease_token FROM postprocess_jobs WHERE id = %s",
+            (stale.id,),
+        ).fetchone()
+        assert expired["status"] == "running"
+        assert expired["locked_by"] == "worker-old"
+        assert expired["lease_token"] == stale.lease_token
+
+        assert recover_expired_jobs(conn) == 1
+        replacement = claim_next_job(conn, "worker-new", lease_seconds=120)
+        assert replacement is not None
+        assert replacement.id == stale.id
+        assert replacement.lease_token != stale.lease_token
+
+        # The old token is fenced even though the old worker knows the job id.
+        assert complete_job(conn, stale) is False
+        row = conn.execute(
+            "SELECT status, locked_by, lease_token FROM postprocess_jobs WHERE id = %s",
+            (stale.id,),
+        ).fetchone()
+        assert row["status"] == "running"
+        assert row["locked_by"] == "worker-new"
+        assert row["lease_token"] == replacement.lease_token
+
+        assert complete_job(conn, replacement) is True
+        completed = conn.execute(
+            "SELECT status, locked_by, lease_token, lease_expires_at "
+            "FROM postprocess_jobs WHERE id = %s",
+            (stale.id,),
+        ).fetchone()
+    assert completed == {
+        "status": "completed",
+        "locked_by": None,
+        "lease_token": None,
+        "lease_expires_at": None,
+    }
 
 
 def test_reinforcement_pipeline_with_scripts(state):
@@ -205,10 +287,10 @@ def test_reinforcement_pipeline_with_scripts(state):
     orch.start_project(pid)
     orch.wait(pid, timeout=20)
     for _ in range(40):
-        if Lifecycle(state.db).status(pid) == "completed":
+        if Lifecycle(state.db).status(pid) == "solved":
             break
         time.sleep(0.1)
-    assert Lifecycle(state.db).status(pid) == "completed"
+    assert Lifecycle(state.db).status(pid) == "solved"
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
     # reinforcements were assigned (more than just aventurine got an assign link)
@@ -444,7 +526,17 @@ def test_reason_checkpoint_ignores_intent_created_by_reason(state):
 
     with state.db.connect() as conn:
         fact = node_store.create_fact(conn, pid, "confirmed new foothold")
-        edge_store.conclude_intent(conn, pid, created.id, "aventurine", fact.id)
+        token = edge_store.claim_intent(conn, pid, created.id, "aventurine")
+        assert token
+        assert edge_store.conclude_intent(
+            conn,
+            pid,
+            created.id,
+            "aventurine",
+            fact.id,
+            lease_owner="aventurine",
+            lease_token=token,
+        )
         changed = graph_store.project_detail(conn, pid)
     assert orch._reason_trigger(changed).startswith("facts:")
     orch.shutdown()
@@ -556,4 +648,47 @@ def test_failed_member_is_backed_off_before_same_intent_is_dispatched(state):
         and entry["delay_seconds"] == 10
         for entry in entries
     )
+    orch.shutdown()
+
+
+def test_non_retryable_member_failure_is_not_requeued(state):
+    from backend.core.orchestrator import Orchestrator
+    from backend.members.base_member import SolveResult
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        intent = edge_store.create_intent(conn, pid, ["origin"], "invalid terminal action", "diamond")
+
+    future = Future()
+    future.set_result(
+        SolveResult(
+            status="failed",
+            steps=1,
+            error="project is solved without a completion edge",
+            retryable=False,
+            error_kind="terminal_validation",
+        )
+    )
+    orch = Orchestrator(state, max_workers=1)
+    key = (pid, intent.id)
+    with orch._lock:
+        orch._task_index[key] = future
+        # Simulate an earlier transient failure. The terminal result must
+        # clear this stale backoff as well as avoid scheduling a new one.
+        orch._member_failure_counts[key] = 1
+        orch._member_retry_not_before[key] = time.monotonic() + 60
+
+    orch._reap_finished_futures()
+
+    assert key not in orch._member_failure_counts
+    assert key not in orch._member_retry_not_before
+    entries = state.logger.read_log("project", pid, None)
+    assert any(
+        entry["event"] == "member_task_failed"
+        and entry["error_kind"] == "terminal_validation"
+        and entry["retryable"] is False
+        for entry in entries
+    )
+    assert not any(entry["event"] == "member_task_retry_scheduled" for entry in entries)
     orch.shutdown()

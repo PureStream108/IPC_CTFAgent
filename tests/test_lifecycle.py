@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -13,77 +12,40 @@ from backend.mcp.mcp_client import MCPClient
 from backend.mcp.mcp_server import close_lifespan, create_mcp_server
 from backend.memory.memory_store import MemoryStore
 from backend.server.app import create_app
-from backend.sqlite_util import RamSqlite
 from backend.tools.tool_registry import ToolRegistry
 from tests.helpers import setup_test_auth, write_mock_config
 
 
-def test_ram_sqlite_shared_cache_is_thread_safe_and_close_is_idempotent(monkeypatch):
-    monkeypatch.setattr("backend.sqlite_util._memdb_available", lambda: False)
-    ram = RamSqlite("fallback")
-    with ram.guard():
-        conn = ram.connect()
-        try:
-            conn.execute("CREATE TABLE values_table (value INTEGER)")
-            conn.commit()
-        finally:
-            conn.close()
+def test_postgres_pool_serves_concurrent_connections():
+    database = Database(min_size=1, max_size=8).configure()
 
-    def insert(value: int) -> None:
-        with ram.guard():
-            conn = ram.connect()
-            try:
-                conn.execute("INSERT INTO values_table VALUES (?)", (value,))
-                conn.commit()
-            finally:
-                conn.close()
+    def query(value: int) -> int:
+        with database.connect() as connection:
+            row = connection.execute("SELECT %s::integer AS value", (value,)).fetchone()
+        return int(row["value"])
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        list(executor.map(insert, range(40)))
-    with ram.guard():
-        conn = ram.connect()
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM values_table").fetchone()[0] == 40
-        finally:
-            conn.close()
-
-    dsn = ram.dsn
-    ram.close()
-    ram.close()
-    assert ram.closed
-    with pytest.raises(RuntimeError, match="closed"):
-        ram.connect()
-
-    # Closing the keeper releases the old shared in-memory database. Opening
-    # the same URI now creates a fresh empty database.
-    fresh = sqlite3.connect(dsn, uri=True)
-    try:
-        with pytest.raises(sqlite3.OperationalError, match="no such table"):
-            fresh.execute("SELECT * FROM values_table").fetchall()
-    finally:
-        fresh.close()
+        assert list(executor.map(query, range(40))) == list(range(40))
+    database.close()
 
 
-def test_storage_close_methods_are_idempotent_and_reject_ram_connections(tmp_path):
-    database = Database(tmp_path / "graph.db", in_memory=True).configure()
-    memory = MemoryStore(tmp_path / "memory.db", in_memory=True).configure()
-    registry = ToolRegistry(
-        cache_db=tmp_path / "tools.db", in_memory=True
-    ).load()
+def test_storage_close_methods_are_idempotent_and_clear_local_cache():
+    database = Database().configure()
+    memory = MemoryStore().configure()
+    registry = ToolRegistry().load()
+    registry._cache_results("query", ["tool"])
 
     for resource in (registry, memory, database):
         resource.close()
         resource.close()
 
-    with pytest.raises(RuntimeError, match="closed"):
+    with pytest.raises(Exception, match="closed|reused"):
         with database.connect():
             pass
-    with pytest.raises(RuntimeError, match="closed"):
-        with memory._connect():
+    with pytest.raises(Exception, match="closed|reused"):
+        with memory.db.connect():
             pass
-    with pytest.raises(RuntimeError, match="closed"):
-        with registry._conn():
-            pass
+    assert registry.cached_search("query") is None
 
 
 def test_app_state_closes_owned_resources_in_dependency_order(tmp_path, monkeypatch):
@@ -115,7 +77,7 @@ def test_app_state_closes_owned_resources_in_dependency_order(tmp_path, monkeypa
     state.close()
 
     assert order[:3] == ["registry", "memory", "database"]
-    with pytest.raises(RuntimeError, match="closed"):
+    with pytest.raises(Exception, match="closed|reused"):
         with state.db.connect():
             pass
 
@@ -152,10 +114,9 @@ def test_fastapi_lifespan_closes_state_after_request_exception(tmp_path):
         state = client.app.state.ipc
         assert client.get("/test-lifespan-error").status_code == 500
         with state.db.connect() as conn:
-            assert conn.execute("SELECT 1").fetchone()[0] == 1
+            assert conn.execute("SELECT 1 AS value").fetchone()["value"] == 1
 
-    for ram in (state.registry._ram, state.memory._ram, state.db._ram):
-        assert ram is not None and ram.closed
-    with pytest.raises(RuntimeError, match="closed"):
+    assert state.registry._cache == {}
+    with pytest.raises(Exception, match="closed|reused"):
         with state.db.connect():
             pass

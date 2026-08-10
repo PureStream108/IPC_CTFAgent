@@ -36,9 +36,9 @@ def test_index_served(client):
     assert "memory_log" in body
     assert "New Project" in body
     assert "Memory" in body
-    assert "First-time setup" in body
-    assert 'await this.authRequest("POST","/auth/setup"' in body
-    assert 'await this.authRequest("POST","/auth/login"' in body
+    assert "First-time setup" not in body
+    assert 'await this.authRequest("POST","/auth/setup"' not in body
+    assert 'await this.authRequest("POST","/auth/login"' not in body
     assert "Claude Code action agent with native session context" in body
     assert "OpenAI-compatible action agent with durable IPC history" in body
     assert "Claude Code (native)" in body
@@ -55,7 +55,7 @@ def test_index_served(client):
     assert '"/api/ops/chat"' in body
     assert "confirmOpsWorkflow" in body
     assert "submitFoundFlags" in body
-    assert "addMember" in body
+    assert "addMember" not in body
     assert "API surface" in body
     assert "chat_completions" in body
     assert "anthropic" in body

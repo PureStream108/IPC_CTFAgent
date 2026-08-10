@@ -64,8 +64,8 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
 
     if p.wp_path:
         events.append({"ts": p.updated_at, "kind": "wp_written", "label": p.wp_path, "detail": "", "order": 4})
-    if p.status == "completed":
-        events.append({"ts": p.updated_at, "kind": "completed", "label": p.title,
+    if p.status == "solved":
+        events.append({"ts": p.flag_verified_at or p.updated_at, "kind": "solved", "label": p.title,
                        "detail": p.flag or "", "order": 5})
 
     events.sort(key=lambda e: (e["ts"], e["order"]))

@@ -53,9 +53,9 @@ def test_mcp_registry_opens_servers_lazily():
 
 @pytest.fixture
 def deps(tmp_path):
-    db = Database(tmp_path / "g.db").configure()
-    mem = MemoryStore(tmp_path / "m.db").configure()
-    reg = ToolRegistry(cache_db=tmp_path / "tc.db").load()
+    db = Database().configure()
+    mem = MemoryStore(db).configure()
+    reg = ToolRegistry().load()
     mcps = MCPRegistry()
     mcps.register(build_memory_mcp(mem))
     mcps.register(build_browser_mcp())
@@ -128,7 +128,7 @@ def test_initial_member_solves_to_flag(deps):
     assert flags == [pid]
     with db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
-    assert detail.project.status == "flag_found"
+    assert detail.project.status == "solved"
     assert detail.project.flag == "flag{test}"
     # a goal edge exists
     assert any(i.to == "goal" for i in detail.intents)
@@ -201,6 +201,113 @@ def test_followup_member_concludes(deps):
     assert row["to_fact_id"] == result.fact_id
 
 
+def _stale_member_and_intent(db, deps):
+    """Return a member whose fencing token was superseded by another worker."""
+
+    pid, iid = _project(db)
+    old_owner = "instance:stale"
+    with db.connect() as conn:
+        old_token = edge_store.claim_intent(
+            conn, pid, iid, "jade", lease_owner=old_owner, timeout=30
+        )
+        assert old_token
+        # Make the old lease claimable, then let a replacement worker fence it.
+        conn.execute(
+            "UPDATE intents SET lease_expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE id = %s AND project_id = %s",
+            (iid, pid),
+        )
+        replacement = edge_store.claim_intent(
+            conn, pid, iid, "pearl", lease_owner="instance:new", timeout=30
+        )
+        assert replacement and replacement != old_token
+    member = create_member(MemberConfig(name="jade", api_format="mock"), deps)
+    deps.lease_owner = old_owner
+    deps.lease_token = old_token
+    return member, pid, iid
+
+
+def test_member_conclude_stale_lease_rolls_back_fact(deps):
+    db, d, _reports, _flags = deps
+    member, pid, iid = _stale_member_and_intent(db, d)
+
+    result = member._conclude(
+        pid,
+        iid,
+        MemberAction.from_obj({"action": "conclude", "description": "stale fact"}),
+    )
+
+    assert result.status == "stalled"
+    assert result.error == "intent lease lost"
+    with db.connect() as conn:
+        assert {fact.id for fact in node_store.list_facts(conn, pid)} == {"origin", "goal"}
+        row = edge_store.get_intent(conn, pid, iid)
+        assert row["to_fact_id"] is None
+
+
+def test_member_flag_stale_lease_rolls_back_fact_and_completion(deps):
+    db, d, _reports, _flags = deps
+    member, pid, iid = _stale_member_and_intent(db, d)
+
+    result = member._raise_flag(
+        pid,
+        iid,
+        MemberAction.from_obj(
+            {
+                "action": "flag",
+                "flag": "flag{stale}",
+                "description": "stale flag evidence",
+            }
+        ),
+        step=1,
+    )
+
+    assert result.status == "stalled"
+    assert result.error == "intent lease lost"
+    with db.connect() as conn:
+        assert {fact.id for fact in node_store.list_facts(conn, pid)} == {"origin", "goal"}
+        assert conn.execute(
+            "SELECT 1 FROM intents WHERE project_id = %s AND to_fact_id = 'goal'",
+            (pid,),
+        ).fetchone() is None
+        project = graph_store.get_project_row(conn, pid)
+        assert project["flag"] is None
+        assert conn.execute(
+            "SELECT 1 FROM postprocess_jobs WHERE project_id = %s", (pid,)
+        ).fetchone() is None
+
+
+def test_member_dispatch_validation_error_is_non_retryable(deps):
+    db, d, _reports, _flags = deps
+    pid, iid = _project(db)
+    member = create_member(
+        MemberConfig(name="jade", api_format="mock"),
+        d,
+        script=[{"action": "done", "reason": "validation probe"}],
+    )
+
+    async def invalid_dispatch(*_args, **_kwargs):
+        raise ValueError("project is solved without a completion edge")
+
+    member._dispatch = invalid_dispatch
+    result = member.solve(pid, iid, "web", is_initial=False)
+
+    assert result.status == "stalled"
+    assert result.retryable is False
+    assert result.error_kind == "terminal_validation"
+    assert "completion edge" in (result.error or "")
+    entries = d.logger.read_log("project", pid, None)
+    assert any(
+        entry["event"] == "member_validation_error"
+        and entry["error_kind"] == "terminal_validation"
+        and entry["retryable"] is False
+        for entry in entries
+    )
+    with db.connect() as conn:
+        row = edge_store.get_intent(conn, pid, iid)
+    assert row["worker"] is None
+
+
 def test_member_reports_difficulty_on_eval_step(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
@@ -240,9 +347,9 @@ def test_member_observes_shared_webui_proxy(tmp_path):
             assert port == 7860
             return "http://127.0.0.1:41001"
 
-    db = Database(tmp_path / "g.db").configure()
-    mem = MemoryStore(tmp_path / "m.db").configure()
-    reg = ToolRegistry(cache_db=tmp_path / "tc.db").load()
+    db = Database().configure()
+    mem = MemoryStore(db).configure()
+    reg = ToolRegistry().load()
     mcps = MCPRegistry()
     mcps.register(build_memory_mcp(mem))
     mcps.register(build_browser_mcp())

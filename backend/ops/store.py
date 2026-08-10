@@ -6,7 +6,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,71 +13,8 @@ from typing import Any
 
 from backend.core.config import LLMConfig
 from backend.ops.models import PlatformWorkflowSpec, validate_secret_name
-
-_SCHEMA = """\
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    claude_session_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    status TEXT NOT NULL,
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
-    response_json TEXT,
-    error TEXT,
-    started_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_runs_session_id ON runs(session_id, started_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active
-    ON runs(session_id) WHERE status = 'running';
-
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-    kind TEXT NOT NULL,
-    label TEXT NOT NULL,
-    text TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id);
-
-CREATE TABLE IF NOT EXISTS session_projects (
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    project_id TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (session_id, project_id)
-);
-
-CREATE TABLE IF NOT EXISTS workflows (
-    id TEXT PRIMARY KEY,
-    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-    source TEXT NOT NULL,
-    name TEXT NOT NULL,
-    spec_json TEXT NOT NULL,
-    spec_digest TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    confirmed_digest TEXT,
-    capability_hash TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-"""
+from backend.persistence.database import Database, PostgresDatabase
+from psycopg.errors import UniqueViolation
 
 _CLAUDE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
@@ -86,7 +22,11 @@ _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
 
 
 class OpsStore:
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        database: PostgresDatabase | None = None,
+    ) -> None:
         self.root = Path(root) / "data" / "ops-agent"
         self.root.mkdir(parents=True, exist_ok=True)
         try:
@@ -95,38 +35,17 @@ class OpsStore:
             pass
         self.config_path = self.root / "config.json"
         self.secrets_path = self.root / "secrets.json"
-        self.database_path = self.root / "history.db"
+        self.db = database or Database()
+        self._owns_db = database is None
         self._lock = threading.RLock()
         self._configure_database()
 
     def _configure_database(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(_SCHEMA)
-            session_columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
-            }
-            if "claude_session_id" not in session_columns:
-                connection.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT")
-            event_columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(events)").fetchall()
-            }
-            if "run_id" not in event_columns:
-                connection.execute(
-                    "ALTER TABLE events ADD COLUMN run_id TEXT REFERENCES runs(id) ON DELETE SET NULL"
-                )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id, id)"
-            )
-        _restrict_file(self.database_path)
+        if self._owns_db:
+            self.db.configure()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.database_path), timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
-        return connection
+    def _connect(self):
+        return self.db.connect()
 
     def load_llm_config(self) -> LLMConfig:
         with self._lock:
@@ -189,7 +108,7 @@ class OpsStore:
         session_id = f"ops_{secrets.token_hex(8)}"
         with self._lock, self._connect() as connection:
             connection.execute(
-                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (%s, %s, %s, %s)",
                 (session_id, title[:120] or "New conversation", now, now),
             )
         return self.get_session(session_id)
@@ -197,7 +116,7 @@ class OpsStore:
     def get_session(self, session_id: str) -> dict[str, str]:
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?",
+                "SELECT id, title, created_at, updated_at FROM sessions WHERE id = %s",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -213,7 +132,7 @@ class OpsStore:
 
     def delete_session(self, session_id: str) -> bool:
         with self._lock, self._connect() as connection:
-            cursor = connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            cursor = connection.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
         if cursor.rowcount:
             self._delete_secret_namespace("sessions", session_id)
         return bool(cursor.rowcount)
@@ -222,7 +141,7 @@ class OpsStore:
         self.get_session(session_id)
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT claude_session_id FROM sessions WHERE id = ?",
+                "SELECT claude_session_id FROM sessions WHERE id = %s",
                 (session_id,),
             ).fetchone()
         value = row["claude_session_id"] if row is not None else None
@@ -235,7 +154,7 @@ class OpsStore:
             raise ValueError("invalid Claude session id")
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE sessions SET claude_session_id = ?, updated_at = ? WHERE id = ?",
+                "UPDATE sessions SET claude_session_id = %s, updated_at = %s WHERE id = %s",
                 (value, _now(), session_id),
             )
 
@@ -246,9 +165,8 @@ class OpsStore:
         now = _now()
         try:
             with self._lock, self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
                 active = connection.execute(
-                    "SELECT id FROM runs WHERE session_id = ? AND status = 'running'",
+                    "SELECT id FROM runs WHERE session_id = %s AND status = 'running'",
                     (session_id,),
                 ).fetchone()
                 if active is not None:
@@ -257,28 +175,30 @@ class OpsStore:
                     """
                     INSERT INTO runs (
                         id, session_id, status, started_at, updated_at
-                    ) VALUES (?, ?, 'running', ?, ?)
+                    ) VALUES (%s, %s, 'running', %s, %s)
                     """,
                     (run_id, session_id, now, now),
                 )
                 connection.execute(
-                    "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                    "UPDATE sessions SET updated_at = %s WHERE id = %s",
                     (now, session_id),
                 )
-        except sqlite3.IntegrityError as exc:
+        except UniqueViolation as exc:
             raise ValueError("IPC session already has an active run") from exc
         return self.get_run(run_id)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
-            row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+            row = connection.execute("SELECT * FROM runs WHERE id = %s", (run_id,)).fetchone()
         if row is None:
             raise KeyError(run_id)
         result = dict(row)
         raw_response = result.pop("response_json", None)
         result["cancel_requested"] = bool(result.get("cancel_requested"))
         result["response"] = None
-        if raw_response:
+        if isinstance(raw_response, dict):
+            result["response"] = raw_response
+        elif raw_response:
             try:
                 parsed = json.loads(raw_response)
                 result["response"] = parsed if isinstance(parsed, dict) else None
@@ -292,7 +212,7 @@ class OpsStore:
             row = connection.execute(
                 """
                 SELECT id FROM runs
-                WHERE session_id = ? AND status = 'running'
+                WHERE session_id = %s AND status = 'running'
                 ORDER BY started_at DESC LIMIT 1
                 """,
                 (session_id,),
@@ -302,14 +222,14 @@ class OpsStore:
     def request_run_cancel(self, session_id: str, run_id: str) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT session_id, status FROM runs WHERE id = ?",
+                "SELECT session_id, status FROM runs WHERE id = %s",
                 (run_id,),
             ).fetchone()
             if row is None or str(row["session_id"]) != session_id:
                 raise KeyError(run_id)
             if row["status"] == "running":
                 connection.execute(
-                    "UPDATE runs SET cancel_requested = 1, updated_at = ? WHERE id = ?",
+                    "UPDATE runs SET cancel_requested = TRUE, updated_at = %s WHERE id = %s",
                     (_now(), run_id),
                 )
         return self.get_run(run_id)
@@ -338,13 +258,13 @@ class OpsStore:
             cursor = connection.execute(
                 """
                 UPDATE runs
-                SET status = ?, response_json = ?, error = ?, updated_at = ?, finished_at = ?
-                WHERE id = ? AND status = 'running'
+                SET status = %s, response_json = %s::jsonb, error = %s, updated_at = %s, finished_at = %s
+                WHERE id = %s AND status = 'running'
                 """,
                 (status, response_json, safe_error, now, now, run_id),
             )
             if not cursor.rowcount:
-                existing = connection.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+                existing = connection.execute("SELECT id FROM runs WHERE id = %s", (run_id,)).fetchone()
                 if existing is None:
                     raise KeyError(run_id)
         return self.get_run(run_id)
@@ -362,14 +282,16 @@ class OpsStore:
         now = _now()
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO messages (session_id, role, content, created_at) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
                 (session_id, role, content, now),
             )
             connection.execute(
-                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                "UPDATE sessions SET updated_at = %s WHERE id = %s",
                 (now, session_id),
             )
-        return {"id": cursor.lastrowid, "role": role, "content": content, "created_at": now}
+        row = cursor.fetchone()
+        return {"id": row["id"], "role": role, "content": content, "created_at": now}
 
     def list_messages(self, session_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         self.get_session(session_id)
@@ -378,7 +300,7 @@ class OpsStore:
                 """
                 SELECT id, role, content, created_at FROM (
                     SELECT id, role, content, created_at
-                    FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?
+                    FROM messages WHERE session_id = %s ORDER BY id DESC LIMIT %s
                 ) ORDER BY id
                 """,
                 (session_id, limit),
@@ -410,16 +332,17 @@ class OpsStore:
             cursor = connection.execute(
                 """
                 INSERT INTO events (session_id, run_id, kind, label, text, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
                 """,
                 (session_id, run_id, kind, label, text, now),
             )
             connection.execute(
-                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                "UPDATE sessions SET updated_at = %s WHERE id = %s",
                 (now, session_id),
             )
+        row = cursor.fetchone()
         return {
-            "id": cursor.lastrowid,
+            "id": row["id"],
             "run_id": run_id,
             "kind": kind,
             "label": label,
@@ -434,7 +357,7 @@ class OpsStore:
                 """
                 SELECT id, kind, label, text, created_at FROM (
                     SELECT id, kind, label, text, created_at
-                    FROM events WHERE session_id = ? ORDER BY id DESC LIMIT ?
+                    FROM events WHERE session_id = %s ORDER BY id DESC LIMIT %s
                 ) ORDER BY id
                 """,
                 (session_id, max(1, min(int(limit), 5_000))),
@@ -455,8 +378,8 @@ class OpsStore:
                 """
                 SELECT id, run_id, kind, label, text, created_at
                 FROM events
-                WHERE session_id = ? AND run_id = ? AND id > ?
-                ORDER BY id LIMIT ?
+                WHERE session_id = %s AND run_id = %s AND id > %s
+                ORDER BY id LIMIT %s
                 """,
                 (session_id, run_id, max(0, int(after_id)), max(1, min(int(limit), 5_000))),
             ).fetchall()
@@ -467,8 +390,8 @@ class OpsStore:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO session_projects (session_id, project_id, created_at)
-                VALUES (?, ?, ?)
+                INSERT INTO session_projects (session_id, project_id, created_at)
+                VALUES (%s, %s, %s) ON CONFLICT (session_id, project_id) DO NOTHING
                 """,
                 (session_id, str(project_id), _now()),
             )
@@ -477,7 +400,7 @@ class OpsStore:
         self.get_session(session_id)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT project_id FROM session_projects WHERE session_id = ? ORDER BY created_at, project_id",
+                "SELECT project_id FROM session_projects WHERE session_id = %s ORDER BY created_at, project_id",
                 (session_id,),
             ).fetchall()
         return [str(row["project_id"]) for row in rows]
@@ -509,7 +432,7 @@ class OpsStore:
                 INSERT INTO workflows (
                     id, session_id, source, name, spec_json, spec_digest,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, 'draft', %s, %s)
                 """,
                 (workflow_id, session_id, source, spec.name, spec_json, digest, now, now),
             )
@@ -533,9 +456,9 @@ class OpsStore:
             cursor = connection.execute(
                 """
                 UPDATE workflows
-                SET name = ?, spec_json = ?, spec_digest = ?, status = 'draft',
-                    confirmed_digest = NULL, capability_hash = NULL, updated_at = ?
-                WHERE id = ?
+                SET name = %s, spec_json = %s::jsonb, spec_digest = %s, status = 'draft',
+                    confirmed_digest = NULL, capability_hash = NULL, updated_at = %s
+                WHERE id = %s
                 """,
                 (spec.name, spec_json, digest, now, workflow_id),
             )
@@ -545,11 +468,16 @@ class OpsStore:
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
-            row = connection.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
+            row = connection.execute("SELECT * FROM workflows WHERE id = %s", (workflow_id,)).fetchone()
         if row is None:
             raise KeyError(workflow_id)
         result = dict(row)
-        result["spec"] = PlatformWorkflowSpec.model_validate_json(result.pop("spec_json"))
+        raw_spec = result.pop("spec_json")
+        result["spec"] = (
+            PlatformWorkflowSpec.model_validate(raw_spec)
+            if isinstance(raw_spec, dict)
+            else PlatformWorkflowSpec.model_validate_json(raw_spec)
+        )
         result.pop("capability_hash", None)
         return result
 
@@ -560,7 +488,7 @@ class OpsStore:
 
     def delete_workflow(self, workflow_id: str) -> bool:
         with self._lock, self._connect() as connection:
-            cursor = connection.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+            cursor = connection.execute("DELETE FROM workflows WHERE id = %s", (workflow_id,))
         if cursor.rowcount:
             self._delete_secret_namespace("workflows", workflow_id)
         return bool(cursor.rowcount)
@@ -578,7 +506,7 @@ class OpsStore:
         return self._secret_namespace("workflows", workflow_id)
 
     def confirm_workflow(self, workflow_id: str) -> str:
-        workflow = self.get_workflow(workflow_id)
+        self.get_workflow(workflow_id)
         token = secrets.token_urlsafe(32)
         token_hash = _hash_token(token)
         now = _now()
@@ -587,8 +515,8 @@ class OpsStore:
                 """
                 UPDATE workflows
                 SET status = 'confirmed', confirmed_digest = spec_digest,
-                    capability_hash = ?, updated_at = ?
-                WHERE id = ?
+                    capability_hash = %s, updated_at = %s
+                WHERE id = %s
                 """,
                 (token_hash, now, workflow_id),
             )
@@ -601,8 +529,8 @@ class OpsStore:
                 """
                 UPDATE workflows
                 SET status = 'draft', confirmed_digest = NULL,
-                    capability_hash = NULL, updated_at = ?
-                WHERE id = ?
+                    capability_hash = NULL, updated_at = %s
+                WHERE id = %s
                 """,
                 (now, workflow_id),
             )
@@ -615,7 +543,7 @@ class OpsStore:
             row = connection.execute(
                 """
                 SELECT status, spec_digest, confirmed_digest, capability_hash
-                FROM workflows WHERE id = ?
+                FROM workflows WHERE id = %s
                 """,
                 (workflow_id,),
             ).fetchone()

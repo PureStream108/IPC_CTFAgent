@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Regenerate the packaged Memory tool-catalog Markdown documents."""
+
+from __future__ import annotations
 
 from pathlib import Path
 

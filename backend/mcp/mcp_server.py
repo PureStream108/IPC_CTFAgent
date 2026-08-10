@@ -46,7 +46,7 @@ def close_lifespan(close: Callable[[], None]):
 def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") -> MCPServer:
     """Build one IPC MCP server for an external stdio/HTTP client."""
 
-    root_path = Path(root)
+    del root  # retained for CLI and third-party caller compatibility
     if name == "browser":
         from backend.mcp.shared import build_browser_mcp
 
@@ -60,15 +60,13 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
 
         return build_zap_mcp()
 
-    # Parity with AppState: these standalone debug servers keep their state in
-    # RAM too, so the paths only name the in-RAM databases.
-    data_dir = root_path / "data"
+    # Stateful debug servers use the same PostgreSQL DSN as the main app.
     if name == "memory":
         from backend.memory.memory_mcp import build_memory_mcp
         from backend.memory.memory_store import MemoryStore
         from backend.tools.catalog import ToolCatalog
 
-        store = MemoryStore(data_dir / "memory.db", export_dir=None, in_memory=True).configure()
+        store = MemoryStore(export_dir=None).configure()
         return build_memory_mcp(
             store,
             catalog=ToolCatalog.load(),
@@ -78,7 +76,7 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
         from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
         from backend.tools.tool_registry import ToolRegistry
 
-        registry = ToolRegistry(cache_db=data_dir / "tool_cache.db", in_memory=True).load()
+        registry = ToolRegistry().load()
         if name == "tools":
             return build_category_tools_mcp(
                 registry, category, lifespan=close_lifespan(registry.close)

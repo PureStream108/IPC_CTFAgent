@@ -5,7 +5,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ProjectStatus = Literal[
-    "created", "running", "flag_found", "wp_writing", "memory_writing", "completed", "stopped"
+    "created",
+    "running",
+    "flag_found",
+    "solved",
+    "timeout",
+    "infra_error",
+    "failed",
+    "stopped",
 ]
 
 
@@ -23,6 +30,9 @@ class Intent(BaseModel):
     creator: str
     worker: str | None = None
     last_heartbeat_at: str | None = None
+    lease_token: str | None = None
+    lease_version: int = 0
+    lease_expires_at: str | None = None
     created_at: str
     concluded_at: str | None = None
 
@@ -92,7 +102,10 @@ class ProjectMeta(BaseModel):
     title: str
     category: str
     status: ProjectStatus
+    postprocess_status: str = "not_started"
+    terminal_reason: str | None = None
     flag: str | None = None
+    flag_verified_at: str | None = None
     wp_path: str | None = None
     log_filename: str | None = None
     runtime_phase: str = "idle"
@@ -168,6 +181,7 @@ class CreateIntentRequest(BaseModel):
 
 class HeartbeatRequest(BaseModel):
     worker: str
+    lease_token: str | None = None
     _v = field_validator("worker")(lambda cls, v: _non_empty(v))
 
 
@@ -180,6 +194,7 @@ class ReasonClaimRequest(BaseModel):
 class ConcludeRequest(BaseModel):
     worker: str
     description: str
+    lease_token: str | None = None
     _v = field_validator("worker", "description")(lambda cls, v: _non_empty(v))
 
 

@@ -1,36 +1,19 @@
 from __future__ import annotations
 
-import sqlite3
-import threading
-from contextlib import contextmanager, nullcontext
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Generator
 
 from pydantic import BaseModel, Field
 
-from backend.sqlite_util import RamSqlite
+from backend.persistence.database import Database, PostgresDatabase
+
 
 CATEGORIES = ("knowledge", "tool_usage", "exploit", "lessons")
 
-_SCHEMA = """\
-CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
-    category TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    tags TEXT NOT NULL DEFAULT '',
-    project_id TEXT,
-    source TEXT NOT NULL DEFAULT 'diamond',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mem_counter (name TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
-INSERT OR IGNORE INTO mem_counter (name, value) VALUES ('memory', 0);
-"""
-
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).isoformat()
 
 
 class Memory(BaseModel):
@@ -45,73 +28,50 @@ class Memory(BaseModel):
 
     def keywords(self) -> set[str]:
         text = f"{self.title} {self.content} {' '.join(self.tags)}".lower()
-        return {w for w in _tokenize(text) if len(w) >= 2}
+        return {word for word in _tokenize(text) if len(word) >= 2}
 
 
 def _tokenize(text: str) -> list[str]:
-    out: list[str] = []
-    cur = []
-    for ch in text:
-        if ch.isalnum() or ch == "_":
-            cur.append(ch)
-        else:
-            if cur:
-                out.append("".join(cur))
-                cur = []
-    if cur:
-        out.append("".join(cur))
-    return out
+    output: list[str] = []
+    current: list[str] = []
+    for character in text:
+        if character.isalnum() or character == "_":
+            current.append(character)
+        elif current:
+            output.append("".join(current))
+            current = []
+    if current:
+        output.append("".join(current))
+    return output
 
 
 class MemoryStore:
     def __init__(
         self,
-        db_path: str | Path,
+        database: PostgresDatabase | str | Path | None = None,
         export_dir: str | Path | None = None,
         in_memory: bool = False,
-    ):
-        self.db_path = Path(db_path)
+    ) -> None:
+        del in_memory
+        if isinstance(database, PostgresDatabase):
+            self.db = database
+            self._owns_db = False
+        else:
+            self.db = Database(database)
+            self._owns_db = True
         self.export_dir = Path(export_dir) if export_dir else None
-        self.in_memory = in_memory
-        self._lock = threading.Lock()
         self._configured = False
-        # In RAM mode the path is never opened; it only names the database.
-        self._ram = RamSqlite(self.db_path.stem) if in_memory else None
 
-    def configure(self) -> "MemoryStore":
-        with self._lock:
-            if self._configured:
-                return self
-            if not self.in_memory:
-                self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-            self._configured = True
+    def configure(self) -> MemoryStore:
+        if self._owns_db:
+            self.db.configure()
+        self._configured = True
         return self
 
-    @contextmanager
-    def _connect(self) -> Generator[sqlite3.Connection, None, None]:
-        ram = self._ram
-        with ram.guard() if ram is not None else nullcontext():
-            if ram is not None:
-                conn = ram.connect(timeout=30)
-            else:
-                conn = sqlite3.connect(str(self.db_path), timeout=30)
-            conn.row_factory = sqlite3.Row
-            if ram is None:
-                conn.execute("PRAGMA journal_mode=WAL")
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-
-    def _next_id(self, conn: sqlite3.Connection) -> str:
-        conn.execute("UPDATE mem_counter SET value = value + 1 WHERE name = 'memory'")
-        row = conn.execute("SELECT value FROM mem_counter WHERE name = 'memory'").fetchone()
+    def _next_id(self, connection) -> str:
+        row = connection.execute(
+            "UPDATE mem_counter SET value = value + 1 WHERE name = 'memory' RETURNING value"
+        ).fetchone()
         return f"mem_{row['value']:04d}"
 
     def add(
@@ -122,80 +82,144 @@ class MemoryStore:
         tags: list[str] | None = None,
         project_id: str | None = None,
         source: str = "diamond",
+        connection=None,
+        mirror: bool = True,
     ) -> Memory:
         if category not in CATEGORIES:
             raise ValueError(f"unknown category: {category}")
-        tags = tags or []
+        normalized_tags = list(tags or [])
         now = _utcnow()
-        with self._connect() as conn:
-            mid = self._next_id(conn)
-            conn.execute(
-                "INSERT INTO memories (id, category, title, content, tags, project_id, source, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (mid, category, title, content, ",".join(tags), project_id, source, now),
+        if connection is None:
+            with self.db.connect() as own_connection:
+                memory_id = self._insert(
+                    own_connection,
+                    category,
+                    title,
+                    content,
+                    normalized_tags,
+                    project_id,
+                    source,
+                    now,
+                )
+        else:
+            memory_id = self._insert(
+                connection,
+                category,
+                title,
+                content,
+                normalized_tags,
+                project_id,
+                source,
+                now,
             )
-        mem = Memory(
-            id=mid, category=category, title=title, content=content, tags=tags,
-            project_id=project_id, source=source, created_at=now,
+        memory = Memory(
+            id=memory_id,
+            category=category,
+            title=title,
+            content=content,
+            tags=normalized_tags,
+            project_id=project_id,
+            source=source,
+            created_at=now,
         )
-        self._mirror_to_disk(mem)
-        return mem
+        if mirror:
+            self._mirror_to_disk(memory)
+        return memory
+
+    def _insert(
+        self,
+        connection,
+        category: str,
+        title: str,
+        content: str,
+        tags: list[str],
+        project_id: str | None,
+        source: str,
+        created_at: str,
+    ) -> str:
+        memory_id = self._next_id(connection)
+        connection.execute(
+            """
+            INSERT INTO memories (id, category, title, content, tags, project_id, source, created_at)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+            """,
+            (
+                memory_id,
+                category,
+                title,
+                content,
+                json.dumps(tags, ensure_ascii=False),
+                project_id,
+                source,
+                created_at,
+            ),
+        )
+        return memory_id
 
     def get(self, memory_id: str) -> Memory | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM memories WHERE id = %s", (memory_id,)
+            ).fetchone()
         return _row_to_memory(row) if row else None
 
     def list(self, category: str | None = None) -> list[Memory]:
-        with self._connect() as conn:
+        with self.db.connect() as connection:
             if category:
-                rows = conn.execute(
-                    "SELECT * FROM memories WHERE category = ? ORDER BY created_at DESC", (category,)
+                rows = connection.execute(
+                    "SELECT * FROM memories WHERE category = %s ORDER BY created_at DESC",
+                    (category,),
                 ).fetchall()
             else:
-                rows = conn.execute("SELECT * FROM memories ORDER BY created_at DESC").fetchall()
-        return [_row_to_memory(r) for r in rows]
+                rows = connection.execute(
+                    "SELECT * FROM memories ORDER BY created_at DESC"
+                ).fetchall()
+        return [_row_to_memory(row) for row in rows]
 
     def delete(self, memory_id: str) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            return cur.rowcount > 0
+        with self.db.connect() as connection:
+            cursor = connection.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
+        return cursor.rowcount > 0
 
     def all(self) -> list[Memory]:
         return self.list()
 
     def close(self) -> None:
-        if self._ram is not None:
-            self._ram.close()
+        if self._owns_db:
+            self.db.close()
 
-    def _mirror_to_disk(self, mem: Memory) -> None:
-        """Write a markdown copy so memory persists even without the db file."""
+    def _mirror_to_disk(self, memory: Memory) -> None:
         if self.export_dir is None:
             return
-        folder = self.export_dir / mem.category
+        folder = self.export_dir / memory.category
         folder.mkdir(parents=True, exist_ok=True)
         body = (
-            f"---\n"
-            f"id: {mem.id}\n"
-            f"category: {mem.category}\n"
-            f"tags: [{', '.join(mem.tags)}]\n"
-            f"project: {mem.project_id or ''}\n"
-            f"source: {mem.source}\n"
-            f"created_at: {mem.created_at}\n"
-            f"---\n\n"
-            f"# {mem.title}\n\n{mem.content}\n"
+            "---\n"
+            f"id: {memory.id}\n"
+            f"category: {memory.category}\n"
+            f"tags: [{', '.join(memory.tags)}]\n"
+            f"project: {memory.project_id or ''}\n"
+            f"source: {memory.source}\n"
+            f"created_at: {memory.created_at}\n"
+            "---\n\n"
+            f"# {memory.title}\n\n{memory.content}\n"
         )
-        (folder / f"{mem.id}.md").write_text(body, encoding="utf-8")
+        (folder / f"{memory.id}.md").write_text(body, encoding="utf-8")
 
 
-def _row_to_memory(row: sqlite3.Row) -> Memory:
-    tags = [t for t in (row["tags"] or "").split(",") if t]
+def _row_to_memory(row) -> Memory:
+    raw_tags = row["tags"] or []
+    if isinstance(raw_tags, str):
+        try:
+            raw_tags = json.loads(raw_tags)
+        except json.JSONDecodeError:
+            raw_tags = [tag for tag in raw_tags.split(",") if tag]
     return Memory(
         id=row["id"],
         category=row["category"],
         title=row["title"],
         content=row["content"],
-        tags=tags,
+        tags=list(raw_tags),
         project_id=row["project_id"],
         source=row["source"],
         created_at=row["created_at"],

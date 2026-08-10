@@ -148,6 +148,14 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_unique(self) -> AppConfig:
+        # Keep the complete built-in worker roster visible in the Config UI.
+        # Empty entries are harmless: ``available_members`` excludes them
+        # until an API key/base URL (or mock format) is configured.
+        by_name = {member.name: member for member in self.members}
+        builtins = [by_name.pop(name, MemberConfig(name=name)) for name in MEMBER_NAMES]
+        # Preserve any explicitly configured custom workers after the fixed
+        # built-in roster.
+        self.members = builtins + list(by_name.values())
         return self
 
     # --- startup validation (Seed.md launch rules) ---

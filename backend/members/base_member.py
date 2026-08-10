@@ -18,8 +18,10 @@ from backend.core.difficulty import (
     normalize_difficulty,
 )
 from backend.core.logging_util import IPCLogger
+from backend.core.ipc import FlagConflictError, accept_verified_flag
+from backend.core.postprocess_store import enqueue_postprocess
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
-from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction
+from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction, ProviderError
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import Sandbox
@@ -56,6 +58,8 @@ class MemberDeps:
     on_report: Callable[[str, Any], None] | None = None   # (project_id, Report)
     on_flag: Callable[[str], None] | None = None           # (project_id)
     expected_flag: str | None = None
+    lease_owner: str | None = None
+    lease_token: str | None = None
 
 
 @dataclass
@@ -65,6 +69,8 @@ class SolveResult:
     fact_id: str | None = None
     flag: str | None = None
     error: str | None = None
+    retryable: bool | None = None
+    error_kind: str | None = None
 
 
 @dataclass
@@ -73,6 +79,10 @@ class DispatchResult:
     graph_action: str | None = None
     invalid_action: bool = False
     invalid_knowledge: list[str] | None = None
+
+
+class _IntentLeaseLost(RuntimeError):
+    """Abort the surrounding transaction when a member loses its fence."""
 
 
 class BaseMember:
@@ -154,7 +164,14 @@ class BaseMember:
             initial=is_initial,
             restored_observations=len(self.observations),
         )
-        self._claim(project_id, intent_id)
+        if not self._claim(project_id, intent_id):
+            d.logger.project(
+                "intent_claim_lost",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+            )
+            return SolveResult(status="stalled", steps=0, error="intent lease unavailable")
         self._seed_tool_inventory(project_id)
         self._prime_tool_context(project_id, intent_id, category)
         step = 0
@@ -186,7 +203,33 @@ class BaseMember:
                     retryable=True,
                 )
                 self._release(project_id, intent_id)
-                return SolveResult(status="failed", steps=step, error=str(exc))
+                return SolveResult(
+                    status="failed",
+                    steps=step,
+                    error=str(exc),
+                    retryable=True,
+                    error_kind="model_output",
+                )
+            except ProviderError as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                d.logger.project(
+                    "member_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=error,
+                    retryable=exc.retryable,
+                    provider=exc.provider,
+                    status_code=exc.status_code,
+                )
+                self._release(project_id, intent_id)
+                return SolveResult(
+                    status="failed",
+                    steps=step,
+                    error=error,
+                    retryable=exc.retryable,
+                    error_kind="provider",
+                )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 d.logger.project(
@@ -198,7 +241,13 @@ class BaseMember:
                     retryable=True,
                 )
                 self._release(project_id, intent_id)
-                return SolveResult(status="failed", steps=step, error=error)
+                return SolveResult(
+                    status="failed",
+                    steps=step,
+                    error=error,
+                    retryable=True,
+                    error_kind="member_runtime",
+                )
             # ``decide`` may be a blocking network call.  An operator can stop
             # the project while it is in flight; honour that interrupt before
             # dispatching the returned shell/MCP action, otherwise the action
@@ -215,7 +264,19 @@ class BaseMember:
                 return SolveResult(status="stopped", steps=step)
             d.logger.llm("decide", project_id, member=self.name, step=step,
                          thought=action.thought, action=action.kind)
-            self._heartbeat(project_id, intent_id)
+            # A model call may outlive the intent lease.  Fence the result
+            # before dispatching it so a stale worker cannot execute shell/MCP
+            # actions or write graph state after another worker takes over.
+            if not self._heartbeat(project_id, intent_id):
+                self._release(project_id, intent_id)
+                d.logger.project(
+                    "intent_lease_lost",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    steps=step,
+                )
+                return SolveResult(status="stalled", steps=step, error="intent lease lost")
             loop_status = self._record_action_signature(action)
             if loop_status == "warn":
                 self._observe(
@@ -242,15 +303,54 @@ class BaseMember:
                 d.logger.project("member_loop_detected", project_id, member=self.name, intent=intent_id, steps=step)
                 return SolveResult(status="stalled", steps=step)
 
-            dispatched = await self._dispatch(
-                project_id,
-                intent_id,
-                category,
-                action,
-                step,
-                mcp_session,
-                allow_intent=branch_intents < 1,
-            )
+            try:
+                dispatched = await self._dispatch(
+                    project_id,
+                    intent_id,
+                    category,
+                    action,
+                    step,
+                    mcp_session,
+                    allow_intent=branch_intents < 1,
+                )
+            except FlagConflictError as exc:
+                self._release(project_id, intent_id)
+                d.logger.project(
+                    "member_flag_conflict",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=str(exc),
+                )
+                return SolveResult(
+                    status="stalled",
+                    steps=step,
+                    error=str(exc),
+                    retryable=False,
+                    error_kind="flag_conflict",
+                )
+            except ValueError as exc:
+                # Dispatch-time validation failures are terminal for this
+                # attempt.  Retrying the same action only replays the invalid
+                # graph transition (for example, a missing completion edge or
+                # an already-solved project) and can create a retry storm.
+                self._release(project_id, intent_id)
+                d.logger.project(
+                    "member_validation_error",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    error=str(exc),
+                    retryable=False,
+                    error_kind="terminal_validation",
+                )
+                return SolveResult(
+                    status="stalled",
+                    steps=step,
+                    error=str(exc),
+                    retryable=False,
+                    error_kind="terminal_validation",
+                )
             if dispatched.graph_action is not None:
                 graph_actions.append(dispatched.graph_action)
                 if dispatched.graph_action == "intent":
@@ -423,21 +523,77 @@ class BaseMember:
             return DispatchResult(result=SolveResult(status="done", steps=step))
         return DispatchResult()
 
-    def _claim(self, project_id, intent_id):
+    def _claim(self, project_id, intent_id) -> bool:
+        # Standalone Members do not receive an orchestrator assignment.  The
+        # claim API uses the worker name as the default lease owner; retain that
+        # owner locally so subsequent heartbeat/conclude/release calls carry a
+        # complete fencing tuple.
+        if self.deps.lease_owner is None:
+            self.deps.lease_owner = self.name
         with self.deps.db.connect() as conn:
-            edge_store.claim_intent(conn, project_id, intent_id, self.name)
+            token = edge_store.claim_intent(
+                conn,
+                project_id,
+                intent_id,
+                self.name,
+                lease_owner=self.deps.lease_owner,
+                lease_token=self.deps.lease_token,
+            )
+        if token:
+            self.deps.lease_token = token
+            return True
+        return False
 
-    def _heartbeat(self, project_id, intent_id):
-        with self.deps.db.connect() as conn:
-            row = edge_store.get_intent(conn, project_id, intent_id)
-            if row is not None and row["to_fact_id"] is None:
-                edge_store.claim_intent(conn, project_id, intent_id, self.name)
+    def _heartbeat(self, project_id, intent_id) -> bool:
+        """Renew the assigned intent and report whether this worker is fenced in.
+
+        Returning ``False`` for a missing/concluded intent, an expired lease, or
+        a database failure lets the solve loop stop before dispatching a model
+        action.  The fencing token check lives in ``claim_intent``; merely
+        seeing the same worker name is not sufficient because a replacement
+        worker may have reclaimed the intent.
+        """
+
+        try:
+            with self.deps.db.connect() as conn:
+                row = edge_store.get_intent(conn, project_id, intent_id)
+                if row is None or row["to_fact_id"] is not None:
+                    return False
+                token = edge_store.claim_intent(
+                    conn,
+                    project_id,
+                    intent_id,
+                    self.name,
+                    lease_owner=self.deps.lease_owner,
+                    lease_token=self.deps.lease_token,
+                )
+            if token:
+                self.deps.lease_token = token
+                return True
+        except Exception as exc:
+            self.deps.logger.project(
+                "intent_heartbeat_failed",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return False
 
     def _release(self, project_id, intent_id):
         with self.deps.db.connect() as conn:
             row = edge_store.get_intent(conn, project_id, intent_id)
             if row is not None and row["to_fact_id"] is None and row["worker"] == self.name:
-                edge_store.release_intent(conn, project_id, intent_id)
+                edge_store.release_intent(
+                    conn,
+                    project_id,
+                    intent_id,
+                    lease_owner=self.deps.lease_owner,
+                    lease_token=self.deps.lease_token,
+                    worker=self.name,
+                )
+        # Never carry a stale fencing tuple into a later task.
+        self.deps.lease_token = None
 
     def _restore_progress(self, project_id: str, intent_id: str) -> None:
         safe_intent = re.sub(r"[^A-Za-z0-9_.-]+", "_", intent_id).strip("._") or "intent"
@@ -831,7 +987,7 @@ class BaseMember:
 
     def _intent_source_ids(self, conn, project_id, intent_id) -> list[str]:
         rows = conn.execute(
-            "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
+            "SELECT fact_id FROM intent_sources WHERE intent_id = %s AND project_id = %s ORDER BY fact_id",
             (intent_id, project_id),
         ).fetchall()
         return [row["fact_id"] for row in rows]
@@ -921,14 +1077,31 @@ class BaseMember:
 
     def _conclude(self, project_id, intent_id, action: MemberAction) -> SolveResult:
         desc = self._string_arg(action.args.get("description", "confirmed result")) or "confirmed result"
-        with self.deps.db.connect() as conn:
-            row = edge_store.get_intent(conn, project_id, intent_id)
-            if row is None or row["to_fact_id"] is not None:
-                return SolveResult(status="done", steps=0)
-            fact = node_store.create_fact(conn, project_id, desc)
-            edge_store.conclude_intent(conn, project_id, intent_id, self.name, fact.id)
-            graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
-            graph_store.touch_project(conn, project_id)
+        try:
+            with self.deps.db.connect() as conn:
+                row = edge_store.get_intent(conn, project_id, intent_id)
+                if row is None or row["to_fact_id"] is not None:
+                    return SolveResult(status="done", steps=0)
+                fact = node_store.reserve_fact(conn, project_id, desc)
+                concluded = edge_store.conclude_intent(
+                    conn,
+                    project_id,
+                    intent_id,
+                    self.name,
+                    fact.id,
+                    lease_owner=self.deps.lease_owner,
+                    lease_token=self.deps.lease_token,
+                )
+                if not concluded:
+                    # Returning here would commit ``fact`` because the
+                    # connection context sees a normal exit. Raise so the
+                    # transaction rolls back both the fact and its counter.
+                    raise _IntentLeaseLost
+                node_store.insert_fact(conn, project_id, fact.id, fact.description)
+                graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
+                graph_store.touch_project(conn, project_id)
+        except _IntentLeaseLost:
+            return SolveResult(status="stalled", steps=0, error="intent lease lost")
         self.deps.logger.project("intent_concluded", project_id, member=self.name, intent=intent_id, fact=fact.id)
         return SolveResult(status="concluded", steps=0, fact_id=fact.id)
 
@@ -936,25 +1109,50 @@ class BaseMember:
         d = self.deps
         flag = self._string_arg(action.args.get("flag", ""))
         desc = self._string_arg(action.args.get("description", "flag captured")) or "flag captured"
-        with d.db.connect() as conn:
-            row = edge_store.get_intent(conn, project_id, intent_id)
-            # ensure the assigned intent is concluded into a fact first
-            if row is not None and row["to_fact_id"] is None:
-                fact = node_store.create_fact(conn, project_id, desc)
-                edge_store.conclude_intent(conn, project_id, intent_id, self.name, fact.id)
-                graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
-                from_fact = fact.id
-            else:
-                from_fact = row["to_fact_id"] if row else "origin"
-            # completion edge -> goal
-            comp = edge_store.create_intent(conn, project_id, [from_fact], desc, self.name, worker=self.name)
-            conn.execute(
-                "UPDATE intents SET to_fact_id='goal', concluded_at=? WHERE id=? AND project_id=?",
-                (comp.created_at, comp.id, project_id),
-            )
-            graph_store.set_flag(conn, project_id, flag)
-            graph_store.set_status(conn, project_id, "flag_found")
-            graph_store.add_link(conn, project_id, f"fact:{from_fact}", "flag", "flag")
+        try:
+            with d.db.connect() as conn:
+                row = edge_store.get_intent(conn, project_id, intent_id)
+                if row is None:
+                    return SolveResult(status="stalled", steps=step, error="intent not found")
+                # A concluded intent has no live fencing token.  Treat a
+                # replayed flag action as stale instead of letting it reuse a
+                # historical fact and write a second completion/flag edge.
+                if row["to_fact_id"] is not None:
+                    raise _IntentLeaseLost
+                # ensure the assigned intent is concluded into a fact first
+                if row["to_fact_id"] is None:
+                    fact = node_store.reserve_fact(conn, project_id, desc)
+                    concluded = edge_store.conclude_intent(
+                        conn,
+                        project_id,
+                        intent_id,
+                        self.name,
+                        fact.id,
+                        lease_owner=self.deps.lease_owner,
+                        lease_token=self.deps.lease_token,
+                    )
+                    if not concluded:
+                        raise _IntentLeaseLost
+                    node_store.insert_fact(conn, project_id, fact.id, fact.description)
+                    graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
+                    from_fact = fact.id
+                else:
+                    from_fact = row["to_fact_id"]
+                # completion edge -> goal; project-row locking makes this idempotent
+                # when multiple Members report the same Flag concurrently.
+                edge_store.complete_goal_intent(
+                    conn, project_id, [from_fact], desc, self.name, self.name
+                )
+                accept_verified_flag(
+                    conn,
+                    project_id,
+                    flag,
+                    source=f"member:{self.name}",
+                )
+                enqueue_postprocess(conn, project_id)
+                graph_store.add_link(conn, project_id, f"fact:{from_fact}", "flag", "flag")
+        except _IntentLeaseLost:
+            return SolveResult(status="stalled", steps=step, error="intent lease lost")
         d.logger.project("flag_found", project_id, member=self.name, flag=flag)
         if d.on_flag is not None:
             d.on_flag(project_id)

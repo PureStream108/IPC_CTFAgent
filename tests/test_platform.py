@@ -108,7 +108,7 @@ def test_platform_preview_import_and_flag_query(client, monkeypatch):
 
     with client.app.state.ipc.db.connect() as conn:
         graph_store.set_flag(conn, project_id, "flag{platform}")
-        graph_store.set_status(conn, project_id, "completed")
+        graph_store.set_status(conn, project_id, "solved")
         graph_store.add_broadcast(conn, project_id, "Rendered Web", "flag{platform}")
 
     flag = client.get(f"/api/flags/{project_id}")

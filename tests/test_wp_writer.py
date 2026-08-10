@@ -6,7 +6,12 @@ import pytest
 
 from backend.blackboard import graph_store
 from backend.core.state import AppState
-from backend.core.wp_writer import WRITEUP_REQUEST, WriteupGenerationError, write_wp, write_wp_content
+from backend.core.wp_writer import (
+    WRITEUP_REQUEST,
+    WriteupGenerationError,
+    write_wp,
+    write_wp_content,
+)
 from tests.helpers import write_mock_config
 
 

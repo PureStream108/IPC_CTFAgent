@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.blackboard import graph_store
+from backend.blackboard import edge_store, graph_store
 from backend.server.app import create_app
 from tests.helpers import setup_test_auth, write_mock_config
 
@@ -95,6 +95,31 @@ def test_intent_protocol_flow(client):
     r = client.post(f"/projects/{pid}/intents/{iid}/conclude", json={"worker": "aventurine", "description": "n = p*q found"})
     assert r.status_code == 200
     assert r.json()["fact"]["description"] == "n = p*q found"
+
+
+def test_unclaimed_intent_cannot_be_concluded_without_a_lease(client):
+    pid = client.post(
+        "/projects",
+        json={"title": "Fence", "origin": "o", "goal": "g", "category": "crypto"},
+    ).json()["project"]["id"]
+    intent = client.post(
+        f"/projects/{pid}/intents",
+        json={"from": ["origin"], "description": "factor n", "creator": "diamond"},
+    ).json()
+
+    response = client.post(
+        f"/projects/{pid}/intents/{intent['id']}/conclude",
+        json={"worker": "aventurine", "description": "unfenced result"},
+    )
+
+    assert response.status_code == 409
+    with client.app.state.ipc.db.connect() as connection:
+        row = edge_store.get_intent(connection, pid, intent["id"])
+        facts = connection.execute(
+            "SELECT description FROM facts WHERE project_id = %s ORDER BY id", (pid,)
+        ).fetchall()
+    assert row["to_fact_id"] is None
+    assert all(fact["description"] != "unfenced result" for fact in facts)
 
 
 def test_reason_claim_heartbeat_release(client):
@@ -253,9 +278,99 @@ def test_complete_marks_flag(client):
     assert r.status_code == 200
     assert r.json()["to"] == "goal"
     detail = client.get(f"/projects/{pid}").json()
-    # /complete triggers the orchestrator finalize pipeline -> completed
-    assert detail["project"]["status"] in ("flag_found", "completed")
+    # Flag verification is durable; writeup/memory/archive run asynchronously.
+    assert detail["project"]["status"] in ("flag_found", "solved")
     assert detail["project"]["flag"] == "flag{win}"
+
+
+def test_complete_same_flag_is_idempotent(client):
+    pid = client.post(
+        "/projects",
+        json={"title": "Idempotent", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    intent = client.post(
+        f"/projects/{pid}/intents",
+        json={"from": ["origin"], "description": "find flag", "creator": "diamond"},
+    ).json()
+    client.post(
+        f"/projects/{pid}/intents/{intent['id']}/heartbeat",
+        json={"worker": "aventurine"},
+    )
+    fact = client.post(
+        f"/projects/{pid}/intents/{intent['id']}/conclude",
+        json={"worker": "aventurine", "description": "flag evidence"},
+    ).json()["fact"]
+    payload = {
+        "from": [fact["id"]],
+        "description": "verified",
+        "worker": "aventurine",
+        "flag": "flag{idempotent}",
+    }
+
+    first = client.post(f"/projects/{pid}/complete", json=payload)
+    second = client.post(f"/projects/{pid}/complete", json=payload)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+    with client.app.state.ipc.db.connect() as connection:
+        rows = connection.execute(
+            "SELECT normalized_flag, status FROM flag_submissions WHERE project_id = %s",
+            (pid,),
+        ).fetchall()
+        goal_edges = connection.execute(
+            "SELECT id, lease_owner, lease_token, lease_expires_at FROM intents "
+            "WHERE project_id = %s AND to_fact_id = 'goal'",
+            (pid,),
+        ).fetchall()
+    assert rows == [{"normalized_flag": "flag{idempotent}", "status": "verified"}]
+    assert len(goal_edges) == 1
+    assert goal_edges[0]["lease_owner"] is None
+    assert goal_edges[0]["lease_token"] is None
+    assert goal_edges[0]["lease_expires_at"] is None
+
+
+def test_complete_different_flag_is_conflict(client):
+    pid = client.post(
+        "/projects",
+        json={"title": "Conflict", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    intent = client.post(
+        f"/projects/{pid}/intents",
+        json={"from": ["origin"], "description": "find flag", "creator": "diamond"},
+    ).json()
+    client.post(
+        f"/projects/{pid}/intents/{intent['id']}/heartbeat",
+        json={"worker": "aventurine"},
+    )
+    fact = client.post(
+        f"/projects/{pid}/intents/{intent['id']}/conclude",
+        json={"worker": "aventurine", "description": "flag evidence"},
+    ).json()["fact"]
+    base = {
+        "from": [fact["id"]],
+        "description": "verified",
+        "worker": "aventurine",
+        "flag": "flag{first}",
+    }
+    assert client.post(f"/projects/{pid}/complete", json=base).status_code == 200
+
+    conflict = client.post(
+        f"/projects/{pid}/complete",
+        json={**base, "flag": "flag{different}"},
+    )
+
+    assert conflict.status_code == 409
+    assert "different" in conflict.json()["detail"]
+    with client.app.state.ipc.db.connect() as connection:
+        project = connection.execute(
+            "SELECT flag, status FROM projects WHERE id = %s", (pid,)
+        ).fetchone()
+        submissions = connection.execute(
+            "SELECT normalized_flag FROM flag_submissions WHERE project_id = %s ORDER BY id",
+            (pid,),
+        ).fetchall()
+    assert project == {"flag": "flag{first}", "status": "solved"}
+    assert submissions == [{"normalized_flag": "flag{first}"}]
 
 
 def test_memory_api(client):
@@ -329,9 +444,7 @@ def test_completed_wp_list_and_derive(client):
         graph_store.set_wp_path(conn, pid, str(wp_path))
         graph_store.set_status(conn, pid, "running")
         graph_store.set_status(conn, pid, "flag_found")
-        graph_store.set_status(conn, pid, "wp_writing")
-        graph_store.set_status(conn, pid, "memory_writing")
-        graph_store.set_status(conn, pid, "completed")
+        graph_store.set_status(conn, pid, "solved")
 
     r = client.get("/wp/completed")
     assert r.status_code == 200
@@ -358,8 +471,7 @@ def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
     tmp_path, monkeypatch
 ):
     exports = tmp_path / "persistent-exports"
-    monkeypatch.setenv("IPC_WP_EXPORT_DIR", str(exports / "wp"))
-    monkeypatch.setenv("IPC_LOG_EXPORT_DIR", str(exports / "logs"))
+    monkeypatch.setenv("IPC_ARTIFACT_ROOT", str(exports))
 
     def make_snapshot(root: Path, content: str) -> tuple[dict, dict]:
         config_dir = write_mock_config(root / "config")
@@ -382,22 +494,20 @@ def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
             wp_path.write_text(content, encoding="utf-8")
             with current.app.state.ipc.db.connect() as conn:
                 graph_store.set_wp_path(conn, pid, str(wp_path))
-                for status in (
-                    "running",
-                    "flag_found",
-                    "wp_writing",
-                    "memory_writing",
-                    "completed",
-                ):
-                    graph_store.set_status(conn, pid, status)
-            return current.post("/wp/derive").json(), current.post(
-                "/logs/derive"
-            ).json()
+                graph_store.set_status(conn, pid, "solved")
+            wp_snapshot = current.post("/wp/derive").json()
+            log_snapshot = current.post("/logs/derive").json()
+            # PostgreSQL is shared across fresh AppState instances. Remove the
+            # first live row so the second snapshot proves Artifact durability
+            # without re-exporting both live projects.
+            with current.app.state.ipc.db.connect() as conn:
+                conn.execute("DELETE FROM projects WHERE id = %s", (pid,))
+            return wp_snapshot, log_snapshot
 
     first_wp, first_logs = make_snapshot(tmp_path / "run-one", "# first\n")
-    first_wp_path = exports / "wp" / "Same_Task.md"
+    first_wp_path = exports / "exports" / "writeups" / "Same_Task.md"
     first_log_paths = [
-        exports / "logs" / group / "Same_Task.log"
+        exports / "exports" / "logs" / group / "Same_Task.log"
         for group in ("project_logs", "llm_logs", "tool_logs", "memory_logs")
     ]
     original_wp = first_wp_path.read_bytes()
@@ -408,12 +518,12 @@ def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
     assert first_wp["files"] == ["Same_Task.md"]
     assert second_wp["files"] == ["Same_Task01.md"]
     assert first_wp_path.read_bytes() == original_wp
-    assert (exports / "wp" / "Same_Task01.md").read_text(encoding="utf-8") == "# second\n"
+    assert (exports / "exports" / "writeups" / "Same_Task01.md").read_text(encoding="utf-8") == "# second\n"
     for group in ("project_logs", "llm_logs", "tool_logs", "memory_logs"):
         assert first_logs["files"][group] == ["Same_Task.log"]
         assert second_logs["files"][group] == ["Same_Task01.log"]
-        old = exports / "logs" / group / "Same_Task.log"
-        new = exports / "logs" / group / "Same_Task01.log"
+        old = exports / "exports" / "logs" / group / "Same_Task.log"
+        new = exports / "exports" / "logs" / group / "Same_Task01.log"
         assert old.read_bytes() == original_logs[old]
         assert new.exists()
         for line in new.read_text(encoding="utf-8").splitlines():
@@ -430,14 +540,7 @@ def test_export_collision_detection_is_case_insensitive(client):
     wp_path.write_text("# new\n", encoding="utf-8")
     with client.app.state.ipc.db.connect() as conn:
         graph_store.set_wp_path(conn, pid, str(wp_path))
-        for status in (
-            "running",
-            "flag_found",
-            "wp_writing",
-            "memory_writing",
-            "completed",
-        ):
-            graph_store.set_status(conn, pid, status)
+        graph_store.set_status(conn, pid, "solved")
 
     target = client.app.state.ipc.wp_export_dir
     target.mkdir(parents=True, exist_ok=True)

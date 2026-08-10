@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """One-shot PyGhidra worker used by the reverse MCP.
 
 JPype cannot safely stop a wedged JVM from another Python thread. Running each
 analysis in a child process lets the MCP parent enforce a real wall-clock
 deadline and clean up the temporary Ghidra project even after a forced kill.
 """
+
+from __future__ import annotations
 
 import argparse
 import json

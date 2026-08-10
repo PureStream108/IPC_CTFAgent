@@ -15,6 +15,9 @@ dependencies = [
     "requests>=2.31",
     "python-multipart>=0.0.9",
     "mcp>=1.20,<2",
+    "psycopg[binary,pool]>=3.2,<4",
+    "sqlalchemy>=2.0,<3",
+    "alembic>=1.13,<2",
 ]
 
 [project.optional-dependencies]
@@ -40,3 +43,6 @@ include = ["backend*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    "postgres: requires the destructive, isolated IPC_TEST_DATABASE_URL fixture",
+]

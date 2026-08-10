@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import ast
 import json
+import random
+import time
 from dataclasses import dataclass, field, replace
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -67,6 +70,45 @@ class DecisionOutputError(ValueError):
         super().__init__(
             f"model did not return a valid JSON action after {len(attempts)} attempt(s): {detail}"
         )
+
+
+class ProviderError(RuntimeError):
+    """A classified failure while calling an LLM provider."""
+
+    retryable = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+        response: Any = None,
+    ):
+        super().__init__(message)
+        self.provider = provider
+        self.status_code = status_code
+        self.retry_after = retry_after
+        self.response = response
+
+
+class RetryableProviderError(ProviderError):
+    """A transient provider failure that may succeed when attempted later."""
+
+    retryable = True
+
+
+class NonRetryableProviderError(ProviderError):
+    """A provider failure that should not be replayed without changing input/config."""
+
+    retryable = False
+
+
+_PROVIDER_MAX_ATTEMPTS = 3
+_PROVIDER_BACKOFF_BASE_SECONDS = 0.5
+_PROVIDER_BACKOFF_CAP_SECONDS = 4.0
+_PROVIDER_RETRY_AFTER_CAP_SECONDS = 30.0
 
 
 class BaseAdapter:
@@ -198,8 +240,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
         return _openai_endpoint(self.config.base_url, surface)
 
     def health(self) -> dict:
-        import requests
-
         try:
             self._request_compatible(
                 [{"role": "user", "content": "Reply with OK."}],
@@ -217,13 +257,13 @@ class OpenAICompatibleAdapter(BaseAdapter):
                 "format": self.config.api_format,
                 "surface": self._last_response_meta.get("surface"),
             }
-        except requests.HTTPError as exc:
-            response = getattr(exc, "response", None)
+        except ProviderError as exc:
             return {
                 "ok": False,
-                "status": getattr(response, "status_code", 0) or 0,
+                "status": exc.status_code or 0,
                 "error": _http_error_summary(exc),
                 "format": self.config.api_format,
+                "retryable": exc.retryable,
             }
         except Exception as exc:
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
@@ -360,12 +400,10 @@ class OpenAICompatibleAdapter(BaseAdapter):
         thinking: str | None,
         timeout: int = 120,
     ) -> str:
-        import requests
-
         request_messages = list(messages)
         if system_prompt:
             request_messages.insert(0, {"role": "system", "content": system_prompt})
-        last_error: requests.HTTPError | None = None
+        last_error: ProviderError | None = None
         surfaces = self._surface_order()
 
         for surface in surfaces:
@@ -399,30 +437,37 @@ class OpenAICompatibleAdapter(BaseAdapter):
                     reasoning_effort=reasoning_effort,
                     thinking=thinking,
                 )
-                resp = requests.post(
+                resp = _post_with_retries(
                     self._endpoint(surface),
                     headers={
                         "Authorization": f"Bearer {self.config.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json=request_body,
+                    json_body=request_body,
                     timeout=timeout,
+                    provider=self.config.api_format,
                 )
-                try:
-                    resp.raise_for_status()
-                except requests.HTTPError as exc:
-                    last_error = exc
+                if _response_status(resp) >= 400:
+                    last_error = _provider_error_from_response(resp, self.config.api_format)
                     issue, error_text = _compatibility_issue(resp, profile)
                     if issue == "endpoint":
                         break
                     degraded = _degrade_profile(profile, issue, error_text)
                     if degraded is None or degraded.signature() in seen:
-                        raise
+                        raise last_error
                     profile = degraded
                     continue
 
-                payload = resp.json()
-                text, metadata = _openai_response_text(payload, surface)
+                payload = _provider_response_json(resp, self.config.api_format)
+                try:
+                    text, metadata = _openai_response_text(payload, surface)
+                except (TypeError, ValueError) as exc:
+                    raise NonRetryableProviderError(
+                        f"{self.config.api_format} returned an invalid response envelope: {exc}",
+                        provider=self.config.api_format,
+                        status_code=_response_status(resp),
+                        response=resp,
+                    ) from exc
                 metadata.update(
                     {
                         "surface": surface,
@@ -680,9 +725,158 @@ def _response_error_text(response: Any) -> str:
         return str(getattr(response, "text", ""))[:4000].lower()
 
 
+def _response_status(response: Any) -> int:
+    value = getattr(response, "status_code", 200)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status in {408, 429} or 500 <= status <= 599
+
+
+def _retry_after_seconds(response: Any) -> float | None:
+    headers = getattr(response, "headers", None) or {}
+    raw: Any = None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except AttributeError:
+        pass
+    if raw is None:
+        try:
+            raw = next(
+                (value for key, value in headers.items() if str(key).lower() == "retry-after"),
+                None,
+            )
+        except (AttributeError, TypeError):
+            return None
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        delay = float(value)
+    except ValueError:
+        try:
+            delay = parsedate_to_datetime(value).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return min(_PROVIDER_RETRY_AFTER_CAP_SECONDS, max(0.0, delay))
+
+
+def _provider_error_from_response(response: Any, provider: str) -> ProviderError:
+    status = _response_status(response)
+    retry_after = _retry_after_seconds(response)
+    error_type = RetryableProviderError if _is_retryable_status(status) else NonRetryableProviderError
+    return error_type(
+        f"{provider} endpoint returned HTTP {status}",
+        provider=provider,
+        status_code=status,
+        retry_after=retry_after,
+        response=response,
+    )
+
+
+def _sleep_before_provider_retry(failed_attempt: int, response: Any = None) -> None:
+    retry_after = _retry_after_seconds(response) if response is not None else None
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        ceiling = min(
+            _PROVIDER_BACKOFF_CAP_SECONDS,
+            _PROVIDER_BACKOFF_BASE_SECONDS * (2 ** max(0, failed_attempt - 1)),
+        )
+        delay = random.uniform(0.0, ceiling)
+    time.sleep(delay)
+
+
+def _post_with_retries(
+    url: str,
+    *,
+    headers: dict[str, str],
+    json_body: dict[str, Any],
+    timeout: int,
+    provider: str,
+) -> Any:
+    """POST once for permanent failures and at most three times for transient ones."""
+
+    import requests
+
+    transient_exceptions = (
+        requests.Timeout,
+        requests.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+    )
+    for attempt in range(1, _PROVIDER_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+            )
+        except transient_exceptions as exc:
+            error = RetryableProviderError(
+                f"{provider} request failed: {type(exc).__name__}",
+                provider=provider,
+            )
+            if attempt >= _PROVIDER_MAX_ATTEMPTS:
+                raise error from exc
+            _sleep_before_provider_retry(attempt)
+            continue
+        except requests.HTTPError as exc:
+            response = getattr(exc, "response", None)
+            if response is None:
+                raise NonRetryableProviderError(
+                    f"{provider} request failed: HTTPError",
+                    provider=provider,
+                ) from exc
+            error = _provider_error_from_response(response, provider)
+            if not error.retryable or attempt >= _PROVIDER_MAX_ATTEMPTS:
+                raise error from exc
+            _sleep_before_provider_retry(attempt, response)
+            continue
+        except requests.RequestException as exc:
+            raise NonRetryableProviderError(
+                f"{provider} request failed: {type(exc).__name__}",
+                provider=provider,
+            ) from exc
+
+        status = _response_status(response)
+        if not _is_retryable_status(status):
+            return response
+        error = _provider_error_from_response(response, provider)
+        if attempt >= _PROVIDER_MAX_ATTEMPTS:
+            raise error
+        _sleep_before_provider_retry(attempt, response)
+
+    raise RetryableProviderError(
+        f"{provider} request exhausted its retry budget",
+        provider=provider,
+    )
+
+
+def _provider_response_json(response: Any, provider: str) -> Any:
+    try:
+        return response.json()
+    except Exception as exc:
+        raise NonRetryableProviderError(
+            f"{provider} returned an invalid JSON response envelope",
+            provider=provider,
+            status_code=_response_status(response),
+            response=response,
+        ) from exc
+
+
 def _http_error_summary(exc: Exception) -> str:
-    response = getattr(exc, "response", None)
-    status = getattr(response, "status_code", 0) or 0
+    if isinstance(exc, ProviderError):
+        status = exc.status_code or 0
+    else:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", 0) or 0
     return f"LLM endpoint returned HTTP {status}" if status else type(exc).__name__
 
 
@@ -751,30 +945,30 @@ class ClaudeAdapter(BaseAdapter):
         }
 
     def health(self) -> dict:
-        import requests
-
         try:
-            resp = requests.post(
+            resp = _post_with_retries(
                 self._endpoint(),
                 headers=self._headers(),
-                json={"model": self.config.model or "claude-opus-4-8", "max_tokens": 1,
-                      "messages": [{"role": "user", "content": "ping"}]},
+                json_body={"model": self.config.model or "claude-opus-4-8", "max_tokens": 1,
+                           "messages": [{"role": "user", "content": "ping"}]},
                 timeout=15,
+                provider=self.config.api_format,
             )
-            resp.raise_for_status()
+            if _response_status(resp) >= 400:
+                raise _provider_error_from_response(resp, self.config.api_format)
             return {
                 "ok": True,
-                "status": resp.status_code,
+                "status": _response_status(resp),
                 "format": self.config.api_format,
                 "surface": "messages",
             }
-        except requests.HTTPError as exc:
-            response = getattr(exc, "response", None)
+        except ProviderError as exc:
             return {
                 "ok": False,
-                "status": getattr(response, "status_code", 0) or 0,
+                "status": exc.status_code or 0,
                 "error": _http_error_summary(exc),
                 "format": self.config.api_format,
+                "retryable": exc.retryable,
             }
         except Exception as exc:
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
@@ -822,8 +1016,6 @@ class ClaudeAdapter(BaseAdapter):
         temperature: float | None = 0.2,
         max_tokens: int | None = None,
     ) -> str:
-        import requests
-
         request_body: dict[str, Any] = {
             "model": self.config.model or "claude-opus-4-8",
             "max_tokens": max_tokens or 2048,
@@ -833,14 +1025,23 @@ class ClaudeAdapter(BaseAdapter):
             request_body["temperature"] = temperature
         if system_prompt:
             request_body["system"] = system_prompt
-        resp = requests.post(
+        resp = _post_with_retries(
             self._endpoint(),
             headers=self._headers(),
-            json=request_body,
+            json_body=request_body,
             timeout=120,
+            provider=self.config.api_format,
         )
-        resp.raise_for_status()
-        payload = resp.json()
+        if _response_status(resp) >= 400:
+            raise _provider_error_from_response(resp, self.config.api_format)
+        payload = _provider_response_json(resp, self.config.api_format)
+        if not isinstance(payload, dict):
+            raise NonRetryableProviderError(
+                f"{self.config.api_format} returned a non-object response envelope",
+                provider=self.config.api_format,
+                status_code=_response_status(resp),
+                response=resp,
+            )
         content = payload.get("content")
         text = _content_text(content)
         self._last_response_meta = {
@@ -861,7 +1062,7 @@ class ClaudeAdapter(BaseAdapter):
                 else None
             ),
             "surface": "messages",
-            "http_status": getattr(resp, "status_code", 200),
+            "http_status": _response_status(resp),
         }
         return text
 
@@ -929,6 +1130,20 @@ def _extract_json_value(text: Any, *, depth: int) -> dict:
         elif isinstance(obj, list):
             candidates.extend(item for item in obj if isinstance(item, dict))
 
+    # A provider can stop immediately after emitting a complete value while
+    # omitting only the final container delimiters. Close those delimiters,
+    # but never invent or terminate string content: a cut-off command or
+    # argument must go through the normal model-repair path instead.
+    for source in _truncated_object_slices(text):
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                obj = loader(source)
+            except (json.JSONDecodeError, SyntaxError, ValueError):
+                continue
+            if isinstance(obj, dict):
+                candidates.append(obj)
+            break
+
     candidate = _select_action_dict(candidates)
     if candidate is not None:
         return candidate
@@ -978,6 +1193,50 @@ def _balanced_object_slices(text: str):
             if depth == 0 and start is not None:
                 yield text[start : index + 1]
                 start = None
+
+
+def _truncated_object_slices(text: str):
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        completed = _close_truncated_containers(text[start:].strip())
+        if completed is not None:
+            yield completed
+
+
+def _close_truncated_containers(candidate: str) -> str | None:
+    expected: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in candidate:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "{":
+            expected.append("}")
+            continue
+        if char == "[":
+            expected.append("]")
+            continue
+        if char in {"}", "]"}:
+            if not expected or expected[-1] != char:
+                return None
+            expected.pop()
+            if not expected:
+                # The root object was already closed. A normal raw decode or
+                # literal parse owns this case; it is not EOF truncation.
+                return None
+    if quote is not None or not expected:
+        return None
+    return candidate + "".join(reversed(expected))
 
 
 def _content_text(content: Any) -> str:

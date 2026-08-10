@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 from backend import cli
 from backend.api.config import ConfigUpdate, LLMUpdate, RuntimeUpdate, update_config
-from backend.core.config import AppConfig, load_config
+from backend.core.config import AppConfig, MEMBER_NAMES, load_config
 from backend.core.state import AppState
 
 
@@ -15,7 +15,8 @@ def test_app_state_starts_without_a_config_file(tmp_path):
     config_dir = tmp_path / "missing-config"
     state = AppState(root=tmp_path / "runtime", config_dir=config_dir)
     try:
-        assert state.config.members == []
+        assert [member.name for member in state.config.members] == list(MEMBER_NAMES)
+        assert not any(member.configured for member in state.config.members)
         assert state.config.startup_errors()
     finally:
         state.close()
@@ -30,7 +31,7 @@ def test_check_reports_ui_ready_without_llm_credentials(monkeypatch, capsys):
     assert "configure LLM endpoints" in output
 
 
-def test_config_update_can_add_and_remove_first_member():
+def test_config_update_keeps_fixed_member_roster():
     state = SimpleNamespace(config=AppConfig(), save_config=lambda: None)
 
     view = update_config(
@@ -42,7 +43,7 @@ def test_config_update_can_add_and_remove_first_member():
         state,
     )
 
-    assert [member.name for member in state.config.members] == ["aventurine"]
+    assert [member.name for member in state.config.members] == list(MEMBER_NAMES)
     assert view["members"][0]["configured"] is True
     assert view["runtime"]["zap_enabled"] is True
     assert view["startup_errors"] == []
@@ -51,7 +52,8 @@ def test_config_update_can_add_and_remove_first_member():
         ConfigUpdate(remove_members=["AVENTURINE"]),
         state,
     )
-    assert state.config.members == []
+    assert [member.name for member in state.config.members] == list(MEMBER_NAMES)
+    assert state.config.members[0].configured is False
     assert view["startup_errors"]
 
 

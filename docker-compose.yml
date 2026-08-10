@@ -1,4 +1,19 @@
 services:
+  ipc-postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=${IPC_POSTGRES_DB:-ipc}
+      - POSTGRES_USER=${IPC_POSTGRES_USER:-ipc}
+      - POSTGRES_PASSWORD=${IPC_POSTGRES_PASSWORD:-ipc}
+    volumes:
+      - ipc_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   ipc-task-image:
     build:
       context: .
@@ -44,6 +59,7 @@ services:
       - "997"
     environment:
       - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
+      - IPC_DATABASE_URL=${IPC_DATABASE_URL:-postgresql://ipc:ipc@ipc-postgres:5432/ipc}
       - IPC_RUNNER_PORT=8600
       - IPC_RUNNER_MAX_CONCURRENT=${IPC_RUNNER_MAX_CONCURRENT:-2}
       - IPC_IPC_MCP_URL=${IPC_IPC_MCP_URL:-http://ipc-app:8000/internal/mcp}
@@ -76,28 +92,31 @@ services:
       - "8000:8000"
     environment:
       - IPC_ROOT=/app
+      - IPC_ARTIFACT_ROOT=/app/data/artifacts
       - IPC_LOG_ENABLED=true
       - IPC_ZAP_ENABLED=${IPC_ZAP_ENABLED:-}
-      - IPC_LOG_EXPORT_DIR=/app/data/logs
-      - IPC_WP_EXPORT_DIR=/app/data/Wp
-      - IPC_MEMORY_EXPORT_DIR=/app/data/memory
       - IPC_CLAUDE_RUNNER_URL=${IPC_CLAUDE_RUNNER_URL:-http://ipc-claude-runner:8600}
       - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
+      - IPC_DATABASE_URL=${IPC_DATABASE_URL:-postgresql://ipc:ipc@ipc-postgres:5432/ipc}
     volumes:
-      # ./data is the only persistent location: administrator authentication,
-      # IPC conversation configuration/history/secrets, and UI Derive/Export
-      # outputs survive `docker compose down`. Solver blackboard, memory and
-      # tool caches remain in RAM, so a fresh `up` starts those clean.
+      # PostgreSQL owns runtime facts. ./data holds deployment-owned secrets,
+      # IPC conversation files and the shared Artifact tree (workspaces,
+      # attachments, logs, writeups and exports) across app replacements.
       - ./data:/app/data
       - ./backend/config:/app/backend/config
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
-      - ipc-task-image
-      - ipc-claude-runner
+      ipc-postgres:
+        condition: service_healthy
+      ipc-task-image:
+        condition: service_completed_successfully
+      ipc-claude-runner:
+        condition: service_started
 
 # Browser and reverse MCP servers run inside each task container. ZAP is an
 # optional shared service enabled with the `zap` Compose profile.
 
 volumes:
   ipc_claude_home:
+  ipc_postgres_data:

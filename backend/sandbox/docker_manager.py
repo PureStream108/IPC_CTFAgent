@@ -5,6 +5,8 @@ import importlib
 import sys
 from pathlib import Path
 
+from backend.sandbox.errors import DockerConfigurationError
+
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -71,6 +73,11 @@ def _load_docker_sdk():
         docker = importlib.import_module("docker")
     except ImportError as exc:
         initial_import_error = exc
+    except Exception as exc:
+        raise DockerConfigurationError(
+            f"Docker SDK import failed: {type(exc).__name__}: {exc}",
+            operation="load Docker SDK",
+        ) from exc
     else:
         if hasattr(docker, "from_env") and not _is_repo_local_docker_module(docker):
             return docker
@@ -87,15 +94,24 @@ def _load_docker_sdk():
             loaded_sdk = True
             return docker
         origin = _docker_module_origin(docker)
-        raise RuntimeError(
+        raise DockerConfigurationError(
             "Docker sandbox imported a non-SDK `docker` module "
             f"({origin}). Install the Python Docker SDK and run from an environment "
-            "where it is not shadowed by a local docker/ directory."
+            "where it is not shadowed by a local docker/ directory.",
+            operation="load Docker SDK",
         )
     except ImportError as exc:
-        raise RuntimeError(
-            "Docker sandbox requires the Python Docker SDK. Install with `pip install -e .[docker]`."
+        raise DockerConfigurationError(
+            "Docker sandbox requires the Python Docker SDK. Install with `pip install -e .[docker]`.",
+            operation="load Docker SDK",
         ) from (initial_import_error or exc)
+    except DockerConfigurationError:
+        raise
+    except Exception as exc:
+        raise DockerConfigurationError(
+            f"Docker SDK import failed: {type(exc).__name__}: {exc}",
+            operation="load Docker SDK",
+        ) from exc
     finally:
         sys.path[:] = saved_path
         if not loaded_sdk:

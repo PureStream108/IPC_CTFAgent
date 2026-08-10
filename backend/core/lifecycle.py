@@ -5,11 +5,12 @@ from backend.blackboard import graph_store
 # allowed transitions (status maps to blackboard project.status)
 TRANSITIONS = {
     "created": {"running", "stopped"},
-    "running": {"flag_found", "stopped"},
-    "flag_found": {"wp_writing", "stopped"},
-    "wp_writing": {"memory_writing", "stopped"},
-    "memory_writing": {"completed", "stopped"},
-    "completed": set(),
+    "running": {"flag_found", "stopped", "timeout", "infra_error", "failed"},
+    "flag_found": {"solved", "running", "failed"},
+    "solved": set(),
+    "timeout": {"running"},
+    "infra_error": {"running", "stopped"},
+    "failed": {"running", "stopped"},
     "stopped": {"running"},
 }
 

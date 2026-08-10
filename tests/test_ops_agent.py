@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
 
 import pytest
 import requests
@@ -13,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
 from backend.core.config import LLMConfig
-from backend.members.adapters import ClaudeAdapter, DecisionOutputError, OpenAICompatibleAdapter
+from backend.members.adapters import (
+    ClaudeAdapter,
+    DecisionOutputError,
+    NonRetryableProviderError,
+    OpenAICompatibleAdapter,
+)
 from backend.mcp.mcp_client import MCPClient
 from backend.ops.network import NetworkPolicyError, WorkflowHttpClient
 from backend.ops.ipc_mcp import build_ipc_mcp
@@ -433,37 +437,22 @@ def test_claude_background_run_survives_stream_follower_disconnect(client):
     assert service.session_view(session_event["session_id"])["messages"][-1]["content"] == "finished in background"
 
 
-def test_ops_store_migrates_legacy_sessions_and_events(tmp_path):
-    root = tmp_path / "legacy"
-    data = root / "data" / "ops-agent"
-    data.mkdir(parents=True)
-    database = data / "history.db"
-    with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-            );
-            CREATE TABLE events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL, label TEXT NOT NULL,
-                text TEXT NOT NULL, created_at TEXT NOT NULL
-            );
-            """
-        )
-
-    store = OpsStore(root)
-    with sqlite3.connect(store.database_path) as connection:
-        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
-        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)")}
-        run_table = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"
-        ).fetchone()
-    assert "claude_session_id" in session_columns
-    assert "run_id" in event_columns
-    assert run_table == ("runs",)
+def test_ops_store_uses_shared_postgres_schema(client):
+    state = client.app.state.ipc
+    store = OpsStore(state.root, state.db)
+    with state.db.connect() as connection:
+        tables = {
+            row["table_name"]
+            for row in connection.execute(
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name IN ('sessions', 'events', 'runs', 'workflows')
+                """
+            )
+        }
+    assert tables == {"sessions", "events", "runs", "workflows"}
+    assert store.db is state.db
 
 
 def test_ipc_mcp_finalizes_project_with_real_writeup(client):
@@ -517,22 +506,43 @@ if __name__ == "__main__":
 
     completed = asyncio.run(run())
     assert completed["ok"] is True
-    assert completed["status"] == "completed"
-    assert completed["archive"]["wp_filename"].endswith(".md")
-    assert completed["archive"]["log_filename"].endswith(".log")
     state = client.app.state.ipc
-    assert (state.wp_export_dir / completed["archive"]["wp_filename"]).is_file()
-    for folder in state.logger.KINDS.values():
-        assert (
-            state.log_export_dir / folder / completed["archive"]["log_filename"]
-        ).is_file()
+    # Finalization commits the verified flag and writeup synchronously. Memory
+    # and archive generation are durable, fenced background jobs, so the MCP
+    # response intentionally does not contain the old synchronous ``archive``
+    # object.  The worker may already have advanced the aggregate status by the
+    # time the response is serialized; all these states are valid observations.
+    assert completed["status"] == "solved"
+    assert completed["postprocess_status"] in {"pending", "running", "completed"}
+    assert completed["wp_path"]
+    assert "archive" not in completed
+    assert Path(completed["wp_path"]).is_file()
+
+    # Wait for the asynchronous memory/archive workers before asserting their
+    # filesystem contract.  A polling loop keeps this test deterministic on
+    # both a local pool and a slower CI PostgreSQL instance.
+    deadline = time.monotonic() + 8
+    postprocess = None
+    while time.monotonic() < deadline:
+        with state.db.connect() as connection:
+            postprocess = connection.execute(
+                "SELECT postprocess_status FROM projects WHERE id = %s",
+                (completed["project_id"],),
+            ).fetchone()
+        if postprocess and postprocess["postprocess_status"] == "completed":
+            break
+        time.sleep(0.05)
+    assert postprocess is not None
+    assert postprocess["postprocess_status"] == "completed"
+    archived_wp = client.get("/wp/completed").json()["writeups"]
+    assert any(item.get("project_id") == completed["project_id"] for item in archived_wp)
     writeups = client.get("/wp/completed").json()["writeups"]
     assert any(item["project_id"] == completed["project_id"] for item in writeups)
 
-    # Simulate a fresh in-memory runtime: durable archives remain visible in
+    # Simulate a fresh runtime: durable archives remain visible in
     # the same Logs/WP pages even when the live graph no longer has the project.
     with state.db.connect() as connection:
-        connection.execute("DELETE FROM projects WHERE id = ?", (completed["project_id"],))
+        connection.execute("DELETE FROM projects WHERE id = %s", (completed["project_id"],))
     archived_wp = client.get("/wp/completed").json()["writeups"]
     assert any(
         item.get("archived") is True
@@ -545,6 +555,77 @@ if __name__ == "__main__":
         and item.get("source_project_id") == completed["project_id"]
         for item in archived_logs
     )
+
+
+def test_ipc_mcp_flag_conflict_does_not_overwrite_existing_writeup(client):
+    state = client.app.state.ipc
+    server = build_ipc_mcp(lambda: state)
+    first_markdown = """# MCP conflict test
+
+## Summary
+
+This fixture preserves the first verified writeup when a conflicting finalizer loses.
+
+## Solution
+
+```python
+import re
+
+
+def main() -> None:
+    output = "service returned flag{first}"
+    match = re.search(r"flag\\{[^}]+\\}", output)
+    if not match:
+        raise SystemExit("flag not found")
+    print(match.group(0))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Flag
+
+`flag{first}`
+"""
+    conflicting_markdown = first_markdown.replace("flag{first}", "flag{second}")
+
+    async def run():
+        async with MCPClient.in_process(server) as mcp:
+            created = await mcp.call_tool(
+                "ipc_start_challenge",
+                {
+                    "title": "MCP conflict test",
+                    "category": "web",
+                    "origin": "http://challenge.invalid",
+                },
+            )
+            project_id = created["project_id"]
+            first = await mcp.call_tool(
+                "ipc_finalize_challenge",
+                {"project_id": project_id, "flag": "flag{first}", "markdown": first_markdown},
+            )
+            conflict = await mcp.call_tool(
+                "ipc_finalize_challenge",
+                {
+                    "project_id": project_id,
+                    "flag": "flag{second}",
+                    "markdown": conflicting_markdown,
+                },
+            )
+            return project_id, first, conflict
+
+    project_id, first, conflict = asyncio.run(run())
+    assert first["ok"] is True
+    assert conflict["ok"] is False
+    assert conflict["conflict"] is True
+    path = Path(first["wp_path"])
+    assert path.read_text(encoding="utf-8") == first_markdown.rstrip() + "\n"
+    with state.db.connect() as connection:
+        project = connection.execute(
+            "SELECT flag, wp_path FROM projects WHERE id = %s", (project_id,)
+        ).fetchone()
+    assert project == {"flag": "flag{first}", "wp_path": str(path)}
 
 
 def workflow_payload(*, private: bool = True) -> dict:
@@ -627,8 +708,15 @@ def test_chat_is_multi_turn_and_structured_secrets_never_enter_history(client):
     assert len(history.json()["messages"]) == 4
     assert "abcdefghijklmnop" not in history.text
 
-    database = client.app.state.ipc.root / "data" / "ops-agent" / "history.db"
-    assert b"abcdefghijklmnop" not in database.read_bytes()
+    with client.app.state.ipc.db.connect() as connection:
+        stored = " ".join(
+            str(value)
+            for row in connection.execute(
+                "SELECT content FROM messages WHERE session_id = %s", (session_id,)
+            )
+            for value in row.values()
+        )
+    assert "abcdefghijklmnop" not in stored
     secret_file = client.app.state.ipc.root / "data" / "ops-agent" / "secrets.json"
     assert "abcdefghijklmnop" in secret_file.read_text(encoding="utf-8")
 
@@ -1170,7 +1258,7 @@ def test_openai_structured_output_degrades_from_schema_to_json_mode(monkeypatch)
     assert requests_seen[1]["response_format"] == {"type": "json_object"}
 
 
-def test_openai_does_not_retry_auth_or_rate_limit_errors(monkeypatch):
+def test_openai_does_not_retry_auth_errors(monkeypatch):
     calls = 0
 
     class FakeResponse:
@@ -1197,9 +1285,11 @@ def test_openai_does_not_retry_auth_or_rate_limit_errors(monkeypatch):
         )
     )
 
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(NonRetryableProviderError) as caught:
         adapter.decide({"step": 1})
     assert calls == 1
+    assert caught.value.retryable is False
+    assert caught.value.status_code == 401
 
 
 def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):

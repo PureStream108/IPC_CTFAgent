@@ -15,8 +15,10 @@ class FlagRecord(BaseModel):
     title: str
     category: str
     status: str
+    postprocess_status: str
     flag: str | None = None
     found_at: str | None = None
+    verified_at: str | None = None
     submitted: bool
 
 
@@ -27,8 +29,10 @@ def _record(row) -> FlagRecord:
         title=row["title"],
         category=row["category"],
         status=row["status"],
+        postprocess_status=row["postprocess_status"],
         flag=row["flag"],
-        found_at=row["updated_at"] if row["flag"] is not None else None,
+        found_at=row["flag_verified_at"] or (row["updated_at"] if row["flag"] is not None else None),
+        verified_at=row["flag_verified_at"],
         submitted=bool(row["submitted"]),
     )
 
@@ -55,7 +59,7 @@ def get_flag(project_id: str, state: AppState = Depends(get_state)):
             SELECT p.*,
                 EXISTS(SELECT 1 FROM broadcasts b WHERE b.project_id = p.id) AS submitted
             FROM projects p
-            WHERE p.id = ?
+            WHERE p.id = %s
             """,
             (project_id,),
         ).fetchone()

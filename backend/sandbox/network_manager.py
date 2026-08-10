@@ -5,6 +5,13 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from backend.sandbox.errors import (
+    DockerConfigurationError,
+    SandboxStartupError,
+    classify_docker_cli_error,
+    classify_docker_startup_error,
+)
+
 
 @dataclass
 class ChallengeEnv:
@@ -15,6 +22,7 @@ class ChallengeEnv:
     started: bool = False
     endpoints: list[str] = field(default_factory=list)
     error: str | None = None
+    startup_error: SandboxStartupError | None = field(default=None, repr=False)
 
 
 class NetworkManager:
@@ -81,12 +89,28 @@ class NetworkManager:
             if isinstance(output, bytes):
                 output = output.decode("utf-8", errors="replace")
             detail = str(output).strip()
-            env.error = f"docker command failed with exit code {exc.returncode}"
+            message = f"docker command failed with exit code {exc.returncode}"
             if detail:
-                env.error += f": {detail[-4000:]}"
+                message += f": {detail[-4000:]}"
+            env.startup_error = classify_docker_cli_error(
+                message,
+                "start challenge environment",
+            )
+            env.error = str(env.startup_error)
+            return False
+        except FileNotFoundError:
+            env.startup_error = DockerConfigurationError(
+                "Docker CLI is unavailable; install Docker and ensure `docker` is on PATH",
+                operation="start challenge environment",
+            )
+            env.error = str(env.startup_error)
             return False
         except Exception as exc:
-            env.error = f"{type(exc).__name__}: {exc}"
+            env.startup_error = classify_docker_startup_error(
+                exc,
+                "start challenge environment",
+            )
+            env.error = str(env.startup_error)
             return False
 
     def get(self, project_id: str) -> ChallengeEnv | None:

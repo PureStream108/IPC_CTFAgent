@@ -36,7 +36,7 @@ def tool_names(server):
 
 @pytest.fixture
 def registry(tmp_path):
-    return ToolRegistry(cache_db=tmp_path / "tool_cache.db").load()
+    return ToolRegistry().load()
 
 
 def test_registry_loads_all_categories(registry):

@@ -12,17 +12,17 @@ from backend.server.app import create_app
 PASSWORD = "correct horse battery staple"
 
 
-def test_first_run_setup_gates_api_and_sets_secure_session(tmp_path):
+def test_first_run_opens_api_and_compat_setup_sets_secure_session(tmp_path):
     app = create_app(root=tmp_path)
 
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert client.get("/static/ipc.png").status_code == 200
-        assert client.get("/health").json() == {"status": "ok", "setup_required": True}
-        assert client.get("/projects").status_code == 428
+        assert client.get("/health").json() == {"status": "ok", "setup_required": False}
+        assert client.get("/projects").status_code == 200
         assert client.get("/auth/status").json() == {
-            "setup_required": True,
-            "authenticated": False,
+            "setup_required": False,
+            "authenticated": True,
             "username": None,
         }
 
@@ -49,14 +49,14 @@ def test_first_run_setup_gates_api_and_sets_secure_session(tmp_path):
         assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
-def test_login_logout_and_restart_use_persisted_auth(tmp_path):
+def test_compat_login_logout_does_not_gate_trusted_api(tmp_path):
     first_app = create_app(root=tmp_path)
     with TestClient(first_app) as client:
         assert client.post("/auth/setup", json={"password": PASSWORD}).status_code == 201
 
     second_app = create_app(root=tmp_path)
     with TestClient(second_app) as client:
-        assert client.get("/projects").status_code == 401
+        assert client.get("/projects").status_code == 200
         assert client.post(
             "/auth/login",
             json={"username": "admin", "password": "wrong"},
@@ -73,9 +73,9 @@ def test_login_logout_and_restart_use_persisted_auth(tmp_path):
         assert client.get("/projects").status_code == 200
 
         assert client.post("/auth/logout").status_code == 204
-        assert client.get("/projects").status_code == 401
+        assert client.get("/projects").status_code == 200
         client.cookies.set(SESSION_COOKIE_NAME, old_cookie)
-        assert client.get("/projects").status_code == 401
+        assert client.get("/projects").status_code == 200
 
 
 def test_tampered_and_expired_sessions_are_rejected(tmp_path):
@@ -109,7 +109,7 @@ def test_active_sessions_persist_and_revocation_is_shared(tmp_path):
     assert first_manager.verify_session(token) is False
 
 
-def test_invalid_auth_file_fails_closed(tmp_path):
+def test_invalid_compat_auth_file_does_not_block_trusted_api(tmp_path):
     auth_file = tmp_path / "data" / "auth.json"
     auth_file.parent.mkdir(parents=True)
     auth_file.write_text("{}", encoding="utf-8")
@@ -117,9 +117,13 @@ def test_invalid_auth_file_fails_closed(tmp_path):
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
-        assert client.get("/auth/status").status_code == 503
+        assert client.get("/auth/status").json() == {
+            "setup_required": False,
+            "authenticated": True,
+            "username": None,
+        }
         assert client.post("/auth/setup", json={"password": PASSWORD}).status_code == 503
-        assert client.get("/projects").status_code == 503
+        assert client.get("/projects").status_code == 200
 
 
 def test_https_login_marks_cookie_secure(tmp_path):

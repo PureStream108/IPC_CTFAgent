@@ -89,8 +89,7 @@ class AuthManager:
     ) -> None:
         root_path = Path(root)
         self.auth_file = Path(auth_file) if auth_file is not None else _auth_path(root_path)
-        self.sessions_file = self.auth_file.with_name(f"{self.auth_file.stem}_sessions.db")
-        self._sessions = ActiveSessionStore(self.sessions_file)
+        self._sessions = ActiveSessionStore()
         self.session_ttl_seconds = min(
             max(session_ttl_seconds or _session_ttl_from_env(), 300),
             _MAX_SESSION_TTL_SECONDS,
@@ -101,6 +100,9 @@ class AuthManager:
         self._config: dict[str, Any] | None = None
         self._configuration_error: str | None = None
         self._load_if_present()
+
+    def close(self) -> None:
+        self._sessions.close()
 
     @property
     def setup_required(self) -> bool:

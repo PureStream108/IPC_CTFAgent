@@ -14,9 +14,12 @@ def test_compose_persists_app_exports_and_claude_native_sessions():
     # ./data is the app's host bind mount for durable IPC state and exports.
     assert binds.get("./data") == "/app/data"
 
-    # Solver runtime remains ephemeral. The only named volume belongs to the
-    # Claude runner and preserves native sessions used by `--resume`.
-    assert set(compose.get("volumes", {})) == {"ipc_claude_home"}
+    # PostgreSQL and Claude native sessions use their own named volumes. Large
+    # solver artifacts are shared through the host's ./data bind mount.
+    assert set(compose.get("volumes", {})) == {
+        "ipc_claude_home",
+        "ipc_postgres_data",
+    }
     runner_volumes = compose["services"]["ipc-claude-runner"]["volumes"]
     assert "ipc_claude_home:/home/node/.claude" in runner_volumes
     assert {src for src in binds if not src.startswith((".", "/"))} == set()
@@ -25,11 +28,16 @@ def test_compose_persists_app_exports_and_claude_native_sessions():
     for target in ("/app/memory", "/app/wp", "/app/logs", "/app/projects"):
         assert target not in binds.values()
 
-    # Everything the UI derives is written under the persistent bind mount.
+    # Workspaces, attachments, live output and exports all derive from one
+    # deployment-shared root below the persistent bind mount.
     env = dict(item.split("=", 1) for item in app["environment"])
-    assert env["IPC_LOG_EXPORT_DIR"] == "/app/data/logs"
-    assert env["IPC_WP_EXPORT_DIR"] == "/app/data/Wp"
-    assert env["IPC_MEMORY_EXPORT_DIR"] == "/app/data/memory"
+    assert env["IPC_ARTIFACT_ROOT"] == "/app/data/artifacts"
+    for legacy in (
+        "IPC_LOG_EXPORT_DIR",
+        "IPC_WP_EXPORT_DIR",
+        "IPC_MEMORY_EXPORT_DIR",
+    ):
+        assert legacy not in env
 
 
 def test_task_image_contains_ctf_and_container_mcp_runtimes():
@@ -44,6 +52,8 @@ def test_task_image_contains_ctf_and_container_mcp_runtimes():
     assert 'for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"' in task_dockerfile
     assert "COPY backend /opt/ipc/backend" in task_dockerfile
     assert "docker.io" in app_dockerfile
+    assert "COPY alembic.ini /app/alembic.ini" in app_dockerfile
+    assert "alembic upgrade head" in app_dockerfile
     assert "chromium" not in app_dockerfile
     assert "rg/ripgrep" in inventory
 

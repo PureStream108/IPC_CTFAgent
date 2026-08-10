@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
-from contextlib import contextmanager, nullcontext
+import os
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection, Generator
+from typing import Collection
 
 import yaml
-
-from backend.sqlite_util import RamSqlite
 
 REGISTRY_DIR = Path(__file__).resolve().parent / "registry"
 
@@ -57,11 +57,13 @@ class ToolRegistry:
         in_memory: bool = False,
     ):
         self.registry_dir = registry_dir or REGISTRY_DIR
-        self.cache_db = Path(cache_db) if cache_db else None
-        # The search cache is a pure performance cache, so RAM (or no cache at
-        # all, when cache_db is None) is always safe.
-        self.in_memory = in_memory and self.cache_db is not None
-        self._ram = RamSqlite(self.cache_db.stem) if self.in_memory else None
+        # cache_db/in_memory are accepted for source compatibility only. Search
+        # results are a bounded, rebuildable process-local cache.
+        del cache_db, in_memory
+        self.cache_max_entries = max(1, int(os.environ.get("IPC_TOOL_CACHE_MAX", "512")))
+        self.cache_ttl_seconds = max(1, int(os.environ.get("IPC_TOOL_CACHE_TTL", "900")))
+        self._cache: OrderedDict[str, tuple[float, list[str]]] = OrderedDict()
+        self._cache_lock = threading.Lock()
         self._tools: list[Tool] = []
         self._loaded = False
 
@@ -84,8 +86,6 @@ class ToolRegistry:
                         when_to_use=entry.get("when_to_use", ""),
                     )
                 )
-        if self.cache_db is not None:
-            self._init_cache()
         self._loaded = True
         return self
 
@@ -132,30 +132,6 @@ class ToolRegistry:
 
     # ---- tool_search (cached) ----
 
-    def _init_cache(self) -> None:
-        if not self.in_memory:
-            self.cache_db.parent.mkdir(parents=True, exist_ok=True)
-        with self._conn() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS tool_search_cache ("
-                "query TEXT PRIMARY KEY, results TEXT NOT NULL, created_at TEXT NOT NULL)"
-            )
-            conn.commit()
-
-    @contextmanager
-    def _conn(self) -> Generator[sqlite3.Connection, None, None]:
-        ram = self._ram
-        with ram.guard() if ram is not None else nullcontext():
-            if ram is not None:
-                conn = ram.connect(timeout=30)
-            else:
-                conn = sqlite3.connect(str(self.cache_db), timeout=30)
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-            finally:
-                conn.close()
-
     def _score(self, tool: Tool, terms: list[str]) -> float:
         name = tool.name.lower()
         tags = {t.lower() for t in tool.tags}
@@ -186,32 +162,29 @@ class ToolRegistry:
         scored = [(t, s) for t, s in scored if s > 0]
         scored.sort(key=lambda p: p[1], reverse=True)
         results = [t for t, _ in scored[:limit]]
-        if self.cache_db is not None and results:
+        if results:
             self._cache_results(query, [t.name for t in results])
         return results
 
     def _cache_results(self, query: str, names: list[str]) -> None:
-        import json
-        from datetime import UTC, datetime
-
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO tool_search_cache (query, results, created_at) VALUES (?, ?, ?)",
-                (query, json.dumps(names), datetime.now(UTC).isoformat()),
-            )
-            conn.commit()
+        with self._cache_lock:
+            self._cache.pop(query, None)
+            self._cache[query] = (time.monotonic(), list(names))
+            while len(self._cache) > self.cache_max_entries:
+                self._cache.popitem(last=False)
 
     def cached_search(self, query: str) -> list[str] | None:
-        if self.cache_db is None:
-            return None
-        import json
-
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT results FROM tool_search_cache WHERE query = ?", (query,)
-            ).fetchone()
-        return json.loads(row["results"]) if row else None
+        with self._cache_lock:
+            cached = self._cache.get(query)
+            if cached is None:
+                return None
+            created_at, names = cached
+            if time.monotonic() - created_at > self.cache_ttl_seconds:
+                self._cache.pop(query, None)
+                return None
+            self._cache.move_to_end(query)
+            return list(names)
 
     def close(self) -> None:
-        if self._ram is not None:
-            self._ram.close()
+        with self._cache_lock:
+            self._cache.clear()

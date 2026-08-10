@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
 import time
 from pathlib import Path
+from psycopg import OperationalError
 
 from backend.blackboard import edge_store
 from backend.blackboard import graph_store
@@ -105,7 +105,7 @@ def main() -> int:
             try:
                 snap = project_snapshot(state, project_id)
                 consecutive_db_errors = 0
-            except sqlite3.OperationalError as exc:
+            except OperationalError as exc:
                 consecutive_db_errors += 1
                 print(f"DB_RETRY {consecutive_db_errors} {exc}", flush=True)
                 if consecutive_db_errors >= 5:
@@ -133,7 +133,7 @@ def main() -> int:
                 if seeded is not None:
                     followup_seeds += 1
                     print(f"SEEDED_INTENT {seeded}", flush=True)
-            if snap["status"] in ("completed", "stopped"):
+            if snap["status"] in ("solved", "stopped", "failed", "infra_error", "timeout"):
                 break
             time.sleep(3)
         else:

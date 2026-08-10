@@ -15,6 +15,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ipc_test
+          POSTGRES_USER: ipc
+          POSTGRES_PASSWORD: ipc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ipc -d ipc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      IPC_TEST_DATABASE_URL: postgresql://ipc:ipc@127.0.0.1:5432/ipc_test
+      IPC_DATABASE_URL: postgresql://ipc:ipc@127.0.0.1:5432/ipc_test
 
     steps:
       - name: Checkout

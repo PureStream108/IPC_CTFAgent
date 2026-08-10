@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import re
 import threading
 from pathlib import Path
@@ -68,23 +69,50 @@ class ContainerPool:
             raise
         return sb
 
-    def _create(self, project_id: str, member: str, env: dict[str, str] | None) -> Sandbox:
-        if self.backend == "docker":
-            from backend.sandbox.task_sandbox import TaskSandbox
+    def preflight(self, project_id: str, env: dict[str, str] | None = None) -> None:
+        """Start the task container before any model work consumes solver budget."""
 
+        if self.backend != "docker":
+            return
+        with self._lock:
             task = self._tasks.get(project_id)
             if task is None:
-                task = TaskSandbox(
-                    project_id=project_id,
-                    image=self.image,
-                    env=env,
-                    network=self.network,
-                    attachments_dir=self.workspace_root / project_id / "attachments",
-                )
+                task = self._new_task(project_id, env)
+                self._tasks[project_id] = task
+                created = True
+            else:
+                created = False
+        try:
+            task.preflight()
+            task.start()
+        except Exception:
+            with self._lock:
+                if created and self._tasks.get(project_id) is task:
+                    self._tasks.pop(project_id, None)
+            with suppress(Exception):
+                task.stop()
+            raise
+
+    def _create(self, project_id: str, member: str, env: dict[str, str] | None) -> Sandbox:
+        if self.backend == "docker":
+            task = self._tasks.get(project_id)
+            if task is None:
+                task = self._new_task(project_id, env)
                 self._tasks[project_id] = task
             return task.member_view(member)
         ws = self.workspace_root / project_id / "sandbox" / member
         return LocalSandbox(name=f"{project_id}-{member}", workspace=ws, env=env)
+
+    def _new_task(self, project_id: str, env: dict[str, str] | None):
+        from backend.sandbox.task_sandbox import TaskSandbox
+
+        return TaskSandbox(
+            project_id=project_id,
+            image=self.image,
+            env=env,
+            network=self.network,
+            attachments_dir=self.workspace_root / project_id / "attachments",
+        )
 
     def stop_member(self, project_id: str, member: str) -> None:
         """Drop a Member's view. Does NOT stop the shared task container."""

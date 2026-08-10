@@ -4,9 +4,22 @@ from backend.blackboard import graph_store
 from backend.memory.memory_store import MemoryStore
 
 
-def write_memory(db, project_id: str, memory: MemoryStore, diamond_adapter=None) -> list:
-    with db.connect() as conn:
-        detail = graph_store.project_detail(conn, project_id)
+def write_memory(
+    db,
+    project_id: str,
+    memory: MemoryStore,
+    diamond_adapter=None,
+    *,
+    connection=None,
+    mirror: bool = True,
+) -> list:
+    if connection is None:
+        with db.connect() as own_connection:
+            detail = graph_store.project_detail(own_connection, project_id)
+    else:
+        detail = graph_store.project_detail(connection, project_id)
+    if detail is None:
+        raise RuntimeError(f"project {project_id} not found")
     p = detail.project
     category = p.category
     written = []
@@ -23,6 +36,8 @@ def write_memory(db, project_id: str, memory: MemoryStore, diamond_adapter=None)
                 content="Solution facts:\n- " + "\n- ".join(path_facts[:8]),
                 tags=[category, "solution"],
                 project_id=project_id,
+                connection=connection,
+                mirror=mirror,
             )
         )
 
@@ -40,6 +55,8 @@ def write_memory(db, project_id: str, memory: MemoryStore, diamond_adapter=None)
                 content="Knowledge points that mattered: " + ", ".join(dict.fromkeys(knowledge_points)),
                 tags=[category] + list(dict.fromkeys(knowledge_points))[:5],
                 project_id=project_id,
+                connection=connection,
+                mirror=mirror,
             )
         )
 
@@ -53,6 +70,8 @@ def write_memory(db, project_id: str, memory: MemoryStore, diamond_adapter=None)
                 content=f"Final exploit: {goal_edge.description}. Flag: {p.flag or ''}",
                 tags=[category, "exploit"],
                 project_id=project_id,
+                connection=connection,
+                mirror=mirror,
             )
         )
 
@@ -66,6 +85,8 @@ def write_memory(db, project_id: str, memory: MemoryStore, diamond_adapter=None)
                 + "; ".join(dict.fromkeys(directions)),
                 tags=[category, "lessons"],
                 project_id=project_id,
+                connection=connection,
+                mirror=mirror,
             )
         )
 

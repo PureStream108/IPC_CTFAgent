@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,36 @@ def _target_path(wp_dir: Path, project_id: str, title: str, existing_wp_path: st
     if not path.exists():
         return path
     return wp_dir / f"{base}_{project_id}.md"
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    """Replace a file without exposing a partially written artifact."""
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _restore_file(path: Path, previous: bytes | None) -> None:
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        _atomic_write(path, previous)
 
 
 def validate_writeup(
@@ -140,6 +172,38 @@ def write_wp(
     return _persist_content(db, project_id, wp_dir, detail.project.title, detail.project.wp_path, content)
 
 
+def generate_wp_content(
+    db,
+    project_id: str,
+    *,
+    generator: Callable[[str], str] | None = None,
+    evidence_logs: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> tuple[str, str]:
+    """Generate and validate a final writeup without changing durable state."""
+
+    with db.connect() as connection:
+        detail = graph_store.project_detail(connection, project_id)
+    if detail is None:
+        raise RuntimeError(f"project {project_id} not found")
+
+    content = (
+        _mock_writeup(detail)
+        if generator is None
+        else _generate_writeup(detail, generator, evidence_logs or {})
+    )
+    expected_flag = str(detail.project.flag or "")
+    errors = validate_writeup(
+        content,
+        expected_flag=expected_flag or None,
+        require_complete=True,
+    )
+    if errors:
+        raise WriteupGenerationError("; ".join(errors))
+    if not expected_flag:
+        raise WriteupGenerationError("project has no verified flag")
+    return content, expected_flag
+
+
 def write_wp_content(
     db,
     project_id: str,
@@ -175,6 +239,55 @@ def write_wp_content(
     return _persist_content(db, project_id, wp_dir, detail.project.title, detail.project.wp_path, content)
 
 
+def persist_validated_writeup(
+    connection,
+    project_id: str,
+    wp_dir: Path,
+    content: str,
+    *,
+    expected_flag: str,
+) -> tuple[str, Callable[[], None]]:
+    """Write a validated final WP inside an existing database transaction.
+
+    The returned rollback callback restores the previous file (or removes the
+    newly-created one) when a later database operation fails.  This keeps the
+    filesystem and ``projects.wp_path`` aligned even though PostgreSQL cannot
+    include a file write in its transaction.
+    """
+
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("writeup content must be non-empty")
+    if len(content) > 1_000_000:
+        raise ValueError("writeup content is limited to 1,000,000 characters")
+    errors = validate_writeup(content, expected_flag=expected_flag, require_complete=True)
+    if errors:
+        raise ValueError("invalid writeup: " + "; ".join(errors))
+
+    row = connection.execute(
+        "SELECT title, wp_path FROM projects WHERE id = %s", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"project {project_id} not found")
+    wp_dir.mkdir(parents=True, exist_ok=True)
+    path = _target_path(wp_dir, project_id, row["title"], row["wp_path"])
+    previous = path.read_bytes() if path.is_file() else None
+
+    def rollback_file() -> None:
+        _restore_file(path, previous)
+
+    write_started = False
+    try:
+        write_started = True
+        _atomic_write(path, (content.rstrip() + "\n").encode("utf-8"))
+        graph_store.set_wp_path(connection, project_id, str(path))
+    except Exception:
+        if write_started:
+            rollback_file()
+        raise
+
+    return str(path), rollback_file
+
+
 def _persist_content(
     db,
     project_id: str,
@@ -184,9 +297,17 @@ def _persist_content(
     content: str,
 ) -> str:
     path = _target_path(wp_dir, project_id, title, existing_wp_path)
-    path.write_text(content.rstrip() + "\n", encoding="utf-8")
-    with db.connect() as conn:
-        graph_store.set_wp_path(conn, project_id, str(path))
+    previous = path.read_bytes() if path.is_file() else None
+    write_started = False
+    try:
+        write_started = True
+        _atomic_write(path, (content.rstrip() + "\n").encode("utf-8"))
+        with db.connect() as conn:
+            graph_store.set_wp_path(conn, project_id, str(path))
+    except Exception:
+        if write_started:
+            _restore_file(path, previous)
+        raise
     return str(path)
 
 

@@ -105,7 +105,7 @@ def _require_active(conn, project_id: str):
     row = graph_store.get_project_row(conn, project_id)
     if row is None:
         raise HTTPException(404, "Project not found")
-    if row["status"] in ("completed", "stopped"):
+    if row["status"] in ("solved", "stopped", "timeout", "infra_error", "failed"):
         raise HTTPException(403, f"Project is {row['status']}")
     return row
 
@@ -138,7 +138,16 @@ def heartbeat_intent(
             raise HTTPException(409, "Intent already concluded")
         if row["worker"] is not None and row["worker"] != body.worker:
             raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
-        edge_store.claim_intent(conn, project_id, intent_id, body.worker)
+        token = edge_store.claim_intent(
+            conn,
+            project_id,
+            intent_id,
+            body.worker,
+            lease_owner=body.worker,
+            lease_token=body.lease_token,
+        )
+        if token is None:
+            raise HTTPException(409, "Intent lease is owned by another worker or token is stale")
         return edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent_id), project_id)
 
 
@@ -156,7 +165,16 @@ def release_intent(
         if row["worker"] is not None and row["worker"] != body.worker:
             raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
         if row["worker"] == body.worker:
-            edge_store.release_intent(conn, project_id, intent_id)
+            released = edge_store.release_intent(
+                conn,
+                project_id,
+                intent_id,
+                lease_owner=body.worker if body.lease_token else None,
+                lease_token=body.lease_token,
+                worker=body.worker,
+            )
+            if not released:
+                raise HTTPException(409, "Intent lease token is stale")
         return edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent_id), project_id)
 
 
@@ -216,7 +234,25 @@ def conclude_intent(
         if row["worker"] is not None and row["worker"] != body.worker:
             raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
         fact = node_store.create_fact(conn, project_id, body.description)
-        edge_store.conclude_intent(conn, project_id, intent_id, body.worker, fact.id)
+        # Older clients do not send the fencing token. Preserve that
+        # compatibility path explicitly; passing only ``lease_owner`` would
+        # intentionally fail closed as an incomplete fencing tuple.
+        if body.lease_token:
+            concluded = edge_store.conclude_intent(
+                conn,
+                project_id,
+                intent_id,
+                body.worker,
+                fact.id,
+                lease_owner=body.worker,
+                lease_token=body.lease_token,
+            )
+        else:
+            concluded = edge_store.conclude_intent(
+                conn, project_id, intent_id, body.worker, fact.id
+            )
+        if not concluded:
+            raise HTTPException(409, "Intent lease token is stale")
         graph_store.touch_project(conn, project_id)
         intent = edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent_id), project_id)
     state.logger.project("intent_concluded", project_id, intent=intent_id, worker=body.worker, fact=fact.id)

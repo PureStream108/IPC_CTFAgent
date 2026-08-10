@@ -58,56 +58,6 @@
   </script>
 </head>
 <body class="bg-slate-50 text-slate-800 h-screen flex flex-col overflow-hidden" x-data="ipcApp()" x-init="init()" x-cloak>
-  <div class="fixed inset-0 z-[100] bg-slate-50 flex items-center justify-center p-5" x-show="authReady && !auth.authenticated">
-    <div class="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-7 shadow-xl shadow-slate-200/60">
-      <div class="flex items-center gap-3 mb-6">
-        <div class="h-11 w-11 rounded-xl border border-slate-200 bg-white shadow-sm flex items-center justify-center overflow-hidden">
-          <img src="/static/ipc.png" alt="IPC" class="h-9 w-9 object-contain">
-        </div>
-        <div>
-          <div class="text-lg font-semibold text-slate-700">IPC CTF Agent</div>
-          <div class="text-xs text-slate-400" x-text="auth.setup_required ? 'First-time setup' : 'Administrator login'"></div>
-        </div>
-      </div>
-
-      <form x-show="auth.setup_required" @submit.prevent="completeSetup()" class="space-y-4">
-        <div class="rounded-xl border border-brand-100 bg-brand-50/70 px-3 py-2.5 text-xs leading-relaxed text-brand-700">
-          Create the local administrator password first. After setup, IPC opens endpoint configuration so no API key is required before the WebUI starts.
-        </div>
-        <label class="block text-xs text-slate-500">Administrator
-          <input class="mt-1 w-full rounded-xl px-3 py-2 text-sm bg-slate-50" value="admin" disabled>
-        </label>
-        <label class="block text-xs text-slate-500">Password
-          <input type="password" autocomplete="new-password" minlength="12" maxlength="1024" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="setupForm.password" placeholder="At least 12 characters">
-        </label>
-        <label class="block text-xs text-slate-500">Confirm password
-          <input type="password" autocomplete="new-password" minlength="12" maxlength="1024" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="setupForm.confirm" placeholder="Repeat password">
-        </label>
-        <p class="text-xs text-rose-600" x-show="authError" x-text="authError"></p>
-        <button class="btn w-full rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-50" :disabled="authBusy || setupForm.password.length < 12 || setupForm.password !== setupForm.confirm">
-          <span x-text="authBusy ? 'Creating administrator...' : 'Create administrator'"></span>
-        </button>
-      </form>
-
-      <form x-show="!auth.setup_required" @submit.prevent="login()" class="space-y-4">
-        <label class="block text-xs text-slate-500">Username
-          <input autocomplete="username" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="loginForm.username">
-        </label>
-        <label class="block text-xs text-slate-500">Password
-          <input type="password" autocomplete="current-password" required class="mt-1 w-full rounded-xl px-3 py-2 text-sm" x-model="loginForm.password">
-        </label>
-        <p class="text-xs text-rose-600" x-show="authError" x-text="authError"></p>
-        <button class="btn w-full rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-50" :disabled="authBusy || !loginForm.password">
-          <span x-text="authBusy ? 'Signing in...' : 'Sign in'"></span>
-        </button>
-      </form>
-    </div>
-  </div>
-
-  <div class="fixed inset-0 z-[99] bg-slate-50 flex items-center justify-center text-sm text-slate-400" x-show="!authReady">
-    Loading IPC...
-  </div>
-
   <header class="bg-white/80 backdrop-blur border-b border-slate-200/60 px-4 py-2.5 flex items-center gap-3 shrink-0">
     <button type="button" @click="sidebarOpen=!sidebarOpen" class="h-8 w-8 rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center justify-center" title="Toggle projects">
       <svg x-show="sidebarOpen" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
@@ -136,16 +86,15 @@
         <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
         <span class="font-semibold text-amber-700 tabular-nums" x-text="countBy('stopped')"></span>
       </span>
-      <span class="inline-flex items-center gap-1.5" title="Completed projects">
+      <span class="inline-flex items-center gap-1.5" title="Solved projects">
         <span class="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
-        <span class="font-semibold text-slate-600 tabular-nums" x-text="countBy('completed')"></span>
+        <span class="font-semibold text-slate-600 tabular-nums" x-text="countBy('solved')"></span>
       </span>
     </div>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalLogs()">Logs</button>
     <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalWP()">WP</button>
     <button class="h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition inline-flex items-center" @click="openOpsAgent()">IPC</button>
-    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">IPC</button>
-    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition inline-flex items-center" @click="logout()" title="Sign out">Logout</button>
+    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">Config</button>
   </header>
 
   <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
@@ -204,7 +153,7 @@
               <span x-text="p.member_count + 'M'"></span>
               <span x-text="p.fact_count + 'F'"></span>
             </div>
-            <div x-show="p.runtime_phase && !['idle','ready','completed','stopped'].includes(p.runtime_phase)"
+            <div x-show="p.runtime_phase && !['idle','ready','solved','stopped'].includes(p.runtime_phase)"
               class="mt-1.5 truncate font-mono text-[10px] text-sky-600" x-text="p.runtime_phase"></div>
           </button>
         </template>
@@ -219,13 +168,12 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
           </button>
           <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='created'" @click="startSolve()">Start</button>
-          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='stopped'" @click="resumeSolve()">Resume</button>
-          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='completed'" @click="reopenProject()">Reopen</button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && ['stopped','timeout','infra_error','failed'].includes(current.project.status)" @click="resumeSolve()">Resume</button>
           <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='running'" @click="stopSolve()">Stop</button>
           <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.wp_path" @click="openWP()">WP</button>
           <button class="btn-ghost btn-danger h-7 px-2.5 rounded-lg text-xs" @click="deleteProject()">Delete</button>
         </div>
-        <template x-if="current && (current.project.runtime_error || !['idle','ready','completed','stopped'].includes(current.project.runtime_phase))">
+        <template x-if="current && (current.project.runtime_error || !['idle','ready','solved','stopped'].includes(current.project.runtime_phase))">
           <div class="absolute top-14 left-3 z-10 max-w-[34rem] rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
             <div class="font-mono font-semibold text-sky-700" x-text="'IPC startup: '+current.project.runtime_phase"></div>
             <div x-show="current.project.runtime_error" class="mt-1 break-words text-rose-600" x-text="current.project.runtime_error"></div>
@@ -530,7 +478,7 @@
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showIPC" x-cloak>
     <div class="panel rounded-2xl w-[720px] max-h-[90vh] overflow-y-auto p-5">
       <div class="flex items-center justify-between mb-4">
-        <div class="text-lg font-semibold text-slate-700">IPC - Agent Endpoints</div>
+        <div class="text-lg font-semibold text-slate-700">Config - Agent Endpoints</div>
         <button class="btn-ghost px-2.5 py-1 rounded-lg text-xs" @click="runHealth()">Health check</button>
       </div>
       <template x-if="cfg">
@@ -539,7 +487,7 @@
             <template x-for="e in cfg.startup_errors" :key="e"><div x-text="'! ' + e"></div></template>
           </div>
           <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3">
-            <div class="text-sm font-semibold text-slate-700 mb-2">Diamond <span class="text-[10px]" :class="health.diamond?(health.diamond.ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health.diamond?(health.diamond.ok?'healthy':'unreachable'):''"></span></div>
+            <div class="text-sm font-semibold text-slate-700 mb-2">Diamond <span class="text-[10px]" :class="health.diamond?(health.diamond.skipped?'text-slate-400':(health.diamond.ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health.diamond?(health.diamond.skipped?'skipped':(health.diamond.ok?'healthy':'unreachable')):''"></span></div>
             <div x-html="llmFields('diamond', cfg.diamond)"></div>
           </div>
           <template x-for="m in cfg.members" :key="m.name">
@@ -547,21 +495,12 @@
               <div class="flex items-center justify-between mb-2">
                 <div class="text-sm font-semibold text-slate-700 capitalize">
                   <span x-text="m.name"></span>
-                  <span class="text-[10px] ml-1" :class="health[m.name]?(health[m.name].ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health[m.name]?(health[m.name].ok?'healthy':'unreachable'):''"></span>
+                  <span class="text-[10px] ml-1" :class="health[m.name]?(health[m.name].skipped?'text-slate-400':(health[m.name].ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health[m.name]?(health[m.name].skipped?'skipped':(health[m.name].ok?'healthy':'unreachable')):''"></span>
                 </div>
-                <button class="text-[11px] text-rose-500 hover:text-rose-700" @click="removeMember(m.name)">Remove</button>
               </div>
               <div x-html="llmFields(m.name, m)"></div>
             </div>
           </template>
-          <div class="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 p-3 mb-3">
-            <div class="text-xs font-semibold text-slate-600 mb-2">Add Member</div>
-            <div class="flex gap-2">
-              <input class="flex-1 rounded-lg px-2.5 py-1.5 text-sm" x-model="newMemberName" @keydown.enter.prevent="addMember()" placeholder="aventurine">
-              <button class="btn px-3 py-1.5 rounded-lg text-xs" @click="addMember()">Add</button>
-            </div>
-            <div class="mt-1.5 text-[10px] text-slate-400">Use lowercase letters, numbers, underscores, or hyphens.</div>
-          </div>
           <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3" x-show="cfg.runtime">
             <div class="flex items-start justify-between gap-4">
               <div>
@@ -778,9 +717,9 @@
           <div class="text-[11px] text-slate-400" x-text="opsCfg?.api_format==='claudecode'?'Claude Code action agent with native session context, live logs, and host-root maintenance access.':opsCfg?.api_format==='openai'?'OpenAI-compatible action agent with durable IPC history, live tool logs, and host-root maintenance access.':'API-backed action agent with durable IPC history and host-root maintenance access.'"></div>
         </div>
         <div class="flex items-center gap-2">
-          <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in IPC'"></span>
+          <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in Config'"></span>
           <button x-show="opsBusy" x-cloak class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50" :disabled="opsInterrupting" @click="interruptOpsRun()" x-text="opsInterrupting?'Interrupting…':'Interrupt IPC'"></button>
-          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">IPC config</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">Config</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false">Close</button>
         </div>
       </div>
@@ -930,15 +869,12 @@
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
       showGlobalLogs: false, showGlobalWP: false, showOps: false,
-      authReady: false, authBusy: false, authError: "",
-      auth: {setup_required:false, authenticated:false, username:null},
-      setupForm: {password:"", confirm:""}, loginForm: {username:"admin", password:""},
       _appStarted: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       newHint: { content:"", creator:"human" },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, opsCfg: null, health: {}, memories: [], wpText: "", toast: "",
-      newMemberName: "", _removedMembers: [],
+      _removedMembers: [],
       memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
       opsBusy: false, opsStreaming: false, opsInterrupting: false, opsRunId: null, opsQueuedMessage: null, opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAtBottom: true,
@@ -948,51 +884,7 @@
 
       async init() {
         window._ipc = this;
-        try {
-          this.auth = await this.authRequest("GET", "/auth/status");
-        } catch (error) {
-          this.authError = "Authentication service is unavailable.";
-        } finally {
-          this.authReady = true;
-        }
-        if (this.auth.authenticated) await this.startApp();
-      },
-      async authRequest(method, path, body) {
-        const options={method,headers:{},credentials:"same-origin"};
-        if(body!==undefined){ options.headers["Content-Type"]="application/json"; options.body=JSON.stringify(body); }
-        const response=await fetch(path,options);
-        const text=await response.text();
-        let data; try{ data=text?JSON.parse(text):null; }catch(error){ data=text; }
-        if(!response.ok) throw new Error((data&&data.detail)||("error "+response.status));
-        return data;
-      },
-      async completeSetup(){
-        if(this.setupForm.password!==this.setupForm.confirm){ this.authError="Passwords do not match."; return; }
-        this.authBusy=true; this.authError="";
-        try{
-          this.auth=await this.authRequest("POST","/auth/setup",{password:this.setupForm.password});
-          this.setupForm={password:"",confirm:""};
-          await this.startApp();
-          await this.openIPCConfig();
-        }catch(error){ this.authError=error.message; }
-        finally{ this.authBusy=false; }
-      },
-      async login(){
-        this.authBusy=true; this.authError="";
-        try{
-          this.auth=await this.authRequest("POST","/auth/login",this.loginForm);
-          this.loginForm.password="";
-          await this.startApp();
-        }catch(error){ this.authError=error.message; }
-        finally{ this.authBusy=false; }
-      },
-      async logout(){
-        try{ await this.authRequest("POST","/auth/logout"); }catch(error){}
-        this.stopApp();
-        this.auth={setup_required:false,authenticated:false,username:null};
-        this.authError=""; this.loginForm.password="";
-        this.showIPC=false; this.showMemory=false; this.showGlobalLogs=false; this.showGlobalWP=false; this.showOps=false;
-        this.clearAppData();
+        await this.startApp();
       },
       clearAppData(){
         this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
@@ -1013,7 +905,7 @@
           this._poll=setInterval(()=>this.tick(),2500);
         }catch(error){
           this._appStarted=false;
-          if(this.auth.authenticated) this.flash(error.message||"Failed to load IPC");
+          this.flash(error.message||"Failed to load IPC");
         }
       },
       stopApp(){
@@ -1023,7 +915,6 @@
         this._clock=null; this._poll=null; this._flowTimer=null; this._appStarted=false;
       },
       async tick() {
-        if(!this.auth.authenticated) return;
         this.nowMs = Date.now();
         try{
           await this.loadProjects(); await this.loadBroadcasts();
@@ -1039,24 +930,19 @@
         if (r.status===204) return null;
         const txt = await r.text();
         let data; try { data = txt ? JSON.parse(txt) : null; } catch(e){ data = txt; }
-        if(r.status===401 || r.status===428){
-          this.stopApp();
-          this.clearAppData();
-          try{ this.auth=await this.authRequest("GET","/auth/status"); }catch(error){ this.auth={setup_required:r.status===428,authenticated:false,username:null}; }
-          this.authError=r.status===428?"Initial administrator setup is required.":"Your session expired. Sign in again.";
-        }
         if (!r.ok) { this.flash((data&&data.detail)||("error "+r.status)); throw new Error(txt); }
         return data;
       },
       flash(m){ this.toast=m; setTimeout(()=>this.toast="",2500); },
       countBy(s){ return this.projects.filter(p=>p.status===s).length; },
-      get hasActive(){ return this.projects.some(p=>!["completed","stopped"].includes(p.status)); },
+      get hasActive(){ return this.projects.some(p=>!["solved","stopped","timeout","infra_error","failed"].includes(p.status)); },
       statusColor(s){ return {running:"text-teal-600",created:"text-slate-500",flag_found:"text-emerald-600",
-        wp_writing:"text-sky-600",memory_writing:"text-violet-600",completed:"text-slate-500",
+        solved:"text-emerald-700",timeout:"text-orange-600",infra_error:"text-rose-600",failed:"text-rose-600",
         stopped:"text-amber-600",active:"text-teal-600",done:"text-slate-500",paused:"text-amber-600",idle:"text-slate-400"}[s]||"text-slate-500"; },
       projectStatusBadgeClass(s){ return {running:"bg-teal-50 text-teal-700",created:"bg-slate-100 text-slate-600",
-        flag_found:"bg-emerald-50 text-emerald-700",wp_writing:"bg-sky-50 text-sky-700",memory_writing:"bg-violet-50 text-violet-700",
-        completed:"bg-slate-100 text-slate-600",stopped:"bg-amber-50 text-amber-700"}[s]||"bg-slate-100 text-slate-600"; },
+        flag_found:"bg-emerald-50 text-emerald-700",solved:"bg-emerald-100 text-emerald-800",
+        timeout:"bg-orange-50 text-orange-700",infra_error:"bg-rose-50 text-rose-700",failed:"bg-rose-50 text-rose-700",
+        stopped:"bg-amber-50 text-amber-700"}[s]||"bg-slate-100 text-slate-600"; },
       factBadgeClass(id){ return id==="origin" ? "bg-teal-50 text-teal-700" : id==="goal" ? "bg-rose-50 text-rose-600" : "bg-brand-50 text-brand-700"; },
       formatTime(ts){ if(!ts) return ""; return new Date(ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"}); },
       parseTimestamp(ts){ const ms = Date.parse(ts || ""); return Number.isNaN(ms) ? null : ms; },
@@ -1070,7 +956,7 @@
       projectElapsed(project){
         const start = this.parseTimestamp(project?.created_at);
         if (start === null) return "--:--:--";
-        const frozen = ["completed","stopped"].includes(project.status) ? this.parseTimestamp(project.updated_at) : null;
+        const frozen = ["solved","stopped","timeout","infra_error","failed"].includes(project.status) ? this.parseTimestamp(project.flag_verified_at||project.updated_at) : null;
         const end = frozen === null ? this.nowMs : frozen;
         return this.formatDuration(Math.max(0, end - start));
       },
@@ -1761,21 +1647,6 @@
       },
       _edits: {},
       setField(name, field, value){ (this._edits[name]=this._edits[name]||{})[field]=value; },
-      addMember(){
-        const name=this.newMemberName.trim().toLowerCase();
-        if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)){ this.flash("invalid member name"); return; }
-        if(["diamond","ops_agent"].includes(name)||this.cfg.members.some(member=>member.name===name)){ this.flash("member already exists"); return; }
-        const member={name,api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key_set:false,api_key_preview:"",base_url:"",model:"",configured:false};
-        this.cfg.members.push(member);
-        this._edits[name]={api_format:"openai",api_surface:"auto",reasoning_effort:"auto",api_key:"",base_url:"",model:""};
-        this._removedMembers=this._removedMembers.filter(item=>item!==name);
-        this.newMemberName="";
-      },
-      removeMember(name){
-        this.cfg.members=this.cfg.members.filter(member=>member.name!==name);
-        delete this._edits[name];
-        if(!this._removedMembers.includes(name)) this._removedMembers.push(name);
-      },
       async saveIPC(){
         const body={}; if(this._edits.diamond) body.diamond=this._edits.diamond;
         const members={}; for(const k in this._edits){ if(!["diamond","ops_agent"].includes(k)) members[k]=this._edits[k]; }

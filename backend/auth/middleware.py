@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from backend.auth.manager import SESSION_COOKIE_NAME, AuthManager
+from backend.auth.manager import AuthManager
 
 _PUBLIC_METHODS: dict[str, frozenset[str]] = {
     "/": frozenset({"GET", "HEAD"}),
@@ -23,7 +23,13 @@ _RUNNER_MCP_PREFIX = "/internal/mcp"
 
 
 class AuthenticationMiddleware(BaseHTTPMiddleware):
-    """Require a valid signed session for every non-public HTTP endpoint."""
+    """Compatibility middleware with authentication disabled.
+
+    IPC is intended to run inside the operator's trusted Docker network.  The
+    browser UI therefore opens directly without creating an administrator
+    password or maintaining a login session.  The separate runner-token check
+    for the internal MCP mount remains in place.
+    """
 
     def __init__(self, app, *, auth_manager: AuthManager) -> None:
         super().__init__(app)
@@ -48,33 +54,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             if request.url.path.startswith("/auth/"):
                 response.headers["Cache-Control"] = "no-store"
             return response
-        if self.auth_manager.configuration_error:
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "authentication configuration is unavailable"},
-                headers={"Cache-Control": "no-store"},
-            )
-        if self.auth_manager.setup_required:
-            return JSONResponse(
-                status_code=428,
-                content={"detail": "initial setup is required"},
-                headers={"Cache-Control": "no-store"},
-            )
-        token = request.cookies.get(SESSION_COOKIE_NAME)
-        if not self.auth_manager.verify_session(token):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "authentication required"},
-                headers={
-                    "Cache-Control": "no-store",
-                    "WWW-Authenticate": "Cookie",
-                },
-            )
+        # No administrator setup/login is required for normal browser/API
+        # requests.  Keep the state marker for handlers that inspect it.
         request.state.authenticated = True
-        response = await call_next(request)
-        if request.url.path.startswith("/auth/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+        return await call_next(request)
 
     @staticmethod
     def _is_public(request: Request) -> bool:

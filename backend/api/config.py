@@ -8,6 +8,7 @@ from backend.core.config import (
     ApiFormat,
     ApiSurface,
     CATEGORIES,
+    MEMBER_NAMES,
     MemberConfig,
     ReasoningEffort,
     RuntimeConfig,
@@ -194,6 +195,11 @@ def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
                 cfg.members.append(member)
                 by_name[name] = member
             _apply(member, upd)
+    # The built-in roster is fixed; keep blank members present even when an
+    # older client sends the legacy remove_members field.
+    by_name = {member.name: member for member in cfg.members}
+    cfg.members = [by_name.pop(name, MemberConfig(name=name)) for name in MEMBER_NAMES]
+    cfg.members.extend(by_name.values())
     state.save_config()
     return _config_view(state)
 
@@ -204,7 +210,13 @@ def health_check(state: AppState = Depends(get_state)):
     from backend.members.adapters import health_check as adapter_health
 
     results = {}
-    results["diamond"] = adapter_health(state.config.diamond)
+    if state.config.diamond.configured:
+        results["diamond"] = adapter_health(state.config.diamond)
+    else:
+        results["diamond"] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
     for m in state.config.members:
-        results[m.name] = adapter_health(m)
+        if m.configured:
+            results[m.name] = adapter_health(m)
+        else:
+            results[m.name] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
     return {"results": results, "startup_errors": state.config.startup_errors()}

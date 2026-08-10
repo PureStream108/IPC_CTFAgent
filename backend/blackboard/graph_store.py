@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import secrets
+from typing import Any
 
 from backend.blackboard import edge_store, node_store
 from backend.blackboard.ids import (
@@ -25,18 +26,27 @@ from backend.blackboard.models import (
 from backend.core.difficulty import normalize_difficulty
 from backend.filename_util import numbered_filename
 
+
+def _json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+    return []
+
 # ---------- settings ----------
 
 
-def get_timeouts(conn: sqlite3.Connection) -> tuple[int, int]:
-    row = conn.execute("SELECT intent_timeout, reason_timeout FROM settings WHERE rowid = 1").fetchone()
+def get_timeouts(conn: Any) -> tuple[int, int]:
+    row = conn.execute("SELECT intent_timeout, reason_timeout FROM settings WHERE id = 1").fetchone()
     return row["intent_timeout"], row["reason_timeout"]
 
 
 # ---------- reason lease ----------
 
 
-def reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
+def reason_from_row(row: Any) -> ProjectReason | None:
     if row["reason_worker"] is None:
         return None
     return ProjectReason(
@@ -47,82 +57,84 @@ def reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
     )
 
 
-def clear_reason(conn: sqlite3.Connection, project_id: str) -> None:
+def clear_reason(conn: Any, project_id: str) -> None:
     conn.execute(
         "UPDATE projects SET reason_worker=NULL, reason_trigger=NULL, "
-        "reason_started_at=NULL, reason_last_heartbeat_at=NULL WHERE id = ?",
+        "reason_started_at=NULL, reason_last_heartbeat_at=NULL WHERE id = %s",
         (project_id,),
     )
 
 
-def claim_reason(conn: sqlite3.Connection, project_id: str, worker: str, trigger: str) -> ProjectReason | None:
+def claim_reason(conn: Any, project_id: str, worker: str, trigger: str) -> ProjectReason | None:
     row = conn.execute(
-        "SELECT reason_worker FROM projects WHERE id = ?",
+        "SELECT reason_worker FROM projects WHERE id = %s",
         (project_id,),
     ).fetchone()
     if row is None:
         return None
     current = row["reason_worker"]
     if current is not None and current != worker:
-        return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+        return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone())
     now = utcnow()
     if current == worker:
         conn.execute(
-            "UPDATE projects SET reason_trigger=?, reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+            "UPDATE projects SET reason_trigger=%s, reason_last_heartbeat_at=%s, updated_at=%s WHERE id=%s",
             (trigger, now, now, project_id),
         )
     else:
         conn.execute(
-            "UPDATE projects SET reason_worker=?, reason_trigger=?, reason_started_at=?, "
-            "reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+            "UPDATE projects SET reason_worker=%s, reason_trigger=%s, reason_started_at=%s, "
+            "reason_last_heartbeat_at=%s, updated_at=%s WHERE id=%s",
             (worker, trigger, now, now, now, project_id),
         )
-    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone())
 
 
-def heartbeat_reason(conn: sqlite3.Connection, project_id: str, worker: str) -> ProjectReason | None:
-    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+def heartbeat_reason(conn: Any, project_id: str, worker: str) -> ProjectReason | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
     if row is None or row["reason_worker"] != worker:
         return None
     now = utcnow()
     conn.execute(
-        "UPDATE projects SET reason_last_heartbeat_at=?, updated_at=? WHERE id=?",
+        "UPDATE projects SET reason_last_heartbeat_at=%s, updated_at=%s WHERE id=%s",
         (now, now, project_id),
     )
-    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+    return reason_from_row(conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone())
 
 
-def reason_holder(conn: sqlite3.Connection, project_id: str) -> ProjectReason | None:
-    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+def reason_holder(conn: Any, project_id: str) -> ProjectReason | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
     return reason_from_row(row) if row is not None else None
 
 
-def expire_reason_leases(conn: sqlite3.Connection, timeout: int, project_id: str | None = None) -> None:
-    now = utcnow()
+def expire_reason_leases(conn: Any, timeout: int, project_id: str | None = None) -> None:
     query = """
         UPDATE projects SET reason_worker=NULL, reason_trigger=NULL,
             reason_started_at=NULL, reason_last_heartbeat_at=NULL
         WHERE reason_worker IS NOT NULL AND reason_last_heartbeat_at IS NOT NULL
-          AND (julianday(?) - julianday(reason_last_heartbeat_at)) * 86400 > ?
+          AND reason_last_heartbeat_at < now() - make_interval(secs => %s)
     """
-    params: tuple = (now, timeout)
+    params: tuple = (timeout,)
     if project_id is not None:
-        query = query.replace("WHERE ", "WHERE id = ? AND ", 1)
-        params = (project_id, now, timeout)
+        query = query.replace("WHERE ", "WHERE id = %s AND ", 1)
+        params = (project_id, timeout)
     conn.execute(query, params)
 
 
 # ---------- projects ----------
 
 
-def project_meta(row: sqlite3.Row) -> ProjectMeta:
+def project_meta(row: Any) -> ProjectMeta:
     return ProjectMeta(
         id=row["id"],
         external_id=row["external_id"],
         title=row["title"],
         category=row["category"],
         status=row["status"],
+        postprocess_status=row.get("postprocess_status", "not_started"),
+        terminal_reason=row.get("terminal_reason"),
         flag=row["flag"],
+        flag_verified_at=row.get("flag_verified_at"),
         wp_path=row["wp_path"],
         log_filename=row["log_filename"],
         runtime_phase=row["runtime_phase"],
@@ -133,12 +145,12 @@ def project_meta(row: sqlite3.Row) -> ProjectMeta:
     )
 
 
-def get_project_row(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+def get_project_row(conn: Any, project_id: str):
+    return conn.execute("SELECT * FROM projects WHERE id = %s", (project_id,)).fetchone()
 
 
 def create_project(
-    conn: sqlite3.Connection,
+    conn: Any,
     title: str,
     origin: str,
     goal: str,
@@ -155,7 +167,7 @@ def create_project(
     log_filename = numbered_filename(title, ".jsonl", used, fallback=pid)
     conn.execute(
         "INSERT INTO projects (id, external_id, title, category, status, log_filename, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, 'created', ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, 'created', %s, %s, %s)",
         (pid, external_id, title, category, log_filename, now, now),
     )
     node_store.insert_fact(conn, pid, "origin", origin)
@@ -166,7 +178,7 @@ def create_project(
         for content, creator in hints:
             hid = next_hint_id(conn, pid)
             conn.execute(
-                "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (%s, %s, %s, %s, %s)",
                 (hid, pid, content, creator, now),
             )
     # IPC and Diamond always exist from the start.
@@ -175,19 +187,19 @@ def create_project(
     return pid
 
 
-def touch_project(conn: sqlite3.Connection, project_id: str) -> None:
-    conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (utcnow(), project_id))
+def touch_project(conn: Any, project_id: str) -> None:
+    conn.execute("UPDATE projects SET updated_at = %s WHERE id = %s", (utcnow(), project_id))
 
 
-def set_status(conn: sqlite3.Connection, project_id: str, status: str) -> None:
+def set_status(conn: Any, project_id: str, status: str) -> None:
     conn.execute(
-        "UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+        "UPDATE projects SET status = %s, updated_at = %s WHERE id = %s",
         (status, utcnow(), project_id),
     )
 
 
 def set_runtime_phase(
-    conn: sqlite3.Connection,
+    conn: Any,
     project_id: str,
     phase: str,
     error: str | None = None,
@@ -197,64 +209,120 @@ def set_runtime_phase(
     safe_phase = str(phase or "idle").strip()[:80] or "idle"
     safe_error = str(error).strip()[:2_000] if error else None
     conn.execute(
-        "UPDATE projects SET runtime_phase = ?, runtime_error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE projects SET runtime_phase = %s, runtime_error = %s, updated_at = %s WHERE id = %s",
         (safe_phase, safe_error, utcnow(), project_id),
     )
 
 
-def set_flag(conn: sqlite3.Connection, project_id: str, flag: str) -> None:
+def claim_project_lease(
+    conn: Any,
+    project_id: str,
+    owner: str,
+    *,
+    token: str | None = None,
+    timeout: int = 90,
+) -> str | None:
+    now = utcnow()
+    if token:
+        row = conn.execute(
+            """
+            UPDATE projects
+            SET last_heartbeat_at = %s,
+                lease_expires_at = %s::timestamptz + make_interval(secs => %s),
+                updated_at = %s
+            WHERE id = %s AND lease_owner = %s AND lease_token = %s
+              AND lease_expires_at IS NOT NULL AND lease_expires_at > now()
+            RETURNING lease_token
+            """,
+            (now, now, timeout, now, project_id, owner, token),
+        ).fetchone()
+        return row["lease_token"] if row else None
+    new_token = secrets.token_urlsafe(24)
+    row = conn.execute(
+        """
+        UPDATE projects
+        SET lease_owner = %s, lease_token = %s,
+            lease_version = lease_version + 1,
+            last_heartbeat_at = %s,
+            lease_expires_at = %s::timestamptz + make_interval(secs => %s),
+            updated_at = %s
+        WHERE id = %s
+          AND (
+              lease_owner IS NULL
+              OR (lease_expires_at IS NOT NULL AND lease_expires_at <= now())
+          )
+        RETURNING lease_token
+        """,
+        (owner, new_token, now, now, timeout, now, project_id),
+    ).fetchone()
+    return row["lease_token"] if row else None
+
+
+def release_project_lease(conn: Any, project_id: str, owner: str, token: str) -> bool:
+    return conn.execute(
+        """
+        UPDATE projects
+        SET lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+            last_heartbeat_at = NULL, updated_at = now()
+        WHERE id = %s AND lease_owner = %s AND lease_token = %s
+        """,
+        (project_id, owner, token),
+    ).rowcount == 1
+
+
+def set_flag(conn: Any, project_id: str, flag: str) -> None:
     conn.execute(
-        "UPDATE projects SET flag = ?, updated_at = ? WHERE id = ?", (flag, utcnow(), project_id)
+        "UPDATE projects SET flag = %s, updated_at = %s WHERE id = %s", (flag, utcnow(), project_id)
     )
 
 
-def set_wp_path(conn: sqlite3.Connection, project_id: str, wp_path: str) -> None:
+def set_wp_path(conn: Any, project_id: str, wp_path: str) -> None:
     conn.execute(
-        "UPDATE projects SET wp_path = ?, updated_at = ? WHERE id = ?",
+        "UPDATE projects SET wp_path = %s, updated_at = %s WHERE id = %s",
         (wp_path, utcnow(), project_id),
     )
 
 
-def project_log_filename(conn: sqlite3.Connection, project_id: str) -> str | None:
-    row = conn.execute("SELECT log_filename FROM projects WHERE id = ?", (project_id,)).fetchone()
+def project_log_filename(conn: Any, project_id: str) -> str | None:
+    row = conn.execute("SELECT log_filename FROM projects WHERE id = %s", (project_id,)).fetchone()
     return row["log_filename"] if row else None
 
 
-def reset_project_counter_if_empty(conn: sqlite3.Connection) -> None:
+def reset_project_counter_if_empty(conn: Any) -> None:
     row = conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone()
     if row is None:
         conn.execute("UPDATE counters SET value = 0 WHERE name = 'project'")
 
 
-def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
-    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+def delete_project(conn: Any, project_id: str) -> None:
+    conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))
     reset_project_counter_if_empty(conn)
 
 
 # ---------- hints ----------
 
 
-def create_hint(conn: sqlite3.Connection, project_id: str, content: str, creator: str) -> Hint:
+def create_hint(conn: Any, project_id: str, content: str, creator: str) -> Hint:
     from backend.blackboard.ids import next_hint_id
 
     now = utcnow()
     hid = next_hint_id(conn, project_id)
     conn.execute(
-        "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (%s, %s, %s, %s, %s)",
         (hid, project_id, content, creator, now),
     )
     return Hint(id=hid, content=content, creator=creator, created_at=now)
 
 
-def list_hints(conn: sqlite3.Connection, project_id: str) -> list[Hint]:
+def list_hints(conn: Any, project_id: str) -> list[Hint]:
     rows = conn.execute(
-        "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at, rowid", (project_id,)
+        "SELECT * FROM hints WHERE project_id = %s ORDER BY created_at, id", (project_id,)
     ).fetchall()
     return [Hint(id=r["id"], content=r["content"], creator=r["creator"], created_at=r["created_at"]) for r in rows]
 
 
 def add_agent(
-    conn: sqlite3.Connection,
+    conn: Any,
     project_id: str,
     name: str,
     role: str,
@@ -262,21 +330,21 @@ def add_agent(
     start_fact_id: str | None = None,
 ) -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO agents (project_id, name, role, state, start_fact_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (project_id, name, role, state, start_fact_id, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (project_id, name) DO NOTHING",
         (project_id, name, role, state, start_fact_id, utcnow()),
     )
 
 
-def set_agent_state(conn: sqlite3.Connection, project_id: str, name: str, state: str) -> None:
+def set_agent_state(conn: Any, project_id: str, name: str, state: str) -> None:
     conn.execute(
-        "UPDATE agents SET state = ? WHERE project_id = ? AND name = ?", (state, project_id, name)
+        "UPDATE agents SET state = %s WHERE project_id = %s AND name = %s", (state, project_id, name)
     )
 
 
-def list_agents(conn: sqlite3.Connection, project_id: str) -> list[Agent]:
+def list_agents(conn: Any, project_id: str) -> list[Agent]:
     rows = conn.execute(
-        "SELECT * FROM agents WHERE project_id = ? ORDER BY rowid", (project_id,)
+        "SELECT * FROM agents WHERE project_id = %s ORDER BY created_at, name", (project_id,)
     ).fetchall()
     return [
         Agent(
@@ -290,24 +358,24 @@ def list_agents(conn: sqlite3.Connection, project_id: str) -> list[Agent]:
     ]
 
 
-def active_member_names(conn: sqlite3.Connection, project_id: str) -> list[str]:
+def active_member_names(conn: Any, project_id: str) -> list[str]:
     rows = conn.execute(
-        "SELECT name FROM agents WHERE project_id = ? AND role = 'member' AND state IN ('active','paused')",
+        "SELECT name FROM agents WHERE project_id = %s AND role = 'member' AND state IN ('active','paused')",
         (project_id,),
     ).fetchall()
     return [r["name"] for r in rows]
 
 
-def add_link(conn: sqlite3.Connection, project_id: str, src: str, dst: str, kind: str) -> None:
+def add_link(conn: Any, project_id: str, src: str, dst: str, kind: str) -> None:
     conn.execute(
-        "INSERT INTO agent_links (project_id, src, dst, kind, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO agent_links (project_id, src, dst, kind, created_at) VALUES (%s, %s, %s, %s, %s)",
         (project_id, src, dst, kind, utcnow()),
     )
 
 
-def list_links(conn: sqlite3.Connection, project_id: str) -> list[AgentLink]:
+def list_links(conn: Any, project_id: str) -> list[AgentLink]:
     rows = conn.execute(
-        "SELECT * FROM agent_links WHERE project_id = ? ORDER BY id", (project_id,)
+        "SELECT * FROM agent_links WHERE project_id = %s ORDER BY id", (project_id,)
     ).fetchall()
     return [
         AgentLink(id=r["id"], src=r["src"], dst=r["dst"], kind=r["kind"], created_at=r["created_at"])
@@ -315,9 +383,9 @@ def list_links(conn: sqlite3.Connection, project_id: str) -> list[AgentLink]:
     ]
 
 
-def link_exists(conn: sqlite3.Connection, project_id: str, src: str, dst: str, kind: str) -> bool:
+def link_exists(conn: Any, project_id: str, src: str, dst: str, kind: str) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM agent_links WHERE project_id = ? AND src = ? AND dst = ? AND kind = ?",
+        "SELECT 1 FROM agent_links WHERE project_id = %s AND src = %s AND dst = %s AND kind = %s",
         (project_id, src, dst, kind),
     ).fetchone()
     return row is not None
@@ -327,7 +395,7 @@ def link_exists(conn: sqlite3.Connection, project_id: str, src: str, dst: str, k
 
 
 def create_report(
-    conn: sqlite3.Connection,
+    conn: Any,
     project_id: str,
     member: str,
     progress: str,
@@ -342,7 +410,8 @@ def create_report(
     normalized_difficulty = normalize_difficulty(difficulty)
     conn.execute(
         "INSERT INTO reports (id, project_id, member, node_id, progress, difficulty, "
-        "steps_json, directions_json, knowledge_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "steps_json, directions_json, knowledge_json, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s)",
         (
             rid,
             project_id,
@@ -369,9 +438,9 @@ def create_report(
     )
 
 
-def list_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
+def list_reports(conn: Any, project_id: str) -> list[Report]:
     rows = conn.execute(
-        "SELECT * FROM reports WHERE project_id = ? ORDER BY created_at, rowid", (project_id,)
+        "SELECT * FROM reports WHERE project_id = %s ORDER BY created_at, id", (project_id,)
     ).fetchall()
     return [
         Report(
@@ -380,9 +449,9 @@ def list_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
             node_id=r["node_id"],
             progress=r["progress"],
             difficulty=r["difficulty"],
-            steps=json.loads(r["steps_json"]),
-            directions=json.loads(r["directions_json"]),
-            knowledge=json.loads(r["knowledge_json"]),
+            steps=_json_list(r["steps_json"]),
+            directions=_json_list(r["directions_json"]),
+            knowledge=_json_list(r["knowledge_json"]),
             created_at=r["created_at"],
         )
         for r in rows
@@ -392,19 +461,19 @@ def list_reports(conn: sqlite3.Connection, project_id: str) -> list[Report]:
 # ---------- attachments ----------
 
 
-def create_attachment(conn: sqlite3.Connection, project_id: str, filename: str, path: str) -> Attachment:
+def create_attachment(conn: Any, project_id: str, filename: str, path: str) -> Attachment:
     now = utcnow()
     aid = next_attachment_id(conn, project_id)
     conn.execute(
-        "INSERT INTO attachments (id, project_id, filename, path, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO attachments (id, project_id, filename, path, created_at) VALUES (%s, %s, %s, %s, %s)",
         (aid, project_id, filename, path, now),
     )
     return Attachment(id=aid, filename=filename, path=path, created_at=now)
 
 
-def list_attachments(conn: sqlite3.Connection, project_id: str) -> list[Attachment]:
+def list_attachments(conn: Any, project_id: str) -> list[Attachment]:
     rows = conn.execute(
-        "SELECT * FROM attachments WHERE project_id = ? ORDER BY rowid", (project_id,)
+        "SELECT * FROM attachments WHERE project_id = %s ORDER BY created_at, id", (project_id,)
     ).fetchall()
     return [
         Attachment(id=r["id"], filename=r["filename"], path=r["path"], created_at=r["created_at"])
@@ -415,18 +484,19 @@ def list_attachments(conn: sqlite3.Connection, project_id: str) -> list[Attachme
 # ---------- broadcasts ----------
 
 
-def add_broadcast(conn: sqlite3.Connection, project_id: str | None, title: str, flag: str) -> Broadcast:
+def add_broadcast(conn: Any, project_id: str | None, title: str, flag: str) -> Broadcast:
     now = utcnow()
     cur = conn.execute(
-        "INSERT INTO broadcasts (project_id, title, flag, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO broadcasts (project_id, title, flag, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
         (project_id, title, flag, now),
     )
-    return Broadcast(id=cur.lastrowid, project_id=project_id, title=title, flag=flag, created_at=now)
+    row = cur.fetchone()
+    return Broadcast(id=row["id"], project_id=project_id, title=title, flag=flag, created_at=now)
 
 
-def list_broadcasts(conn: sqlite3.Connection, limit: int = 50) -> list[Broadcast]:
+def list_broadcasts(conn: Any, limit: int = 50) -> list[Broadcast]:
     rows = conn.execute(
-        "SELECT * FROM broadcasts ORDER BY id DESC LIMIT ?", (limit,)
+        "SELECT * FROM broadcasts ORDER BY id DESC LIMIT %s", (limit,)
     ).fetchall()
     return [
         Broadcast(
@@ -443,7 +513,7 @@ def list_broadcasts(conn: sqlite3.Connection, limit: int = 50) -> list[Broadcast
 # ---------- assembly ----------
 
 
-def project_detail(conn: sqlite3.Connection, project_id: str) -> ProjectDetail | None:
+def project_detail(conn: Any, project_id: str) -> ProjectDetail | None:
     row = get_project_row(conn, project_id)
     if row is None:
         return None
@@ -459,7 +529,7 @@ def project_detail(conn: sqlite3.Connection, project_id: str) -> ProjectDetail |
     )
 
 
-def project_summaries(conn: sqlite3.Connection) -> list[ProjectSummary]:
+def project_summaries(conn: Any) -> list[ProjectSummary]:
     rows = conn.execute(
         """
         SELECT p.*,

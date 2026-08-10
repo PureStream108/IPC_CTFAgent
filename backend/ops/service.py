@@ -7,7 +7,6 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -94,7 +93,7 @@ class _OpsRunInterrupted(OpsAgentError):
 class OpsAgentService:
     def __init__(self, state: AppState) -> None:
         self.state = state
-        self.store = OpsStore(state.root)
+        self.store = OpsStore(state.root, state.db)
         self.tools = OpsToolExecutor(state)
         self.claude_runner = ClaudeCodeRunner()
         self._run_condition = threading.Condition()
@@ -1296,15 +1295,14 @@ class OpsAgentService:
         created: list[str] = []
         try:
             with self.state.db.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
                 for challenge in selected:
                     existing = connection.execute(
                         """
                         SELECT p.id, p.title, p.category
                         FROM projects p
                         JOIN facts f ON f.project_id = p.id AND f.id = 'origin'
-                        WHERE p.external_id = ?
-                          AND (f.description = ? OR instr(f.description, ? || char(10) || char(10)) = 1)
+                        WHERE p.external_id = %s
+                          AND (f.description = %s OR strpos(f.description, %s || chr(10) || chr(10)) = 1)
                         ORDER BY p.created_at
                         LIMIT 1
                         """,

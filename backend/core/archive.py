@@ -22,15 +22,23 @@ def project_archive_id(project_id: str, created_at: str) -> str:
     return f"{safe_stem(project_id, fallback='project', max_length=64)}-{digest}"
 
 
-def archive_completed_project(state, project_id: str) -> dict[str, Any]:
+def archive_completed_project(
+    state,
+    project_id: str,
+    *,
+    connection=None,
+) -> dict[str, Any]:
     """Write one idempotent, durable WP + log bundle for a completed project."""
 
-    with state.db.connect() as connection:
+    if connection is None:
+        with state.db.connect() as own_connection:
+            row = graph_store.get_project_row(own_connection, project_id)
+    else:
         row = graph_store.get_project_row(connection, project_id)
     if row is None:
         raise ValueError(f"project not found: {project_id}")
-    if row["status"] != "completed":
-        raise ValueError(f"project {project_id} is not completed")
+    if row["status"] != "solved":
+        raise ValueError(f"project {project_id} is not solved")
     wp_path = Path(str(row["wp_path"] or ""))
     if not wp_path.is_file():
         raise ValueError(f"project {project_id} does not have a readable writeup")

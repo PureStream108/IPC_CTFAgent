@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.archive import list_archived_projects, project_archive_id
-from backend.core.logging_util import IPCLogger
 from backend.core.state import AppState
 from backend.filename_util import numbered_filename
 
@@ -62,7 +61,7 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
             "project_id": f"archive:{archive['archive_id']}",
             "source_project_id": archive["project_id"],
             "title": archive["title"],
-            "status": "completed",
+            "status": "solved",
             "archived": True,
         }
         for kind, key in LOG_GROUPS:
