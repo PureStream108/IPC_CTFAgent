@@ -15,6 +15,7 @@ class FieldMapping(BaseModel):
     attachments_field: str = "files"
     category_map: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
+    attachment_headers: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
 
     @field_validator("list_url")

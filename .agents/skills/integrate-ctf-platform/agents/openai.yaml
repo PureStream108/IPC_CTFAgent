@@ -1,0 +1,4 @@
+interface:
+  display_name: "Integrate CTF Platform"
+  short_description: "Safely map and connect CTF platform APIs"
+  default_prompt: "Use $integrate-ctf-platform to inspect this CTF platform API and produce a safe IPC workflow draft."

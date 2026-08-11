@@ -60,7 +60,8 @@ or
 "list_path":"data","id_field":"id","title_field":"name","category_field":"category",
 "description_field":"description","attachments_field":"files","category_map":{},
 "attachment_base_url":"https://.../","headers":[{"name":"Authorization",
-"secret_name":"platform_token","prefix":"Bearer "}]},"submit":{"url":"https://.../",
+"secret_name":"platform_token","prefix":"Bearer "}],"attachment_headers":[]},
+"submit":{"url":"https://.../",
 "method":"POST","headers":[{"name":"Authorization","secret_name":"platform_token",
 "prefix":"Bearer "}],"json_template":{"challenge_id":"{{external_id}}","flag":"{{flag}}"},
 "success_statuses":[200],"success_path":"success","success_values":[true]},
@@ -1120,6 +1121,7 @@ class OpsAgentService:
         normalized_secrets = _normalize_secrets(secrets_values or {})
         safe_data = _replace_secrets_in_value(workflow_data, normalized_secrets)
         spec = PlatformWorkflowSpec.model_validate(safe_data)
+        _validate_workflow_secret_names(spec, normalized_secrets)
         workflow = self.store.create_workflow(
             spec,
             source="manual",
@@ -1137,6 +1139,7 @@ class OpsAgentService:
         normalized_secrets = _normalize_secrets(secrets_values or {})
         safe_data = _replace_secrets_in_value(workflow_data, normalized_secrets)
         spec = PlatformWorkflowSpec.model_validate(safe_data)
+        _validate_workflow_secret_names(spec, normalized_secrets)
         workflow = self.store.update_workflow(workflow_id, spec)
         if normalized_secrets:
             self.store.save_workflow_secrets(workflow_id, normalized_secrets)
@@ -1234,6 +1237,10 @@ class OpsAgentService:
             "attachment_base_url": challenge.attachment_base_url,
             "headers": _header_view(challenge.headers, configured),
             "header_names": [header.name for header in challenge.headers],
+            "attachment_headers": _header_view(challenge.attachment_headers, configured),
+            "attachment_header_names": [
+                header.name for header in challenge.attachment_headers
+            ],
         }
         submit_view: dict[str, Any] | None = None
         if spec.submit is not None:
@@ -1274,7 +1281,11 @@ class OpsAgentService:
     def _adapter(self, workflow_id: str, spec: PlatformWorkflowSpec) -> HttpJsonAdapter:
         secrets_values = self.store.workflow_secrets(workflow_id)
         headers = _resolve_headers(spec.challenges.headers, secrets_values)
-        mapping = spec.challenges.to_field_mapping(headers)
+        attachment_headers = _resolve_headers(
+            spec.challenges.attachment_headers,
+            secrets_values,
+        )
+        mapping = spec.challenges.to_field_mapping(headers, attachment_headers)
         return HttpJsonAdapter(
             mapping,
             request_get=self._http_client(spec).get,
@@ -1875,13 +1886,38 @@ def _header_view(headers: list[SecretHeader], values: dict[str, str]) -> list[di
 def _normalize_secrets(values: dict[str, str]) -> dict[str, str]:
     if len(values) > 32:
         raise ValueError("at most 32 structured secrets may be supplied at once")
-    return {validate_secret_name(name): str(value) for name, value in values.items()}
+    normalized: dict[str, str] = {}
+    for name, value in values.items():
+        secret = str(value)
+        if not secret or len(secret) > 16_384:
+            raise ValueError("secret values must contain between 1 and 16384 characters")
+        if any(ord(character) < 32 or ord(character) == 127 for character in secret):
+            raise ValueError("secret values cannot contain control characters")
+        normalized[validate_secret_name(name)] = secret
+    return normalized
+
+
+def _validate_workflow_secret_names(
+    spec: PlatformWorkflowSpec,
+    values: dict[str, str],
+) -> None:
+    unknown = sorted(set(values) - spec.required_secret_names())
+    if unknown:
+        raise ValueError(f"unknown workflow secret names: {unknown}")
 
 
 def _replace_secret_values(text: str, values: dict[str, str]) -> str:
     for name, value in sorted(values.items(), key=lambda item: len(item[1]), reverse=True):
         if value:
-            text = text.replace(value, f"{{{{secret.{name}}}}}")
+            replacement = f"{{{{secret.{name}}}}}"
+            if len(value) < 4:
+                text = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])",
+                    lambda _match: replacement,
+                    text,
+                )
+            else:
+                text = text.replace(value, replacement)
     return text
 
 
