@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import ast
 import json
 import random
+import re
 import time
 from dataclasses import dataclass, field, replace
 from email.utils import parsedate_to_datetime
@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from backend.core.config import LLMConfig
+from backend.core.json_compat import extract_json_dict, json_dict_candidates
 
 # Action kinds a member/diamond can emit.
 ACTION_KINDS = (
@@ -35,24 +36,365 @@ class MemberAction:
     def from_obj(cls, obj: dict[str, Any]) -> MemberAction:
         if not isinstance(obj, dict):
             raise ValueError(f"model action must be a JSON object, got {type(obj).__name__}")
-        raw_kind = obj.get("action") or obj.get("kind")
-        kind = raw_kind.strip() if isinstance(raw_kind, str) else raw_kind
+        normalized = _normalize_action_object(obj)
+        raw_kind = normalized.get("action") or normalized.get("kind")
+        kind = _normalize_action_kind(raw_kind)
         if kind not in ACTION_KINDS:
             raise ValueError(f"invalid action kind: {kind!r}")
-        args = {k: v for k, v in obj.items() if k not in ("action", "kind", "thought")}
+        args = {
+            k: v
+            for k, v in normalized.items()
+            if k not in ("action", "kind", "thought", "reasoning", "rationale")
+        }
         if kind == "bash":
-            for alias in ("cmd", "shell", "script"):
+            for alias in ("cmd", "shell", "script", "code"):
                 if "command" not in args and alias in args:
                     args["command"] = args.pop(alias)
             if isinstance(args.get("command"), list):
                 args["command"] = " && ".join(str(part) for part in args["command"])
         if kind == "tool":
-            if "tool" not in args and "name" in args:
-                args["tool"] = args.pop("name")
-            if not isinstance(args.get("args"), dict):
-                args["args"] = {}
-        thought = obj.get("thought", "")
+            for alias in ("name", "tool_name", "function"):
+                if "tool" not in args and alias in args and isinstance(args[alias], str):
+                    args["tool"] = args.pop(alias)
+            for alias in ("mcp", "mcp_server", "server_name"):
+                if "server" not in args and alias in args:
+                    args["server"] = args.pop(alias)
+            tool_args = args.get("args", {})
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = extract_json_dict(tool_args)
+                except ValueError:
+                    tool_args = {}
+            args["args"] = tool_args if isinstance(tool_args, dict) else {}
+        if kind in {"memory", "tool_search"} and "query" not in args:
+            for alias in ("search", "term", "prompt"):
+                if alias in args:
+                    args["query"] = args.pop(alias)
+                    break
+        if kind in {"intent", "conclude"} and "description" not in args:
+            for alias in ("summary", "result", "content"):
+                if alias in args:
+                    args["description"] = args.pop(alias)
+                    break
+        if kind == "done" and "reason" not in args:
+            for alias in ("message", "summary"):
+                if alias in args:
+                    args["reason"] = args.pop(alias)
+                    break
+        thought = normalized.get("thought", normalized.get("reasoning", normalized.get("rationale", "")))
         return cls(kind=kind, args=args, thought=thought if isinstance(thought, str) else "")
+
+
+@dataclass(slots=True)
+class ModelToolCall:
+    name: str
+    arguments: Any = field(default_factory=dict)
+    call_id: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "arguments": self.arguments,
+            **({"id": self.call_id} if self.call_id else {}),
+        }
+
+
+@dataclass(slots=True)
+class ModelReply:
+    """Provider-neutral result used at the model/runtime boundary."""
+
+    text: str = ""
+    tool_calls: list[ModelToolCall] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # Opaque provider continuation data. The runtime keeps this alongside the
+    # canonical tool call so reasoning/tool-use blocks can be replayed exactly
+    # on the next provider request without leaking provider shapes into the
+    # orchestration loop.
+    continuation: dict[str, Any] = field(default_factory=dict)
+
+
+_ACTION_KIND_ALIASES = {
+    "shell": "bash",
+    "terminal": "bash",
+    "exec": "bash",
+    "execute": "bash",
+    "execute_command": "bash",
+    "run_command": "bash",
+    "mcp": "tool",
+    "mcp_tool": "tool",
+    "call_tool": "tool",
+    "tool_call": "tool",
+    "search_memory": "memory",
+    "memory_search": "memory",
+    "recall": "memory",
+    "search_tools": "tool_search",
+    "find_tool": "tool_search",
+    "difficulty_report": "report",
+    "status_report": "report",
+    "new_intent": "intent",
+    "create_intent": "intent",
+    "finish_intent": "conclude",
+    "conclusion": "conclude",
+    "submit_flag": "flag",
+    "found_flag": "flag",
+    "finish": "done",
+    "stop": "done",
+    "final": "done",
+    "final_answer": "done",
+    "give_up": "done",
+}
+_ACTION_WRAPPERS = (
+    "next_action",
+    "decision",
+    "response",
+    "result",
+    "output",
+    "message",
+    "content",
+    "data",
+)
+_GENERIC_ACTION_TOOLS = {"action", "ipc_action", "member_action", "submit_action"}
+
+
+def decode_member_action(*values: Any) -> MemberAction:
+    """Decode the first semantically valid action across provider candidates."""
+
+    errors: list[str] = []
+    saw_object = False
+    for value in values:
+        if isinstance(value, ModelToolCall):
+            sources: list[Any] = [_tool_call_action_source(value.name, value.arguments)]
+        elif isinstance(value, ModelReply):
+            if len(value.tool_calls) > 1:
+                raise ValueError("exactly one native action tool call is allowed per decision")
+            sources = [
+                *(_tool_call_action_source(call.name, call.arguments) for call in value.tool_calls),
+                value.text,
+            ]
+        else:
+            sources = [value]
+        for source in sources:
+            for candidate in json_dict_candidates(source):
+                saw_object = True
+                try:
+                    action = MemberAction.from_obj(candidate)
+                    _validate_member_action(action)
+                    return action
+                except (TypeError, ValueError) as exc:
+                    if len(errors) < 8:
+                        errors.append(str(exc))
+    if saw_object and errors:
+        detail = "; ".join(dict.fromkeys(errors))
+        raise ValueError(f"no valid JSON action found: {detail}")
+    raise ValueError("no JSON action found in model output")
+
+
+def _validate_member_action(action: MemberAction) -> None:
+    """Validate execution-critical fields before an action reaches the loop."""
+
+    if action.kind == "bash":
+        command = action.args.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("bash action requires a non-empty command string")
+    elif action.kind == "tool":
+        server = action.args.get("server")
+        tool = action.args.get("tool")
+        if not isinstance(server, str) or not server.strip():
+            raise ValueError("tool action requires a non-empty server string")
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError("tool action requires a non-empty tool string")
+        if not isinstance(action.args.get("args"), dict):
+            raise ValueError("tool action args must be an object")
+    elif action.kind == "flag":
+        flag = action.args.get("flag")
+        if not isinstance(flag, str) or not flag.strip():
+            raise ValueError("flag action requires a non-empty flag string")
+
+
+def _normalize_action_object(value: dict[str, Any]) -> dict[str, Any]:
+    obj = {_normalize_protocol_key(key): item for key, item in value.items()}
+    inherited_thought = _first_value(obj, "thought", "reasoning", "rationale")
+
+    for _ in range(5):
+        native = _native_tool_call_object(obj)
+        if native is not None:
+            obj = native
+            if inherited_thought and not _first_value(obj, "thought", "reasoning", "rationale"):
+                obj["thought"] = inherited_thought
+            continue
+
+        action_value = obj.get("action")
+        if isinstance(action_value, dict):
+            inner = {_normalize_protocol_key(key): item for key, item in action_value.items()}
+            nested_kind = _first_value(inner, "action", "kind", "action_type", "type", "name")
+            obj = {**inner, **{key: item for key, item in obj.items() if key != "action"}}
+            if nested_kind is not None:
+                obj["action"] = nested_kind
+            continue
+
+        if _first_value(obj, "action", "kind", "action_type") is None:
+            unwrapped = False
+            for key in _ACTION_WRAPPERS:
+                nested = obj.get(key)
+                if isinstance(nested, dict):
+                    outer = {
+                        outer_key: item
+                        for outer_key, item in obj.items()
+                        if outer_key not in _ACTION_WRAPPERS
+                    }
+                    obj = {
+                        **{_normalize_protocol_key(child_key): item for child_key, item in nested.items()},
+                        **outer,
+                    }
+                    unwrapped = True
+                    break
+            if unwrapped:
+                continue
+        break
+
+    raw_kind = _first_value(obj, "action", "kind", "action_type")
+    if raw_kind is None:
+        type_value = obj.get("type")
+        if _normalize_action_kind(type_value) in ACTION_KINDS:
+            raw_kind = type_value
+        else:
+            for key, nested in list(obj.items()):
+                if _normalize_action_kind(key) not in ACTION_KINDS or not isinstance(nested, dict):
+                    continue
+                obj = {
+                    **{_normalize_protocol_key(child_key): item for child_key, item in nested.items()},
+                    **{outer_key: item for outer_key, item in obj.items() if outer_key != key},
+                }
+                raw_kind = key
+                break
+    if raw_kind is None:
+        if any(key in obj for key in ("command", "cmd", "shell", "script")):
+            raw_kind = "bash"
+        elif "server" in obj and any(key in obj for key in ("tool", "tool_name", "name")):
+            raw_kind = "tool"
+
+    kind = _normalize_action_kind(raw_kind)
+    obj["action"] = kind
+    obj.pop("kind", None)
+    obj.pop("action_type", None)
+    if obj.get("type") == raw_kind or _normalize_action_kind(obj.get("type")) == kind:
+        obj.pop("type", None)
+
+    containers = ("arguments", "parameters", "input", "payload")
+    nested_values = [
+        (key, _dict_value(obj.get(key)), _raw_dict_value(obj.get(key)))
+        for key in containers
+        if key in obj
+    ]
+    direct = {key: item for key, item in obj.items() if key not in containers}
+    raw_args = _dict_value(direct.get("args")) if "args" in direct else None
+
+    if kind == "tool":
+        if raw_args and not any(key in direct for key in ("server", "tool", "tool_name", "name")):
+            if any(key in raw_args for key in ("server", "tool", "tool_name", "name")):
+                direct.pop("args", None)
+                direct = {**raw_args, **direct}
+        has_explicit_target = "server" in direct and any(
+            key in direct for key in ("tool", "tool_name", "name")
+        )
+        for _, nested, raw_nested in nested_values:
+            if not nested:
+                continue
+            if has_explicit_target:
+                if "args" not in direct:
+                    direct["args"] = raw_nested or nested
+            elif any(key in nested for key in ("server", "tool", "tool_name", "name")):
+                direct = {**nested, **direct}
+                has_explicit_target = "server" in direct and any(
+                    key in direct for key in ("tool", "tool_name", "name")
+                )
+            elif "args" not in direct:
+                direct["args"] = raw_nested or nested
+    else:
+        merged: dict[str, Any] = {}
+        if raw_args:
+            merged.update(raw_args)
+            direct.pop("args", None)
+        for _, nested, _ in nested_values:
+            if nested:
+                merged.update(nested)
+        direct = {**merged, **direct}
+    return direct
+
+
+def _native_tool_call_object(obj: dict[str, Any]) -> dict[str, Any] | None:
+    calls = obj.get("tool_calls")
+    if isinstance(calls, list) and calls:
+        first = calls[0]
+        if isinstance(first, dict):
+            return {_normalize_protocol_key(key): item for key, item in first.items()}
+    call = obj.get("tool_call") or obj.get("function_call")
+    if isinstance(call, dict):
+        return {_normalize_protocol_key(key): item for key, item in call.items()}
+    function = obj.get("function")
+    if isinstance(function, dict):
+        name = function.get("name") or obj.get("name")
+        arguments = function.get("arguments", function.get("input", {}))
+        return _tool_call_action_source(name, arguments)
+    item_type = str(obj.get("type", "")).strip().lower()
+    if item_type in {"function_call", "tool_call", "tool_use"} and isinstance(obj.get("name"), str):
+        arguments = obj.get("arguments", obj.get("input", obj.get("args", {})))
+        return _tool_call_action_source(obj["name"], arguments)
+    return None
+
+
+def _tool_call_action_source(name: Any, arguments: Any) -> dict[str, Any]:
+    normalized_name = _normalize_protocol_key(name)
+    parsed_arguments = _dict_value(arguments) or {}
+    if normalized_name in _GENERIC_ACTION_TOOLS:
+        return parsed_arguments
+    kind = _normalize_action_kind(normalized_name)
+    if kind in ACTION_KINDS:
+        return {"action": kind, **parsed_arguments}
+    if _first_value(parsed_arguments, "action", "kind", "action_type") is not None:
+        return parsed_arguments
+    return {"action": normalized_name, **parsed_arguments}
+
+
+def _dict_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return {_normalize_protocol_key(key): item for key, item in value.items()}
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = extract_json_dict(value)
+        except ValueError:
+            return None
+        return {_normalize_protocol_key(key): item for key, item in parsed.items()}
+    return None
+
+
+def _raw_dict_value(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return extract_json_dict(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_protocol_key(value: Any) -> str:
+    return re.sub(r"[\s-]+", "_", str(value).strip().lower())
+
+
+def _normalize_action_kind(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = _normalize_protocol_key(value)
+    return _ACTION_KIND_ALIASES.get(normalized, normalized)
+
+
+def _first_value(obj: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in obj and obj[key] is not None:
+            return obj[key]
+    return None
 
 
 class DecisionOutputError(ValueError):
@@ -121,13 +463,33 @@ class BaseAdapter:
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         system_prompt: str = "",
         temperature: float | None = 0.2,
         max_tokens: int | None = None,
     ) -> str:
         raise NotImplementedError
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ModelReply:
+        """Return a provider-neutral reply without breaking legacy chat callers."""
+
+        return ModelReply(
+            text=self.chat(
+                messages,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
 
     def decide(self, context: dict) -> MemberAction:
         raise NotImplementedError
@@ -216,6 +578,7 @@ class _OpenAIProfile:
     allow_temperature: bool
     allow_reasoning: bool
     allow_thinking: bool
+    allow_tools: bool
 
     def signature(self) -> tuple[Any, ...]:
         return (
@@ -225,6 +588,7 @@ class _OpenAIProfile:
             self.allow_temperature,
             self.allow_reasoning,
             self.allow_thinking,
+            self.allow_tools,
         )
 
 
@@ -273,7 +637,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
         deepseek = self.config.api_format == "deepseek"
         reasoning_model = _is_reasoning_model(self.config.model)
         reasoning_effort = self._reasoning_effort(decision=True)
-        text = self._request_compatible(
+        reply = self._request_compatible(
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
@@ -284,18 +648,23 @@ class OpenAICompatibleAdapter(BaseAdapter):
         )
         attempts: list[dict[str, Any]] = []
         try:
-            return MemberAction.from_obj(_extract_json(text))
+            return decode_member_action(reply)
         except (TypeError, ValueError) as exc:
-            attempts.append(_decision_attempt(text, exc, self._last_response_meta))
+            attempts.append(_decision_attempt(reply, exc, self._last_response_meta))
+            first_error = str(exc)
 
         repair_message = (
             "Repair the previous response. It may have been truncated. Return exactly one shorter JSON object "
             "matching the action schema, with no Markdown or commentary. Keep thought under 240 characters and "
-            "any bash command under 1500 characters. The previous invalid response was:\n"
-            + _clip_text(text, 6000)
+            "any bash command under 1500 characters. The validator error was: "
+            + _clip_text(first_error, 1000)
         )
         repaired = self._request_compatible(
-            [*messages, {"role": "user", "content": repair_message}],
+            [
+                *messages,
+                {"role": "assistant", "content": _reply_preview(reply, 6000)},
+                {"role": "user", "content": repair_message},
+            ],
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if not reasoning_model else None,
             max_tokens=4096 if deepseek or reasoning_model else 1024,
@@ -304,19 +673,35 @@ class OpenAICompatibleAdapter(BaseAdapter):
             thinking="disabled" if deepseek else None,
         )
         try:
-            return MemberAction.from_obj(_extract_json(repaired))
+            return decode_member_action(repaired)
         except (TypeError, ValueError) as exc:
             attempts.append(_decision_attempt(repaired, exc, self._last_response_meta))
             raise DecisionOutputError(attempts) from exc
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         system_prompt: str = "",
         temperature: float | None = 0.2,
         max_tokens: int | None = None,
     ) -> str:
+        return self.complete(
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ).text
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ModelReply:
         return self._request_compatible(
             messages,
             system_prompt=system_prompt,
@@ -325,6 +710,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             structured=False,
             reasoning_effort=self._reasoning_effort(decision=False),
             thinking=None,
+            tools=tools,
         )
 
     def _reasoning_effort(self, *, decision: bool) -> str | None:
@@ -360,6 +746,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
         structured: bool,
         reasoning_effort: str | None,
         thinking: str | None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> _OpenAIProfile:
         reasoning_model = _is_reasoning_model(self.config.model)
         native_or_reasoning = _is_native_openai(self.config.base_url) or reasoning_model
@@ -386,11 +773,12 @@ class OpenAICompatibleAdapter(BaseAdapter):
             allow_temperature=not reasoning_model,
             allow_reasoning=bool(reasoning_effort) and self.config.api_format != "deepseek",
             allow_thinking=bool(thinking) and surface == "chat_completions",
+            allow_tools=bool(tools),
         )
 
     def _request_compatible(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         system_prompt: str,
         temperature: float | None,
@@ -398,8 +786,9 @@ class OpenAICompatibleAdapter(BaseAdapter):
         structured: bool,
         reasoning_effort: str | None,
         thinking: str | None,
+        tools: list[dict[str, Any]] | None = None,
         timeout: int = 120,
-    ) -> str:
+    ) -> ModelReply:
         request_messages = list(messages)
         if system_prompt:
             request_messages.insert(0, {"role": "system", "content": system_prompt})
@@ -414,16 +803,18 @@ class OpenAICompatibleAdapter(BaseAdapter):
                 thinking or "",
                 temperature is not None,
                 max_tokens is not None,
+                bool(tools),
             )
             profile = self._profile_cache.get(cache_key) or self._default_profile(
                 surface,
                 structured=structured,
                 reasoning_effort=reasoning_effort,
                 thinking=thinking,
+                tools=tools,
             )
             seen: set[tuple[Any, ...]] = set()
 
-            for _ in range(6):
+            for _ in range(8):
                 signature = profile.signature()
                 if signature in seen:
                     break
@@ -436,6 +827,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
                     max_tokens=max_tokens,
                     reasoning_effort=reasoning_effort,
                     thinking=thinking,
+                    tools=tools,
                 )
                 resp = _post_with_retries(
                     self._endpoint(surface),
@@ -460,7 +852,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
                 payload = _provider_response_json(resp, self.config.api_format)
                 try:
-                    text, metadata = _openai_response_text(payload, surface)
+                    reply = _openai_response(payload, surface)
                 except (TypeError, ValueError) as exc:
                     raise NonRetryableProviderError(
                         f"{self.config.api_format} returned an invalid response envelope: {exc}",
@@ -468,16 +860,16 @@ class OpenAICompatibleAdapter(BaseAdapter):
                         status_code=_response_status(resp),
                         response=resp,
                     ) from exc
-                metadata.update(
+                reply.metadata.update(
                     {
                         "surface": surface,
                         "http_status": getattr(resp, "status_code", 200),
                     }
                 )
-                self._last_response_meta = metadata
+                self._last_response_meta = reply.metadata
                 self._surface_cache = surface
                 self._profile_cache[cache_key] = profile
-                return text
+                return reply
 
             if self.config.api_surface != "auto":
                 break
@@ -491,17 +883,21 @@ def _openai_request_body(
     profile: _OpenAIProfile,
     *,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     temperature: float | None,
     max_tokens: int | None,
     reasoning_effort: str | None,
     thinking: str | None,
+    tools: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"model": model}
     if profile.surface == "responses":
-        body["input"] = messages
+        body["input"] = _responses_request_input(messages)
     else:
-        body["messages"] = messages
+        body["messages"] = _chat_request_messages(messages)
+
+    if tools and profile.allow_tools:
+        body["tools"] = _openai_function_tools(tools, surface=profile.surface)
 
     if temperature is not None and profile.allow_temperature:
         body["temperature"] = temperature
@@ -543,19 +939,184 @@ def _openai_request_body(
     return body
 
 
-def _openai_response_text(payload: Any, surface: str) -> tuple[str, dict[str, Any]]:
+def _openai_function_tools(
+    tools: list[dict[str, Any]],
+    *,
+    surface: str,
+) -> list[dict[str, Any]]:
+    """Translate IPC's provider-neutral function catalogue to an API shape."""
+
+    translated: list[dict[str, Any]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        definition = {
+            "name": name.strip(),
+            "description": str(item.get("description") or ""),
+            "parameters": (
+                item["parameters"]
+                if isinstance(item.get("parameters"), dict)
+                else {"type": "object", "properties": {}}
+            ),
+            # Best-effort mode is intentional: older compatible gateways tend
+            # to reject strict schemas, while IPC validates before dispatch.
+            "strict": False,
+        }
+        if surface == "responses":
+            translated.append({"type": "function", **definition})
+        else:
+            translated.append({"type": "function", "function": definition})
+    return translated
+
+
+def _tool_arguments_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value if value is not None else {}, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return json.dumps({"value": str(value)}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _canonical_tool_calls(value: Any) -> list[dict[str, Any]]:
+    items = value if isinstance(value, list) else [value]
+    calls: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, ModelToolCall):
+            item = item.as_dict()
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        source = function if isinstance(function, dict) else item
+        name = source.get("name") or source.get("tool")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        call_id = item.get("call_id") or item.get("id")
+        calls.append(
+            {
+                "name": name.strip(),
+                "arguments": source.get("arguments", source.get("input", source.get("args", {}))),
+                **({"id": str(call_id)} if call_id is not None else {}),
+            }
+        )
+    return calls
+
+
+def _chat_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Render canonical runtime messages for Chat Completions."""
+
+    rendered: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        if role == "tool":
+            call_id = message.get("tool_call_id") or message.get("call_id")
+            if call_id is None:
+                # A malformed gateway call without an id cannot be linked
+                # natively; retain the evidence as an ordinary user turn.
+                rendered.append({"role": "user", "content": str(message.get("content") or "")})
+                continue
+            rendered.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(call_id),
+                    "content": str(message.get("content") or ""),
+                }
+            )
+            continue
+        calls = _canonical_tool_calls(message.get("tool_calls"))
+        if role == "assistant" and calls:
+            rendered.append(
+                {
+                    "role": "assistant",
+                    "content": message.get("content") or None,
+                    "tool_calls": [
+                        {
+                            "id": call.get("id") or f"ipc_call_{len(rendered) + index}",
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": _tool_arguments_text(call.get("arguments")),
+                            },
+                        }
+                        for index, call in enumerate(calls)
+                    ],
+                }
+            )
+            continue
+        rendered.append({"role": role, "content": message.get("content", "")})
+    return rendered
+
+
+def _responses_request_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Render canonical runtime messages for the Responses API.
+
+    Native output items are replayed when present. This preserves encrypted or
+    summarized reasoning blocks required by reasoning models during tool loops.
+    """
+
+    rendered: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        continuation = message.get("continuation")
+        if (
+            isinstance(continuation, dict)
+            and continuation.get("provider") == "openai_responses"
+            and isinstance(continuation.get("items"), list)
+        ):
+            rendered.extend(item for item in continuation["items"] if isinstance(item, dict))
+            continue
+        role = str(message.get("role") or "user")
+        if role == "tool":
+            call_id = message.get("tool_call_id") or message.get("call_id")
+            if call_id is None:
+                rendered.append({"role": "user", "content": str(message.get("content") or "")})
+                continue
+            rendered.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(call_id),
+                    "output": str(message.get("content") or ""),
+                }
+            )
+            continue
+        calls = _canonical_tool_calls(message.get("tool_calls"))
+        if role == "assistant" and calls:
+            content = message.get("content")
+            if content:
+                rendered.append({"role": "assistant", "content": content})
+            for index, call in enumerate(calls):
+                rendered.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.get("id") or f"ipc_call_{len(rendered) + index}",
+                        "name": call["name"],
+                        "arguments": _tool_arguments_text(call.get("arguments")),
+                    }
+                )
+            continue
+        rendered.append({"role": role, "content": message.get("content", "")})
+    return rendered
+
+
+def _openai_response(payload: Any, surface: str) -> ModelReply:
     if not isinstance(payload, dict):
         raise ValueError(f"LLM response must be a JSON object, got {type(payload).__name__}")
     # Several compatibility gateways expose Responses at a custom path but
     # still return a Chat-shaped payload. Detect the actual wire shape.
     if isinstance(payload.get("choices"), list):
-        return _chat_response_text(payload)
+        return _chat_model_reply(payload)
     if surface == "responses" or isinstance(payload.get("output"), list):
-        return _responses_response_text(payload)
+        return _responses_model_reply(payload)
     raise ValueError("LLM response contains neither choices nor output items")
 
 
-def _chat_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _chat_model_reply(payload: dict[str, Any]) -> ModelReply:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ValueError("Chat Completions response has no choices")
@@ -566,6 +1127,8 @@ def _chat_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     content = message.get("content")
     text = _content_text(content)
     if not text:
+        text = _content_text(choice.get("text"))
+    if not text:
         text = _content_text(message.get("refusal"))
     usage = payload.get("usage") or {}
     if not isinstance(usage, dict):
@@ -574,25 +1137,41 @@ def _chat_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not isinstance(details, dict):
         details = {}
     reasoning_tokens = details.get("reasoning_tokens")
-    return text, {
-        "finish_reason": choice.get("finish_reason"),
-        "content_type": type(content).__name__,
-        "content_length": len(text),
-        "reasoning_present": bool(
-            message.get("reasoning_content")
-            or message.get("reasoning")
-            or (isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0)
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, dict):
+        raw_calls = [raw_calls]
+    elif not isinstance(raw_calls, list):
+        raw_calls = []
+    legacy_call = message.get("function_call")
+    if isinstance(legacy_call, dict):
+        raw_calls = [*raw_calls, legacy_call]
+    raw_calls.extend(_content_tool_calls(content))
+    return ModelReply(
+        text=text,
+        tool_calls=_dedupe_model_tool_calls(
+            [call for item in raw_calls if (call := _model_tool_call(item)) is not None]
         ),
-        "completion_tokens": usage.get("completion_tokens"),
-        "reasoning_tokens": reasoning_tokens,
-    }
+        metadata={
+            "finish_reason": choice.get("finish_reason"),
+            "content_type": type(content).__name__,
+            "content_length": len(text),
+            "reasoning_present": bool(
+                message.get("reasoning_content")
+                or message.get("reasoning")
+                or (isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0)
+            ),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": reasoning_tokens,
+        },
+    )
 
 
-def _responses_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _responses_model_reply(payload: dict[str, Any]) -> ModelReply:
     output = payload.get("output") or []
     if not isinstance(output, list):
         output = []
     parts: list[str] = []
+    tool_calls: list[ModelToolCall] = []
     reasoning_present = False
     for item in output:
         if not isinstance(item, dict):
@@ -601,13 +1180,20 @@ def _responses_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, An
         if item_type == "reasoning":
             reasoning_present = True
             continue
+        if item_type in {"function_call", "tool_call", "tool_use"}:
+            call = _model_tool_call(item)
+            if call is not None:
+                tool_calls.append(call)
+            continue
         if item_type in {"output_text", "text"}:
             value = _content_text(item)
             if value:
                 parts.append(value)
             continue
         if item_type == "message" or "content" in item:
-            value = _content_text(item.get("content"))
+            item_content = item.get("content")
+            tool_calls.extend(_content_tool_calls(item_content))
+            value = _content_text(item_content)
             if not value:
                 value = _content_text(item.get("refusal"))
             if value:
@@ -627,17 +1213,80 @@ def _responses_response_text(payload: dict[str, Any]) -> tuple[str, dict[str, An
         incomplete = {}
     status = payload.get("status")
     finish_reason = incomplete.get("reason") if status == "incomplete" else status
-    return text, {
-        "finish_reason": finish_reason,
-        "content_type": type(output).__name__,
-        "content_length": len(text),
-        "reasoning_present": bool(
-            reasoning_present
-            or (isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0)
-        ),
-        "completion_tokens": usage.get("output_tokens"),
-        "reasoning_tokens": reasoning_tokens,
-    }
+    return ModelReply(
+        text=text,
+        tool_calls=_dedupe_model_tool_calls(tool_calls),
+        metadata={
+            "finish_reason": finish_reason,
+            "content_type": type(output).__name__,
+            "content_length": len(text),
+            "reasoning_present": bool(
+                reasoning_present
+                or (isinstance(reasoning_tokens, (int, float)) and reasoning_tokens > 0)
+            ),
+            "completion_tokens": usage.get("output_tokens"),
+            "reasoning_tokens": reasoning_tokens,
+        },
+        continuation={
+            "provider": "openai_responses",
+            "items": [item for item in output if isinstance(item, dict)],
+        },
+    )
+
+
+def _model_tool_call(value: Any) -> ModelToolCall | None:
+    if not isinstance(value, dict):
+        return None
+    function = value.get("function")
+    source = function if isinstance(function, dict) else value
+    name = source.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    arguments = source.get("arguments", source.get("input", source.get("args", {})))
+    call_id = value.get("call_id") or value.get("id")
+    return ModelToolCall(
+        name=name.strip(),
+        arguments={} if arguments is None else arguments,
+        call_id=str(call_id) if call_id is not None else None,
+    )
+
+
+def _content_tool_calls(content: Any) -> list[dict[str, Any]]:
+    blocks = content if isinstance(content, list) else [content]
+    calls: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        nested = block.get("tool_call") or block.get("function_call")
+        if isinstance(nested, dict):
+            calls.append(nested)
+            continue
+        block_type = str(block.get("type", "")).strip().lower()
+        if block_type in {"function", "function_call", "tool_call", "tool_use"}:
+            calls.append(block)
+            continue
+        if isinstance(block.get("function"), dict):
+            calls.append(block)
+    return calls
+
+
+def _dedupe_model_tool_calls(calls: list[ModelToolCall]) -> list[ModelToolCall]:
+    unique: list[ModelToolCall] = []
+    seen: set[str] = set()
+    for call in calls:
+        if call.call_id:
+            fingerprint = f"id:{call.call_id}"
+        else:
+            try:
+                arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                arguments = repr(call.arguments)
+            fingerprint = f"call:{call.name}:{arguments}"
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        unique.append(call)
+    return unique
 
 
 def _compatibility_issue(response: Any, profile: _OpenAIProfile) -> tuple[str | None, str]:
@@ -661,6 +1310,11 @@ def _compatibility_issue(response: Any, profile: _OpenAIProfile) -> tuple[str | 
             "invalid parameter",
         )
     )
+    if profile.allow_tools and parameter_problem and any(
+        marker in error_text
+        for marker in ("tools", "tool_choice", "function calling", "function_call")
+    ):
+        return "tools", error_text
     endpoint_name = "responses" if profile.surface == "responses" else "chat/completions"
     if endpoint_name in error_text and any(
         marker in error_text for marker in ("unknown endpoint", "unsupported endpoint", "does not support")
@@ -702,6 +1356,8 @@ def _degrade_profile(
         return replace(profile, allow_reasoning=False)
     if issue == "thinking" and profile.allow_thinking:
         return replace(profile, allow_thinking=False)
+    if issue == "tools" and profile.allow_tools:
+        return replace(profile, allow_tools=False)
     if issue == "token" and profile.token_parameter:
         if (
             profile.token_parameter == "max_tokens"
@@ -925,6 +1581,94 @@ def _anthropic_endpoint(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, target, parsed.query, ""))
 
 
+def _anthropic_function_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    translated: list[dict[str, Any]] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        translated.append(
+            {
+                "name": name.strip(),
+                "description": str(item.get("description") or ""),
+                "input_schema": (
+                    item["parameters"]
+                    if isinstance(item.get("parameters"), dict)
+                    else {"type": "object", "properties": {}}
+                ),
+            }
+        )
+    return translated
+
+
+def _anthropic_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rendered: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        continuation = message.get("continuation")
+        if (
+            role == "assistant"
+            and isinstance(continuation, dict)
+            and continuation.get("provider") == "anthropic"
+            and isinstance(continuation.get("content"), list)
+        ):
+            rendered.append({"role": "assistant", "content": continuation["content"]})
+            continue
+        if role == "tool":
+            call_id = message.get("tool_call_id") or message.get("call_id")
+            if call_id is None:
+                rendered.append({"role": "user", "content": str(message.get("content") or "")})
+                continue
+            rendered.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": str(call_id),
+                            "content": str(message.get("content") or ""),
+                        }
+                    ],
+                }
+            )
+            continue
+        calls = _canonical_tool_calls(message.get("tool_calls"))
+        if role == "assistant" and calls:
+            blocks: list[dict[str, Any]] = []
+            if message.get("content"):
+                blocks.append({"type": "text", "text": str(message["content"])})
+            for index, call in enumerate(calls):
+                arguments = call.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = extract_json_dict(arguments)
+                    except ValueError:
+                        arguments = {"value": arguments}
+                if not isinstance(arguments, dict):
+                    arguments = {"value": arguments}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": call.get("id") or f"ipc_call_{len(rendered) + index}",
+                        "name": call["name"],
+                        "input": arguments,
+                    }
+                )
+            rendered.append({"role": "assistant", "content": blocks})
+            continue
+        rendered.append(
+            {
+                "role": "assistant" if role == "assistant" else "user",
+                "content": message.get("content", ""),
+            }
+        )
+    return rendered
+
+
 class ClaudeAdapter(BaseAdapter):
 
     def __init__(self, config: LLMConfig, name: str = "agent"):
@@ -975,7 +1719,7 @@ class ClaudeAdapter(BaseAdapter):
 
     def decide(self, context: dict) -> MemberAction:
         messages = [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
-        text = self.chat(
+        reply = self.complete(
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=None,
@@ -983,18 +1727,21 @@ class ClaudeAdapter(BaseAdapter):
         )
         attempts: list[dict[str, Any]] = []
         try:
-            return MemberAction.from_obj(_extract_json(text))
+            return decode_member_action(reply)
         except (TypeError, ValueError) as exc:
-            attempts.append(_decision_attempt(text, exc, self._last_response_meta))
+            attempts.append(_decision_attempt(reply, exc, self._last_response_meta))
+            first_error = str(exc)
 
-        repaired = self.chat(
+        repaired = self.complete(
             [
                 *messages,
+                {"role": "assistant", "content": _reply_preview(reply, 6000)},
                 {
                     "role": "user",
                     "content": (
                         "Repair the previous response. Return exactly one concise JSON action object, "
-                        "with no Markdown or commentary. Previous invalid response:\n" + _clip_text(text, 6000)
+                        "with no Markdown or commentary. The validator error was: "
+                        + _clip_text(first_error, 1000)
                     ),
                 },
             ],
@@ -1003,28 +1750,48 @@ class ClaudeAdapter(BaseAdapter):
             max_tokens=1024,
         )
         try:
-            return MemberAction.from_obj(_extract_json(repaired))
+            return decode_member_action(repaired)
         except (TypeError, ValueError) as exc:
             attempts.append(_decision_attempt(repaired, exc, self._last_response_meta))
             raise DecisionOutputError(attempts) from exc
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         system_prompt: str = "",
         temperature: float | None = 0.2,
         max_tokens: int | None = None,
     ) -> str:
+        return self.complete(
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ).text
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str = "",
+        temperature: float | None = 0.2,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ModelReply:
         request_body: dict[str, Any] = {
             "model": self.config.model or "claude-opus-4-8",
             "max_tokens": max_tokens or 2048,
-            "messages": messages,
+            "messages": _anthropic_request_messages(messages),
         }
         if temperature is not None:
             request_body["temperature"] = temperature
         if system_prompt:
             request_body["system"] = system_prompt
+        if tools:
+            native_tools = _anthropic_function_tools(tools)
+            if native_tools:
+                request_body["tools"] = native_tools
         resp = _post_with_retries(
             self._endpoint(),
             headers=self._headers(),
@@ -1044,7 +1811,7 @@ class ClaudeAdapter(BaseAdapter):
             )
         content = payload.get("content")
         text = _content_text(content)
-        self._last_response_meta = {
+        metadata = {
             "finish_reason": payload.get("stop_reason"),
             "content_type": type(content).__name__,
             "content_length": len(text),
@@ -1064,7 +1831,26 @@ class ClaudeAdapter(BaseAdapter):
             "surface": "messages",
             "http_status": _response_status(resp),
         }
-        return text
+        tool_calls: list[ModelToolCall] = []
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") not in {"tool_use", "tool_call"}:
+                    continue
+                call = _model_tool_call(block)
+                if call is not None:
+                    tool_calls.append(call)
+        reply = ModelReply(
+            text=text,
+            tool_calls=_dedupe_model_tool_calls(tool_calls),
+            metadata=metadata,
+            continuation=(
+                {"provider": "anthropic", "content": content}
+                if isinstance(content, list)
+                else {}
+            ),
+        )
+        self._last_response_meta = metadata
+        return reply
 
 
 class PiAdapter(OpenAICompatibleAdapter):
@@ -1077,166 +1863,26 @@ class PiAdapter(OpenAICompatibleAdapter):
 
 
 def _extract_json(text: Any) -> dict:
-    return _extract_json_value(text, depth=0)
-
-
-def _extract_json_value(text: Any, *, depth: int) -> dict:
     if text is None:
         raise ValueError("empty model output: response content is null")
-    if isinstance(text, dict):
-        return text
-    if isinstance(text, list):
-        candidate = _select_action_dict(text)
-        if candidate is not None:
-            return candidate
-        raise ValueError("model output JSON array contains no action object")
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.strip()
-    if not text:
+    if isinstance(text, str) and not text.strip():
         raise ValueError("empty model output")
     try:
-        obj = json.loads(text)
-        if isinstance(obj, dict):
-            return obj
-        if isinstance(obj, list):
-            candidate = _select_action_dict(obj)
-            if candidate is not None:
-                return candidate
-        if isinstance(obj, str) and depth < 2:
-            return _extract_json_value(obj, depth=depth + 1)
-    except json.JSONDecodeError:
-        pass
-
-    candidates: list[dict[str, Any]] = []
-    decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch == "{":
-            try:
-                obj, _ = decoder.raw_decode(text[i:])
-                if isinstance(obj, dict):
-                    candidates.append(obj)
-            except json.JSONDecodeError:
-                continue
-
-    literal_sources = [_strip_code_fence(text), *_balanced_object_slices(text)]
-    for source in literal_sources:
-        try:
-            obj = ast.literal_eval(source)
-        except (SyntaxError, ValueError):
-            continue
-        if isinstance(obj, dict):
-            candidates.append(obj)
-        elif isinstance(obj, list):
-            candidates.extend(item for item in obj if isinstance(item, dict))
-
-    # A provider can stop immediately after emitting a complete value while
-    # omitting only the final container delimiters. Close those delimiters,
-    # but never invent or terminate string content: a cut-off command or
-    # argument must go through the normal model-repair path instead.
-    for source in _truncated_object_slices(text):
-        for loader in (json.loads, ast.literal_eval):
-            try:
-                obj = loader(source)
-            except (json.JSONDecodeError, SyntaxError, ValueError):
-                continue
-            if isinstance(obj, dict):
-                candidates.append(obj)
-            break
-
-    candidate = _select_action_dict(candidates)
-    if candidate is not None:
-        return candidate
-    raise ValueError("no JSON action found in model output")
-
-
-def _select_action_dict(values: list[Any]) -> dict[str, Any] | None:
-    dictionaries = [value for value in values if isinstance(value, dict)]
-    return next(
-        (value for value in dictionaries if "action" in value or "kind" in value),
-        dictionaries[0] if dictionaries else None,
-    )
-
-
-def _strip_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```") and stripped.endswith("```"):
-        first_newline = stripped.find("\n")
-        if first_newline >= 0:
-            return stripped[first_newline + 1 : -3].strip()
-    return stripped
-
-
-def _balanced_object_slices(text: str):
-    start: int | None = None
-    depth = 0
-    quote: str | None = None
-    escaped = False
-    for index, char in enumerate(text):
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in {"'", '"'}:
-            quote = char
-            continue
-        if char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
-            if depth == 0 and start is not None:
-                yield text[start : index + 1]
-                start = None
-
-
-def _truncated_object_slices(text: str):
-    for start, char in enumerate(text):
-        if char != "{":
-            continue
-        completed = _close_truncated_containers(text[start:].strip())
-        if completed is not None:
-            yield completed
-
-
-def _close_truncated_containers(candidate: str) -> str | None:
-    expected: list[str] = []
-    quote: str | None = None
-    escaped = False
-    for char in candidate:
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in {"'", '"'}:
-            quote = char
-            continue
-        if char == "{":
-            expected.append("}")
-            continue
-        if char == "[":
-            expected.append("]")
-            continue
-        if char in {"}", "]"}:
-            if not expected or expected[-1] != char:
-                return None
-            expected.pop()
-            if not expected:
-                # The root object was already closed. A normal raw decode or
-                # literal parse owns this case; it is not EOF truncation.
-                return None
-    if quote is not None or not expected:
-        return None
-    return candidate + "".join(reversed(expected))
+        return extract_json_dict(
+            text,
+            preferred_keys=(
+                "action",
+                "kind",
+                "action_type",
+                "next_action",
+                "decision",
+                "tool_call",
+                "tool_calls",
+                "function_call",
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError("no JSON action found in model output") from exc
 
 
 def _content_text(content: Any) -> str:
@@ -1267,9 +1913,22 @@ def _clip_text(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _reply_preview(value: Any, limit: int) -> str:
+    if isinstance(value, ModelReply):
+        parts = [value.text] if value.text else []
+        parts.extend(
+            json.dumps(call.as_dict(), ensure_ascii=False, default=str)
+            for call in value.tool_calls
+        )
+        text = "\n".join(parts)
+    else:
+        text = _content_text(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def _decision_attempt(text: Any, error: Exception, metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "error": f"{type(error).__name__}: {error}",
-        "preview": _clip_text(text, 800),
+        "preview": _reply_preview(text, 800),
         "response": dict(metadata),
     }

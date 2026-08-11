@@ -11,6 +11,18 @@ from backend.platform.mapping import FieldMapping
 _SECRET_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _PLACEHOLDER_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
+_RESTRICTED_REQUEST_HEADERS = {
+    "connection",
+    "content-length",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 def validate_secret_name(value: str) -> str:
@@ -24,6 +36,8 @@ def _validate_http_url(value: str, *, allow_external_id: bool = False) -> str:
     value = value.strip()
     if any(character.isspace() or ord(character) < 32 for character in value):
         raise ValueError("workflow URLs cannot contain whitespace or control characters")
+    if "\\" in value:
+        raise ValueError("workflow URLs cannot contain backslashes")
     candidate = value.replace("{{external_id}}", "challenge-id") if allow_external_id else value
     if "{{" in candidate or "}}" in candidate:
         raise ValueError("URL contains an unsupported template placeholder")
@@ -34,19 +48,35 @@ def _validate_http_url(value: str, *, allow_external_id: bool = False) -> str:
         raise ValueError("credentials are not allowed in workflow URLs")
     if parsed.fragment:
         raise ValueError("fragments are not allowed in workflow URLs")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("workflow URL contains an invalid port") from exc
+    if port is not None and port < 1:
+        raise ValueError("workflow URL contains an invalid port")
     sensitive_query_names = {
         "access_token",
         "api_key",
         "apikey",
         "auth",
         "authorization",
+        "bearer",
+        "client_secret",
+        "credential",
+        "id_token",
+        "jwt",
         "key",
         "password",
+        "refresh_token",
         "secret",
+        "signature",
+        "x_amz_credential",
+        "x_amz_signature",
         "token",
     }
     for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
-        if name.strip().lower() in sensitive_query_names:
+        normalized_name = name.strip().lower().replace("-", "_")
+        if normalized_name in sensitive_query_names:
             raise ValueError("credentials are not allowed in workflow URL query parameters")
     return value
 
@@ -64,6 +94,8 @@ class SecretHeader(BaseModel):
         value = value.strip()
         if not _HEADER_NAME_RE.fullmatch(value):
             raise ValueError("invalid HTTP header name")
+        if value.lower() in _RESTRICTED_REQUEST_HEADERS:
+            raise ValueError(f"workflow header is controlled by the HTTP client: {value}")
         return value
 
     @field_validator("secret_name")
@@ -74,8 +106,8 @@ class SecretHeader(BaseModel):
     @field_validator("prefix")
     @classmethod
     def validate_prefix(cls, value: str) -> str:
-        if "\r" in value or "\n" in value:
-            raise ValueError("header prefixes cannot contain newlines")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("header prefixes cannot contain control characters")
         return value
 
 
@@ -92,6 +124,7 @@ class ChallengeMappingSpec(BaseModel):
     category_map: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
     headers: list[SecretHeader] = Field(default_factory=list)
+    attachment_headers: list[SecretHeader] = Field(default_factory=list)
 
     @field_validator("list_url")
     @classmethod
@@ -120,12 +153,20 @@ class ChallengeMappingSpec(BaseModel):
 
     @model_validator(mode="after")
     def unique_headers(self) -> ChallengeMappingSpec:
-        names = [header.name.lower() for header in self.headers]
-        if len(names) != len(set(names)):
-            raise ValueError("challenge header names must be unique")
+        for label, headers in (
+            ("challenge", self.headers),
+            ("attachment", self.attachment_headers),
+        ):
+            names = [header.name.lower() for header in headers]
+            if len(names) != len(set(names)):
+                raise ValueError(f"{label} header names must be unique")
         return self
 
-    def to_field_mapping(self, headers: dict[str, str]) -> FieldMapping:
+    def to_field_mapping(
+        self,
+        headers: dict[str, str],
+        attachment_headers: dict[str, str] | None = None,
+    ) -> FieldMapping:
         return FieldMapping(
             list_url=self.list_url,
             list_path=self.list_path,
@@ -136,6 +177,7 @@ class ChallengeMappingSpec(BaseModel):
             attachments_field=self.attachments_field,
             category_map=self.category_map,
             headers=headers,
+            attachment_headers=attachment_headers or {},
             attachment_base_url=self.attachment_base_url,
         )
 
@@ -195,6 +237,7 @@ class PlatformWorkflowSpec(BaseModel):
 
     def required_secret_names(self) -> set[str]:
         names = {header.secret_name for header in self.challenges.headers}
+        names.update(header.secret_name for header in self.challenges.attachment_headers)
         if self.submit is not None:
             names.update(header.secret_name for header in self.submit.headers)
             names.update(_template_secret_names(self.submit.json_template))
