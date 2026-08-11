@@ -160,6 +160,40 @@ def test_openai_compatibility_degrade_does_not_backoff(monkeypatch):
     assert sleeps == []
 
 
+def test_openai_native_tools_degrade_to_json_protocol_without_backoff(monkeypatch):
+    bodies: list[dict] = []
+    sleeps: list[float] = []
+
+    def fake_post(url, **kwargs):
+        bodies.append(kwargs["json"])
+        if len(bodies) == 1:
+            return FakeResponse(
+                400,
+                {"error": {"message": "tools are not supported by this gateway"}},
+            )
+        return FakeResponse(200, {"choices": [{"message": {"content": "fallback"}}]})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("backend.members.adapters.time.sleep", sleeps.append)
+    adapter = _openai_adapter()
+
+    reply = adapter.complete(
+        [{"role": "user", "content": "hello"}],
+        tools=[
+            {
+                "name": "probe",
+                "description": "Probe the target.",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    )
+
+    assert reply.text == "fallback"
+    assert "tools" in bodies[0]
+    assert "tools" not in bodies[1]
+    assert sleeps == []
+
+
 def test_openai_auto_surface_fallback_remains_available(monkeypatch):
     urls: list[str] = []
     sleeps: list[float] = []

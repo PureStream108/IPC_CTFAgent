@@ -88,6 +88,10 @@ class Orchestrator:
         self._startup_futures: dict[str, Any] = {}
         self._member_failure_counts: dict[tuple[str, str], int] = {}
         self._member_retry_not_before: dict[tuple[str, str], float] = {}
+        # Non-retryable failures must not become immediately claimable merely
+        # because they have no backoff timestamp. They stay blocked until an
+        # operator lifecycle/config action explicitly gives them a fresh run.
+        self._member_terminal_blocks: dict[tuple[str, str], str] = {}
         self._project_leases: dict[str, str] = {}
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
         self._lock = threading.Lock()
@@ -444,6 +448,15 @@ class Orchestrator:
         """
 
         self.diamond.config = self.state.config
+        with self._lock:
+            blocked_projects = {project_id for project_id, _ in self._member_terminal_blocks}
+            self._member_terminal_blocks.clear()
+            still_degraded = {
+                project_id for project_id, _ in self._member_failure_counts
+            }
+        for project_id in blocked_projects:
+            if project_id not in still_degraded and self.lifecycle.status(project_id) == "running":
+                self._set_runtime_phase(project_id, "ready")
 
     def _startup_in_progress(self, project_id: str) -> bool:
         with self._lock:
@@ -1402,8 +1415,40 @@ class Orchestrator:
 
     def _member_retry_blocked(self, project_id: str, intent_id: str) -> bool:
         with self._lock:
+            if (project_id, intent_id) in self._member_terminal_blocks:
+                return True
             retry_at = self._member_retry_not_before.get((project_id, intent_id))
         return retry_at is not None and monotonic() < retry_at
+
+    def _block_terminal_member_failure(
+        self,
+        project_id: str,
+        intent_id: str,
+        *,
+        error: str,
+    ) -> None:
+        if self.lifecycle.status(project_id) != "running":
+            return
+        key = (project_id, intent_id)
+        safe_error = error[:1000]
+        with self._lock:
+            self._member_failure_counts.pop(key, None)
+            self._member_retry_not_before.pop(key, None)
+            self._member_terminal_blocks[key] = safe_error
+        self.state.logger.project(
+            "member_task_terminal_blocked",
+            project_id,
+            intent=intent_id,
+            error=safe_error,
+        )
+        self._set_runtime_phase(
+            project_id,
+            "degraded",
+            error=(
+                f"Member action cannot be retried for {intent_id}. "
+                f"Stop/resume the project or reload model configuration after fixing the cause. {safe_error}"
+            )[:1500],
+        )
 
     def _schedule_member_retry(
         self,
@@ -1444,7 +1489,10 @@ class Orchestrator:
             existed = key in self._member_failure_counts or key in self._member_retry_not_before
             self._member_failure_counts.pop(key, None)
             self._member_retry_not_before.pop(key, None)
-            project_has_failures = any(pid == project_id for pid, _ in self._member_failure_counts)
+            existed = self._member_terminal_blocks.pop(key, None) is not None or existed
+            project_has_failures = any(pid == project_id for pid, _ in self._member_failure_counts) or any(
+                pid == project_id for pid, _ in self._member_terminal_blocks
+            )
         if existed and not project_has_failures and self.lifecycle.status(project_id) == "running":
             self._set_runtime_phase(project_id, "ready")
 
@@ -1454,6 +1502,8 @@ class Orchestrator:
                 self._member_failure_counts.pop(key, None)
             for key in [key for key in self._member_retry_not_before if key[0] == project_id]:
                 self._member_retry_not_before.pop(key, None)
+            for key in [key for key in self._member_terminal_blocks if key[0] == project_id]:
+                self._member_terminal_blocks.pop(key, None)
 
     def _reconcile_resources(self) -> None:
         with self.state.db.connect() as conn:
@@ -1698,10 +1748,11 @@ class Orchestrator:
                     error_kind=result.error_kind,
                 )
                 if result.retryable is False:
-                    # A terminal validation/configuration result must also
-                    # invalidate any backoff left by an earlier transient
-                    # failure for the same intent.
-                    self._clear_member_retry(project_id, intent_id)
+                    self._block_terminal_member_failure(
+                        project_id,
+                        intent_id,
+                        error=result.error or "non-retryable member failure",
+                    )
                 else:
                     self._schedule_member_retry(
                         project_id,
@@ -1709,8 +1760,15 @@ class Orchestrator:
                         error=result.error or "member action failed",
                     )
                 continue
-            self._clear_member_retry(project_id, intent_id)
             if result.status == "stalled":
+                if result.retryable is False:
+                    self._block_terminal_member_failure(
+                        project_id,
+                        intent_id,
+                        error=result.error or "non-retryable member stall",
+                    )
+                else:
+                    self._clear_member_retry(project_id, intent_id)
                 self.state.logger.project(
                     "member_task_stalled",
                     project_id,
@@ -1721,13 +1779,18 @@ class Orchestrator:
                     error=result.error,
                 )
             elif result.status == "done":
+                self._clear_member_retry(project_id, intent_id)
                 self.state.logger.project("member_task_done", project_id, intent=intent_id, steps=result.steps)
             elif result.status == "concluded":
+                self._clear_member_retry(project_id, intent_id)
                 self.state.logger.project("member_task_concluded", project_id, intent=intent_id, fact=result.fact_id)
                 if result.fact_id is not None:
                     self._broadcast_fact(project_id, result.fact_id, self._intent_worker(project_id, intent_id))
             elif result.status == "flag":
+                self._clear_member_retry(project_id, intent_id)
                 self.state.logger.project("member_task_flag", project_id, intent=intent_id, flag=result.flag)
+            else:
+                self._clear_member_retry(project_id, intent_id)
 
     def _intent_worker(self, project_id: str, intent_id: str) -> str | None:
         with self.state.db.connect() as conn:

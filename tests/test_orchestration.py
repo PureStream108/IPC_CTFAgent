@@ -683,6 +683,11 @@ def test_non_retryable_member_failure_is_not_requeued(state):
 
     assert key not in orch._member_failure_counts
     assert key not in orch._member_retry_not_before
+    assert key in orch._member_terminal_blocks
+    launched = []
+    orch._launch_member = lambda *args: launched.append(args) or True
+    orch._dispatch_project(pid)
+    assert launched == []
     entries = state.logger.read_log("project", pid, None)
     assert any(
         entry["event"] == "member_task_failed"
@@ -691,4 +696,10 @@ def test_non_retryable_member_failure_is_not_requeued(state):
         for entry in entries
     )
     assert not any(entry["event"] == "member_task_retry_scheduled" for entry in entries)
+    assert any(entry["event"] == "member_task_terminal_blocked" for entry in entries)
+
+    orch.reload_config()
+    assert key not in orch._member_terminal_blocks
+    orch._dispatch_project(pid)
+    assert len(launched) == 1
     orch.shutdown()
