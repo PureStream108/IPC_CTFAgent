@@ -528,6 +528,15 @@ class Ret2ShellAdapter(PlatformAdapter):
         for raw in self.client.list_challenges(self.game_id):
             if not isinstance(raw, dict) or raw.get("id") is None:
                 continue
+            # The list endpoint returns content: null; the full statement
+            # (connection commands, flag format hints) only comes from the
+            # per-challenge detail endpoint.
+            content = raw.get("content")
+            if not content:
+                try:
+                    content = self.client.get_challenge(int(raw["id"]), self.game_id).get("content")
+                except Ret2ShellError:
+                    content = None
             raw_category = primary_tag(raw)
             mapped = self.category_map.get(raw_category, raw_category)
             challenges.append(
@@ -535,7 +544,7 @@ class Ret2ShellAdapter(PlatformAdapter):
                     external_id=str(raw["id"]),
                     title=str(raw.get("name", "")),
                     category=normalize_category(mapped),
-                    description=str(raw.get("content", "") or ""),
+                    description=str(content or ""),
                     attachment_urls=[],
                 )
             )

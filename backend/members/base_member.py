@@ -1021,6 +1021,11 @@ class BaseMember:
             "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
             "If attachment_true is true, inspect the listed attachments before blind target probing.",
             "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
+            (
+                "challenge_description contains the original challenge statement "
+                "(connection commands like nc/ssh, service addresses, flag format). "
+                "external_id is this challenge's platform id — use it with ret2shell MCP tools."
+            ),
         ]
         return {
             "role": self.name,
@@ -1041,6 +1046,10 @@ class BaseMember:
             "eval_interval": d.eval_interval,
             "is_initial": is_initial,
             "expected_flag": d.expected_flag,
+            "challenge_description": next(
+                (f.description for f in detail.facts if f.id == "origin"), ""
+            ),
+            "external_id": detail.project.external_id,
             "goal": next((f.description for f in detail.facts if f.id == "goal"), ""),
             "assigned_intent": {"id": intent_id, "description": assigned.description if assigned else ""},
             "assigned_intent_sources": assigned.from_ if assigned else ["origin"],

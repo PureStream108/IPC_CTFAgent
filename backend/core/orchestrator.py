@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections import deque
 from contextlib import suppress
 import threading
@@ -686,7 +687,13 @@ class Orchestrator:
             try:
                 self._tick()
             except Exception as exc:
-                self.state.logger.project("scheduler_error", "system", error=str(exc))
+                # The fallback handler itself must never kill the loop: it
+                # logs through the DB-backed resolver, which is exactly what
+                # fails when the tick died on a locked database.
+                try:
+                    self.state.logger.project("scheduler_error", "system", error=str(exc))
+                except Exception:
+                    print(f"[ipc-orchestrator] tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             self._stop.wait(interval)
 
     def _tick(self) -> None:

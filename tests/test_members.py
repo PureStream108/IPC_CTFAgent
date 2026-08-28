@@ -382,6 +382,36 @@ def test_member_context_uses_sandbox_visible_attachment_paths(deps):
     ]
 
 
+def test_member_context_includes_challenge_description_and_external_id(deps):
+    db, d, reports, flags = deps
+    origin = "https://ctf.example/challenges\n\nConnect: nc 10.0.0.1 9999\nFlag format: flag{...}"
+    with db.connect() as conn:
+        pid = graph_store.create_project(
+            conn, "T", origin, "get flag", "pwn", external_id="chal-42"
+        )
+        intent = edge_store.create_intent(conn, pid, ["origin"], "pwn the service", "diamond")
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d)
+
+    context = member._build_context(pid, intent.id, "pwn", 1, False, False)
+
+    assert context["external_id"] == "chal-42"
+    assert context["challenge_description"] == origin
+    assert "nc 10.0.0.1 9999" in context["challenge_description"]
+    note = next((n for n in context["runtime_notes"] if "challenge_description" in n), "")
+    assert "ret2shell" in note and "external_id" in note
+
+
+def test_member_context_defaults_without_external_id(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d)
+
+    context = member._build_context(pid, iid, "web", 1, False, False)
+
+    assert context["external_id"] is None
+    assert context["challenge_description"] == "origin"
+
+
 def test_member_report_defaults_to_low_when_unspecified(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)

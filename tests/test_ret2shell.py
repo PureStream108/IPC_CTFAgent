@@ -19,7 +19,7 @@ from backend.platform.ret2shell import (
     Ret2ShellRateLimitError,
     _SubmitRateLimiter,
 )
-from backend.platform.ret2shell_mcp import build_ret2shell_mcp
+from backend.platform.ret2shell_mcp import WsrxTunnelManager, build_ret2shell_mcp
 from backend.server.app import create_app
 from tests.helpers import setup_test_auth, write_mock_config
 
@@ -235,6 +235,9 @@ def test_adapter_maps_categories_and_downloads_files(tmp_path):
                 {"id": 3, "name": "NoTag", "content": ""},
             ]
 
+        def get_challenge(self, challenge_id, game_id=None):
+            return {}
+
         def list_files(self, challenge_id, game_id=None):
             return files
 
@@ -428,6 +431,8 @@ def test_rate_limiter_enforces_shared_quota():
 
 
 class StubPlatformClient:
+    base_url = "https://ctf.r2s.test"
+
     def __init__(self):
         self.calls: list[tuple[str, ...]] = []
 
@@ -483,6 +488,143 @@ def test_ret2shell_mcp_exposes_instance_tools():
     assert status["solved"] is False and status["solves"] == 3
 
 
+# ---- wsrx tunneling ----
+
+
+class FakeProcess:
+    def __init__(self, remote, local_port):
+        self.remote = remote
+        self.local_port = local_port
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _fake_manager(spawns):
+    def spawner(remote, local_port):
+        process = FakeProcess(remote, local_port)
+        spawns.append(process)
+        return process
+
+    return WsrxTunnelManager(spawner=spawner, probe=lambda port: True)
+
+
+class TrafficStubClient(StubPlatformClient):
+    """Platform shape observed on ret2shell: traffic token + ports."""
+
+    def _traffic_instance(self):
+        return {
+            "state": "Running",
+            "exposed_ports": None,
+            "traffic": "tok1430",
+            "ports": [9999],
+            "renew_count": 0,
+        }
+
+    def find_instance(self, challenge_id, game_id=None):
+        self.calls.append(("find", challenge_id))
+        if ("start", challenge_id) not in self.calls:
+            return None
+        return self._traffic_instance()
+
+    def wait_for_instance(self, challenge_id, game_id=None, **kwargs):
+        self.calls.append(("wait", challenge_id))
+        return self._traffic_instance()
+
+
+def test_wsrx_manager_spawns_idempotent_and_cleans_up():
+    spawns = []
+    manager = _fake_manager(spawns)
+    remote = "wss://ctf.xidian.edu.cn/api/traffic/tok1430?port=9999"
+
+    first = manager.ensure(1430, [remote])
+    assert first["endpoints"] == ["ipc-app:21430"]
+    assert first["started"] == [remote]
+    assert len(spawns) == 1
+    assert spawns[0].remote == remote
+    assert spawns[0].local_port == 21430
+
+    # Repeated ensure for the same challenge reuses the live tunnel.
+    second = manager.ensure(1430, [remote])
+    assert second["endpoints"] == ["ipc-app:21430"]
+    assert second["started"] == []
+    assert len(spawns) == 1
+
+    manager.stop(1430)
+    assert spawns[0].terminated
+    assert manager.endpoints(1430) == []
+
+
+def test_wsrx_manager_restarts_dead_tunnel_and_binds_one_port_each():
+    spawns = []
+    manager = _fake_manager(spawns)
+    remotes = [
+        "wss://ctf.xidian.edu.cn/api/traffic/tok?port=1337",
+        "wss://ctf.xidian.edu.cn/api/traffic/tok?port=9999",
+    ]
+    result = manager.ensure(7, remotes)
+    assert result["endpoints"] == ["ipc-app:20007", "ipc-app:20008"]
+    assert len(spawns) == 2
+
+    spawns[0].returncode = 1  # process died behind our back
+    result = manager.ensure(7, remotes)
+    assert result["endpoints"] == ["ipc-app:20007", "ipc-app:20008"]
+    assert result["started"] == [remotes[0]]
+    assert len(spawns) == 3
+    # Only the two live tunnels remain tracked.
+    assert manager.endpoints(7) == ["ipc-app:20007", "ipc-app:20008"]
+
+
+def test_instance_start_tunnels_wsrx_remotes_to_local_port():
+    spawns = []
+    stub = TrafficStubClient()
+    server = build_ret2shell_mcp(stub, tunnel_manager=_fake_manager(spawns))
+    started = _call_tool(server, "instance_start", challenge_id=1430)
+    assert started["endpoints"] == ["ipc-app:21430"]
+    assert started["wsrx_remotes"] == [
+        "wss://ctf.r2s.test/api/traffic/tok1430?port=9999"
+    ]
+    assert ("start", 1430) in stub.calls
+
+    # Idempotent: a repeated start must not spawn a second tunnel.
+    again = _call_tool(server, "instance_start", challenge_id=1430)
+    assert again["endpoints"] == ["ipc-app:21430"]
+    assert len(spawns) == 1
+
+    status = _call_tool(server, "instance_status", challenge_id=1430)
+    assert status["running"] is True
+    assert status["endpoints"] == ["ipc-app:21430"]
+
+    stopped = _call_tool(server, "instance_stop", challenge_id=1430)
+    assert stopped["stopped"] is True
+    assert stopped["tunnels_closed"] == [21430]
+    assert spawns[0].terminated
+    assert ("destroy", 1430) in stub.calls
+
+
+def test_instance_start_passes_direct_endpoints_through():
+    # GZCTF-style direct host:port exposure needs no wsrx at all.
+    spawns = []
+    stub = StubPlatformClient()
+    server = build_ret2shell_mcp(stub, tunnel_manager=_fake_manager(spawns))
+    started = _call_tool(server, "instance_start", challenge_id=5)
+    assert started["endpoints"] == [{"ctf.r2s.test:1337": {"protocol": "tcp"}}]
+    assert "wsrx_remotes" not in started
+    assert spawns == []
+
+
 # ---- API import integration ----
 
 
@@ -512,6 +654,9 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
                     "content": "nc target 1337",
                 }
             ]
+
+        def get_challenge(self, challenge_id, game_id=None):
+            return {}
 
         def list_files(self, challenge_id, game_id=None):
             return [{"folder": "static", "file": "calc.zip"}]
@@ -543,6 +688,10 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
     item = imported.json()["imported"][0]
     assert item["category"] == "pwn"
     with api_client.app.state.ipc.db.connect() as conn:
+        # The challenge description must land in the origin fact so the
+        # Member context exposes it (connection commands, flag format...).
+        facts = {f.id: f.description for f in graph_store.project_detail(conn, item["project_id"]).facts}
+        assert "nc target 1337" in facts.get("origin", "")
         graph_store.set_flag(conn, item["project_id"], "flag{r2s}")
         graph_store.set_status(conn, item["project_id"], "completed")
     assert api_client.get(f"/api/flags/{item['project_id']}").json()["flag"] == "flag{r2s}"

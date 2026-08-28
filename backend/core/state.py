@@ -154,8 +154,14 @@ class AppState:
                 self.db.close()
 
     def project_log_filename(self, project_id: str) -> str | None:
-        with self.db.connect() as conn:
-            return graph_store.project_log_filename(conn, project_id)
+        # Called from logging paths, including the scheduler's crash handler;
+        # a locked database must degrade to the plain id instead of raising
+        # through the logger and killing the caller.
+        try:
+            with self.db.connect() as conn:
+                return graph_store.project_log_filename(conn, project_id)
+        except Exception:
+            return project_id
 
     def attachments_dir(self, project_id: str) -> Path:
         d = self.projects_dir / project_id / "attachments"

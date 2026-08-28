@@ -101,10 +101,16 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
     try:
         with state.db.connect() as conn:
             for challenge in selected:
+                # Mirror the ops workflow importer: the challenge statement
+                # (connection commands, flag format) rides in the origin fact
+                # so the Member context's challenge_description picks it up.
+                origin = body.mapping.list_url
+                if challenge.description:
+                    origin = f"{origin}\n\n{challenge.description}"
                 project_id = graph_store.create_project(
                     conn,
                     challenge.title,
-                    body.mapping.list_url,
+                    origin,
                     "capture the flag",
                     challenge.category,
                     external_id=challenge.external_id,
