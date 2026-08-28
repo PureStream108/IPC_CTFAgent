@@ -151,6 +151,10 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _system_prompt_for_context(context: dict[str, Any]) -> str:
+    return _SYSTEM_PROMPT
+
+
 _ACTION_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -235,7 +239,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
         reasoning_effort = self._reasoning_effort(decision=True)
         text = self._request_compatible(
             messages,
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_system_prompt_for_context(context),
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
             max_tokens=4096 if deepseek or reasoning_model else None,
             structured=True,
@@ -256,7 +260,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
         )
         repaired = self._request_compatible(
             [*messages, {"role": "user", "content": repair_message}],
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_system_prompt_for_context(context),
             temperature=0.0 if not reasoning_model else None,
             max_tokens=4096 if deepseek or reasoning_model else 1024,
             structured=True,
@@ -322,7 +326,15 @@ class OpenAICompatibleAdapter(BaseAdapter):
         thinking: str | None,
     ) -> _OpenAIProfile:
         reasoning_model = _is_reasoning_model(self.config.model)
-        native_or_reasoning = _is_native_openai(self.config.base_url) or reasoning_model
+        # Reasoning-model names alone do not guarantee that a compatible
+        # gateway implements OpenAI's strict JSON Schema wire shape.  When an
+        # operator explicitly selects Chat Completions on a non-native
+        # endpoint, prefer the broadly supported JSON Object mode (and its
+        # matching token parameter).  Native OpenAI keeps the strict schema
+        # profile used by Responses/Chat reasoning models.
+        native_or_reasoning = _is_native_openai(self.config.base_url) or (
+            reasoning_model and self.config.api_surface == "auto"
+        )
         if not structured:
             structured_mode = "none"
         elif self.config.api_format == "deepseek":
@@ -783,7 +795,7 @@ class ClaudeAdapter(BaseAdapter):
         messages = [{"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
         text = self.chat(
             messages,
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_system_prompt_for_context(context),
             temperature=None,
             max_tokens=1024,
         )
@@ -804,7 +816,7 @@ class ClaudeAdapter(BaseAdapter):
                     ),
                 },
             ],
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=_system_prompt_for_context(context),
             temperature=None,
             max_tokens=1024,
         )

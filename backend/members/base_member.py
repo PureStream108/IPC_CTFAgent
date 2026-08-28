@@ -1016,6 +1016,12 @@ class BaseMember:
         if callable(attachment_path):
             for attachment in attachments:
                 attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
+        runtime_notes = [
+            "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
+            "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
+            "If attachment_true is true, inspect the listed attachments before blind target probing.",
+            "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
+        ]
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
@@ -1030,12 +1036,7 @@ class BaseMember:
                 "or new evidence justifies escalation. Do not repeat previous attempts."
             ),
             "sandbox_backend": getattr(d.sandbox, "__class__", type(d.sandbox)).__name__,
-            "runtime_notes": [
-                "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
-                "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
-                "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
-                "If attachment_true is true, inspect the listed attachments before blind target probing.",
-            ],
+            "runtime_notes": runtime_notes,
             "evaluate_now": evaluate_now,
             "eval_interval": d.eval_interval,
             "is_initial": is_initial,

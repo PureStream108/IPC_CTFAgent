@@ -82,7 +82,9 @@ class SecretHeader(BaseModel):
 class ChallengeMappingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    list_url: str
+    platform: Literal["http_json", "ret2shell"] = "http_json"
+    game_id: int | None = None
+    list_url: str = ""
     list_path: str = "data"
     id_field: str = "id"
     title_field: str = "name"
@@ -96,7 +98,13 @@ class ChallengeMappingSpec(BaseModel):
     @field_validator("list_url")
     @classmethod
     def validate_list_url(cls, value: str) -> str:
-        return _validate_http_url(value)
+        return _validate_http_url(value) if value.strip() else ""
+
+    @model_validator(mode="after")
+    def require_list_url_for_http_json(self) -> ChallengeMappingSpec:
+        if self.platform == "http_json" and not self.list_url.strip():
+            raise ValueError("list_url is required for the http_json platform")
+        return self
 
     @field_validator("attachment_base_url")
     @classmethod
@@ -127,6 +135,8 @@ class ChallengeMappingSpec(BaseModel):
 
     def to_field_mapping(self, headers: dict[str, str]) -> FieldMapping:
         return FieldMapping(
+            platform=self.platform,
+            game_id=self.game_id,
             list_url=self.list_url,
             list_path=self.list_path,
             id_field=self.id_field,

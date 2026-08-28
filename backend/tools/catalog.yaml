@@ -482,3 +482,4 @@ entries:
     install_path: Ruby gems
     example: "zsteg -a image.png"
     official: https://github.com/zed-0xff/zsteg
+

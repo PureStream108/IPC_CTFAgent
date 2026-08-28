@@ -9,8 +9,9 @@ from pydantic import BaseModel, ConfigDict
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.state import AppState
-from backend.platform.adapter import HttpJsonAdapter
+from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
+from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient, Ret2ShellError
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
@@ -24,12 +25,21 @@ class ImportRequest(ChallengeRequest):
     select: list[str] | None = None
 
 
-def _fetch(mapping: FieldMapping) -> tuple[HttpJsonAdapter, list[PlatformChallenge]]:
-    adapter = HttpJsonAdapter(mapping)
+def _build_adapter(mapping: FieldMapping) -> PlatformAdapter:
+    if mapping.platform == "ret2shell":
+        client = Ret2ShellClient(base_url=mapping.list_url, game_id=mapping.game_id)
+        return Ret2ShellAdapter(client, game_id=mapping.game_id or None)
+    return HttpJsonAdapter(mapping)
+
+
+def _fetch(mapping: FieldMapping) -> tuple[PlatformAdapter, list[PlatformChallenge]]:
+    adapter = _build_adapter(mapping)
     try:
         return adapter, adapter.fetch_challenges()
     except requests.RequestException as exc:
         raise HTTPException(502, f"platform request failed: {exc}") from exc
+    except Ret2ShellError as exc:
+        raise HTTPException(502, f"ret2shell request failed: {exc}") from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -88,6 +98,10 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
         for project_id in created_project_ids:
             shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)
         raise HTTPException(502, f"attachment download failed: {exc}") from exc
+    except Ret2ShellError as exc:
+        for project_id in created_project_ids:
+            shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)
+        raise HTTPException(502, f"ret2shell attachment download failed: {exc}") from exc
     except (OSError, TypeError, ValueError) as exc:
         for project_id in created_project_ids:
             shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)

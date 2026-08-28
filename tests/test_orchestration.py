@@ -557,3 +557,51 @@ def test_failed_member_is_backed_off_before_same_intent_is_dispatched(state):
         for entry in entries
     )
     orch.shutdown()
+
+
+def test_repeated_stalls_defer_original_intent_and_dispatch_alternative(state):
+    from backend.core.orchestrator import Orchestrator
+    from backend.members.base_member import SolveResult
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        stalled = edge_store.create_intent(
+            conn, pid, ["origin"], "repeat a stalled scan", "diamond", worker="aventurine"
+        )
+        alternative = edge_store.create_intent(
+            conn, pid, ["origin"], "run the alternate static query", "diamond"
+        )
+
+    orch = Orchestrator(state, max_workers=1)
+    for _ in range(orch._MAX_CONSECUTIVE_STALLS):
+        future = Future()
+        future.set_result(SolveResult(status="stalled", steps=3))
+        with orch._lock:
+            orch._task_index[(pid, stalled.id)] = future
+        orch._reap_finished_futures()
+
+    key = (pid, stalled.id)
+    assert orch._member_stall_counts[key] == orch._MAX_CONSECUTIVE_STALLS
+    assert orch._member_retry_blocked(pid, stalled.id)
+    with state.db.connect() as conn:
+        assert edge_store.get_intent(conn, pid, stalled.id)["worker"] is None
+
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    assert launched == [(pid, "aventurine", alternative.id, "web", False)]
+
+    entries = state.logger.read_log("project", pid, None)
+    assert any(
+        entry["event"] == "member_intent_deferred"
+        and entry["intent"] == stalled.id
+        and entry["reason"] == "repeated_stalls"
+        for entry in entries
+    )
+    orch.shutdown()

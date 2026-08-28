@@ -53,6 +53,26 @@ def test_hyperedge_multiple_sources(db):
     assert set(intent.from_) == {f1.id, f2.id}
 
 
+def test_create_fact_deduplicates_reworded_source_finding(db):
+    with db.connect() as conn:
+        pid = graph_store.create_project(conn, "T", "o", "g", "pwn")
+        first = node_store.create_fact(
+            conn,
+            pid,
+            "Nday candidate services/camera/foo.cpp lines 40-48; "
+            "introducing commit a876352a6fb119ba2e81159ec106359a99b56461.",
+        )
+        second = node_store.create_fact(
+            conn,
+            pid,
+            "Confirmed candidate services/camera/foo.cpp:40-48; "
+            "introducing commit a876352a6fb119ba2e81159ec106359a99b56461; "
+            "track mapping pending.",
+        )
+        assert second.id == first.id
+        assert len(node_store.list_facts(conn, pid)) == 3
+
+
 def test_expire_workers_releases_stale_claims(db):
     with db.connect() as conn:
         pid = graph_store.create_project(conn, "T", "o", "g", "misc")

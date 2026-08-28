@@ -11,7 +11,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 # CTF challenge categories the user may pick when creating a project.
 Category = Literal["pwn", "reverse", "crypto", "web", "misc", "ai", "osint"]
-CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
+CATEGORIES: tuple[str, ...] = (
+    "pwn",
+    "reverse",
+    "crypto",
+    "web",
+    "misc",
+    "ai",
+    "osint",
+)
 
 # Supported LLM wire formats. base_url is always user-provided.
 # ``anthropic`` is the raw Messages API; ``claudecode`` keeps the separate

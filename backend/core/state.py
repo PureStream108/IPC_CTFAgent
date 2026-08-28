@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -12,6 +13,8 @@ from backend.blackboard.db import Database
 from backend.mcp.mcp_client import MCPRegistry
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
+from backend.platform.ret2shell import Ret2ShellClient
+from backend.platform.ret2shell_mcp import build_ret2shell_mcp
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
@@ -32,6 +35,8 @@ class AppState:
         if _env_flag("IPC_CLEAN_START"):
             self._clean_runtime_state()
         self.config: AppConfig = load_config(config_dir)
+        self.projects_dir = self.root / "projects"
+        self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         # Operational state lives in RAM: it is wiped when the container is
         # removed. Only what the UI exports (below) is written to disk, so the
@@ -40,6 +45,7 @@ class AppState:
         self.db = Database(data_dir / "graph.db", in_memory=True).configure()
         with self.db.connect() as conn:
             graph_store.reset_project_counter_if_empty(conn)
+            self._reserve_existing_project_ids(conn)
         self.memory = MemoryStore(
             data_dir / "memory.db", export_dir=None, in_memory=True
         ).configure()
@@ -81,14 +87,38 @@ class AppState:
         self.mcps = MCPRegistry()
         self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
+        # The ret2shell competition MCP (dynamic instance control) is only
+        # registered when participant credentials are configured, so members
+        # never see a platform they cannot reach.
+        if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
+            self.mcps.register(build_ret2shell_mcp(Ret2ShellClient()))
 
-        self.projects_dir = self.root / "projects"
         self.wp_dir = self.root / "wp"
-        self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.wp_dir.mkdir(parents=True, exist_ok=True)
 
         # Attached by module 8.
         self.orchestrator = None
+
+    def _reserve_existing_project_ids(self, conn) -> None:
+        """Keep an in-memory graph from reusing persistent workspaces.
+
+        Project graph state is deliberately ephemeral, while project sandbox
+        directories survive a server restart.  Reserve the largest surviving
+        numeric ID so a newly created project never inherits old progress or
+        artifacts merely because its in-memory database was recreated.
+        """
+        highest = 0
+        for entry in self.projects_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            match = re.fullmatch(r"proj_(\d+)", entry.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if highest:
+            conn.execute(
+                "UPDATE counters SET value = MAX(value, ?) WHERE name = 'project'",
+                (highest,),
+            )
 
     def _clean_runtime_state(self) -> None:
         # "data" is absent: it holds exports now, and the databases are in RAM.
