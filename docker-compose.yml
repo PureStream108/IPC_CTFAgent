@@ -83,6 +83,13 @@ services:
       - IPC_MEMORY_EXPORT_DIR=/app/data/memory
       - IPC_CLAUDE_RUNNER_URL=${IPC_CLAUDE_RUNNER_URL:-http://ipc-claude-runner:8600}
       - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
+      # ret2shell platform credentials; when USERNAME (or TOKEN) is set the
+      # backend registers the ret2shell MCP for every Member.
+      - IPC_R2S_BASE_URL=${IPC_R2S_BASE_URL:-}
+      - IPC_R2S_GAME_ID=${IPC_R2S_GAME_ID:-}
+      - IPC_R2S_USERNAME=${IPC_R2S_USERNAME:-}
+      - IPC_R2S_PASSWORD=${IPC_R2S_PASSWORD:-}
+      - IPC_R2S_TOKEN=${IPC_R2S_TOKEN:-}
     volumes:
       # ./data is the only persistent location: administrator authentication,
       # IPC conversation configuration/history/secrets, and UI Derive/Export

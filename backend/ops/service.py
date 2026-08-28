@@ -27,6 +27,7 @@ from backend.ops.claude_runner import ClaudeCodeRunner, ClaudeCodeRunnerError
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor, tool_prompt
 from backend.platform.adapter import HttpJsonAdapter
+from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient
 
 _JSON_DECODER = json.JSONDecoder()
 _MAX_TOOL_ROUNDS = 8
@@ -1238,10 +1239,19 @@ class OpsAgentService:
             "confirmation_phrase": f"CONFIRM WORKFLOW {workflow['id']}",
         }
 
-    def _adapter(self, workflow_id: str, spec: PlatformWorkflowSpec) -> HttpJsonAdapter:
+    def _adapter(self, workflow_id: str, spec: PlatformWorkflowSpec) -> HttpJsonAdapter | Any:
         secrets_values = self.store.workflow_secrets(workflow_id)
         headers = _resolve_headers(spec.challenges.headers, secrets_values)
         mapping = spec.challenges.to_field_mapping(headers)
+        if mapping.platform == "ret2shell":
+            # Credentials come from IPC_R2S_* environment variables inside the
+            # backend process; the workflow spec carries no secrets.
+            return Ret2ShellAdapter(
+                Ret2ShellClient(game_id=mapping.game_id),
+                game_id=mapping.game_id or None,
+                category_map=mapping.category_map,
+                max_attachment_bytes=spec.max_attachment_bytes,
+            )
         return HttpJsonAdapter(
             mapping,
             request_get=self._http_client(spec).get,

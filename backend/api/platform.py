@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 import shutil
+import time
+from pathlib import Path
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +19,11 @@ from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient, Ret2Sh
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
 
+def safe_name(external_id: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", external_id).strip("._") or "challenge"
+    return cleaned[:80]
+
+
 class ChallengeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mapping: FieldMapping
@@ -28,7 +36,11 @@ class ImportRequest(ChallengeRequest):
 def _build_adapter(mapping: FieldMapping) -> PlatformAdapter:
     if mapping.platform == "ret2shell":
         client = Ret2ShellClient(base_url=mapping.list_url, game_id=mapping.game_id)
-        return Ret2ShellAdapter(client, game_id=mapping.game_id or None)
+        return Ret2ShellAdapter(
+            client,
+            game_id=mapping.game_id or None,
+            category_map=mapping.category_map,
+        )
     return HttpJsonAdapter(mapping)
 
 
@@ -62,6 +74,28 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
             raise HTTPException(400, f"unknown external_id values: {missing}")
         selected = [by_id[external_id] for external_id in body.select]
 
+    # Phase 1 downloads every attachment while NO database connection is
+    # open.  Holding the write transaction across network downloads starved
+    # the UI polling loop (and itself) with "database is locked" on large
+    # imports.  Phase 2 then only performs fast local writes.
+    staging_root = state.root / "staging" / f"import_{int(time.time() * 1000)}"
+    staged: dict[str, list[Path]] = {}
+    try:
+        for challenge in selected:
+            staged[challenge.external_id] = adapter.download_attachments(
+                challenge,
+                staging_root / safe_name(challenge.external_id),
+            )
+    except requests.RequestException as exc:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(502, f"attachment download failed: {exc}") from exc
+    except Ret2ShellError as exc:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(502, f"ret2shell attachment download failed: {exc}") from exc
+    except (OSError, TypeError, ValueError) as exc:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(400, str(exc)) from exc
+
     imported: list[dict[str, str]] = []
     created_project_ids: list[str] = []
     try:
@@ -76,15 +110,16 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
                     external_id=challenge.external_id,
                 )
                 created_project_ids.append(project_id)
-                for path in adapter.download_attachments(
-                    challenge,
-                    state.attachments_dir(project_id),
-                ):
+                attachment_dir = state.attachments_dir(project_id)
+                attachment_dir.mkdir(parents=True, exist_ok=True)
+                for path in staged.get(challenge.external_id, []):
+                    target = attachment_dir / path.name
+                    shutil.move(str(path), str(target))
                     graph_store.create_attachment(
                         conn,
                         project_id,
-                        path.name,
-                        str(path),
+                        target.name,
+                        str(target),
                     )
                 imported.append(
                     {
@@ -94,18 +129,12 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
                         "category": challenge.category,
                     }
                 )
-    except requests.RequestException as exc:
-        for project_id in created_project_ids:
-            shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)
-        raise HTTPException(502, f"attachment download failed: {exc}") from exc
-    except Ret2ShellError as exc:
-        for project_id in created_project_ids:
-            shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)
-        raise HTTPException(502, f"ret2shell attachment download failed: {exc}") from exc
     except (OSError, TypeError, ValueError) as exc:
         for project_id in created_project_ids:
             shutil.rmtree(state.projects_dir / project_id, ignore_errors=True)
         raise HTTPException(400, str(exc)) from exc
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
 
     for item in imported:
         state.logger.project(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -201,20 +202,64 @@ class Ret2ShellClient:
 
     # ---- auth ----
 
+    @staticmethod
+    def solve_pow(challenge: str, *, max_attempts: int = 5_000_000) -> str:
+        """Solve a ret2shell CLI proof-of-work captcha.
+
+        The server issues ``"<difficulty>#<nanoid>"`` and accepts any answer
+        that starts with ``<nanoid>`` and whose SHA-256 hex digest starts
+        with ``difficulty`` zero characters (crates/captcha/src/pow.rs).
+        """
+
+        difficulty_raw, _, prefix = challenge.partition("#")
+        try:
+            difficulty = int(difficulty_raw)
+        except ValueError as exc:
+            raise Ret2ShellError(f"invalid pow challenge: {challenge!r}") from exc
+        target = "0" * difficulty
+        for counter in range(max_attempts):
+            answer = f"{prefix}{counter}"
+            if hashlib.sha256(answer.encode()).hexdigest().startswith(target):
+                return answer
+        raise Ret2ShellError(f"pow challenge not solved within {max_attempts} attempts")
+
+    def _fresh_captcha(self) -> dict[str, str]:
+        # The CLI endpoint always issues a PoW (difficulty 4), which the
+        # agent can solve autonomously — unlike the browser image captcha.
+        response = self.session.get(self._url("/account/captcha/cli"), timeout=self.timeout)
+        if response.status_code != 200:
+            raise Ret2ShellAuthError(f"captcha fetch failed: {_error_detail(response)}")
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("id"):
+            raise Ret2ShellAuthError("captcha response has no id")
+        challenge = str(payload.get("challenge", ""))
+        # A non-PoW challenge (image/hcaptcha) cannot be solved by the agent;
+        # pass it through and let login fail with the platform's reason.
+        answer = self.solve_pow(challenge) if "#" in challenge else ""
+        return {"captcha_id": str(payload["id"]), "captcha_answer": answer}
+
     def login(self) -> None:
         if not self.username or not self.password:
             raise Ret2ShellAuthError(
                 "ret2shell username/password are not configured; "
                 "set IPC_R2S_USERNAME/IPC_R2S_PASSWORD or IPC_R2S_TOKEN"
             )
+        body = {
+            "account": self.username,
+            "password": self.password,
+            "captcha_id": "",
+            "captcha_answer": "",
+        }
+        # The platform may enable captchas (410 "captcha is outdate" otherwise).
+        # The CLI PoW endpoint works headlessly, so try to pre-solve one; if
+        # the deployment disabled captchas the fields are simply ignored.
+        try:
+            body.update(self._fresh_captcha())
+        except Ret2ShellAuthError:
+            pass
         response = self.session.post(
             self._url("/account/login"),
-            json={
-                "account": self.username,
-                "password": self.password,
-                "captcha_id": "",
-                "captcha_answer": "",
-            },
+            json=body,
             timeout=self.timeout,
         )
         self._absorb_token(response)
@@ -503,6 +548,8 @@ class Ret2ShellAdapter(PlatformAdapter):
     ) -> list[Path]:
         # ret2shell attachments are listed per challenge via the file API, so
         # there are no attachment URLs at fetch time.
+        destination = Path(dest_dir)
+        destination.mkdir(parents=True, exist_ok=True)
         downloaded: list[Path] = []
         for item in self.client.list_files(int(challenge.external_id), self.game_id):
             folder = str(item.get("folder", "static"))
@@ -514,7 +561,7 @@ class Ret2ShellAdapter(PlatformAdapter):
                     int(challenge.external_id),
                     folder,
                     str(file),
-                    dest_dir,
+                    destination,
                     self.game_id,
                     max_bytes=self.max_attachment_bytes,
                 )

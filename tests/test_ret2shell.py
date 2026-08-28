@@ -92,7 +92,18 @@ def make_client(router, authed=True, **kwargs):
     return Ret2ShellClient(session=FakeSession(router), **defaults)
 
 
+def captcha_ok(url):
+    if url.endswith("/api/account/captcha/cli"):
+        return FakeResponse(
+            200,
+            {"id": "cap-1", "validator": "pow", "challenge": "2#seed"},
+        )
+    return None
+
+
 def login_ok(url, token="token-1"):
+    if cap := captcha_ok(url):
+        return cap
     if url.endswith("/api/account/login"):
         return FakeResponse(200, headers={"Set-Token": token})
     return None
@@ -112,8 +123,8 @@ def test_login_captures_set_token_header_and_uses_bearer():
     client = make_client(router, authed=False)
     profile = client.get_profile()
     assert profile["account"] == "user"
-    auth = client.session.calls[1][2]["headers"]["Authorization"]
-    assert auth == "Bearer token-1"
+    profile_call = next(call for call in client.session.calls if call[1].endswith("/api/account/profile"))
+    assert profile_call[2]["headers"]["Authorization"] == "Bearer token-1"
     client.close()
 
 
@@ -121,6 +132,8 @@ def test_login_failure_raises_auth_error():
     def router(method, url, kwargs):
         if url.endswith("/api/account/login"):
             return FakeResponse(401, text="account or password is wrong")
+        if login := login_ok(url):
+            return login
         raise AssertionError(f"unexpected {method} {url}")
 
     client = make_client(router, authed=False)
@@ -133,6 +146,8 @@ def test_set_token_refresh_rolls_token_forward():
     state = {"logins": 0}
 
     def router(method, url, kwargs):
+        if cap := captcha_ok(url):
+            return cap
         if url.endswith("/api/account/login"):
             state["logins"] += 1
             return FakeResponse(200, headers={"Set-Token": "token-1"})
@@ -155,6 +170,8 @@ def test_expired_token_relogins_once():
     state = {"profile_calls": 0}
 
     def router(method, url, kwargs):
+        if cap := captcha_ok(url):
+            return cap
         if url.endswith("/api/account/login"):
             return FakeResponse(200, headers={"Set-Token": "token-2"})
         if url.endswith("/api/account/profile"):
@@ -166,7 +183,8 @@ def test_expired_token_relogins_once():
 
     client = make_client(router, authed=False)
     assert client.get_profile()["account"] == "user"
-    assert client.session.calls[0][0] == "POST"  # login first
+    first_post = next(call for call in client.session.calls if call[0] == "POST")
+    assert first_post[1].endswith("/api/account/login")  # login before any data call
     assert client.session.calls[-1][2]["headers"]["Authorization"] == "Bearer token-2"
     client.close()
 
