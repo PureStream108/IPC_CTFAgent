@@ -158,11 +158,43 @@ def cmd_submit(args) -> int:
     return 0
 
 
+CATEGORY_DIFFICULTY = {"misc": 0, "web": 1, "crypto": 2, "ai": 3, "reverse": 4, "pwn": 5}
+EASY_TITLE_MARKS = ("入门", "签到", "如何", "开始", "ez_", "ez-", "warmup")
+
+
+def load_ranking() -> dict[str, tuple[int, int, int]]:
+    """external_id -> (solves, category_rank, score); higher solves = easier."""
+    targets = Path("/app/platform_targets/ret2shell.yaml")
+    ranking: dict[str, tuple[int, int, int]] = {}
+    if not targets.exists():
+        return ranking
+    import yaml
+
+    data = yaml.safe_load(targets.read_text(encoding="utf-8")) or {}
+    for ch in data.get("challenges", []):
+        ext = str(ch.get("id"))
+        solves = ch.get("total_solves") or 0
+        category = str(ch.get("category", "misc"))
+        score = ch.get("score", 999)
+        ranking[ext] = (int(solves), CATEGORY_DIFFICULTY.get(category, 3), int(score))
+    return ranking
+
+
+def rank_projects(projects: list[dict], ranking: dict) -> list[dict]:
+    def sort_key(p):
+        ext = str(p.get("external_id"))
+        solves, cat_rank, score = ranking.get(ext, (0, 3, 999))
+        title_easy = 1 if any(m in p["title"].lower() for m in EASY_TITLE_MARKS) else 0
+        # easiest first: most platform solves, easy title, easy category, low score
+        return (-solves, -title_easy, cat_rank, score)
+
+    return sorted(projects, key=sort_key)
+
+
 def cmd_auto(args) -> int:
-    """Full automation: start every remaining project, then loop — submit
-    each new flag to the platform as it appears, until nothing is left
-    running or queued.  Starting beyond capacity is fine: the orchestrator
-    queues projects and starts them as slots free up."""
+    """Full automation with controlled dispatch: keep at most --slots projects
+    running, promoting the next-easiest challenge whenever a slot frees, and
+    submit each new flag as it appears."""
 
     from backend.platform.ret2shell import (
         Ret2ShellClient,
@@ -173,19 +205,20 @@ def cmd_auto(args) -> int:
 
     projects = http("GET", "/projects", args.session)
     todo = [
-        p
-        for p in projects
+        p for p in projects
         if p["status"] not in ("completed", "running", "queued")
     ]
     if args.category:
         todo = [p for p in todo if p["category"] == args.category]
-    print(f"auto mode: starting {len(todo)} projects (capacity queue handles the rest)")
-    for project in todo:
-        try:
-            http("POST", f"/projects/{project['id']}/start", args.session)
-            print(f"  started {project['id']} [{project['category']}] {project['title']}", flush=True)
-        except urllib.error.HTTPError as exc:
-            print(f"  {project['id']} start failed: HTTP {exc.code}", flush=True)
+    ranking = load_ranking()
+    todo = rank_projects(todo, ranking)
+    print(
+        f"auto: {len(todo)} projects to run, {args.slots} slots, easiest-first order:",
+        flush=True,
+    )
+    for p in todo[:10]:
+        ext = str(p.get("external_id"))
+        print(f"  {p['id']} [{p['category']}] {p['title']} solves={ranking.get(ext, ('?',))[0]}", flush=True)
 
     state = load_state()
     client = Ret2ShellClient(
@@ -194,11 +227,33 @@ def cmd_auto(args) -> int:
         username=os.getenv("IPC_R2S_USERNAME", ""),
         password=os.getenv("IPC_R2S_PASSWORD", ""),
     )
+    next_index = 0
     with client:
         while True:
+            # --- dispatch: fill free slots with the next-easiest projects ---
+            try:
+                runtime = http("GET", "/config/runtime", args.session, timeout=30)
+                active = len(runtime["limiter"]["active_tasks"])
+            except Exception as exc:
+                print(f"[dispatch] runtime query failed: {exc}", flush=True)
+                active = 0
+            while active < args.slots and next_index < len(todo):
+                project = todo[next_index]
+                next_index += 1
+                try:
+                    http("POST", f"/projects/{project['id']}/start", args.session, timeout=60)
+                    print(
+                        f"[start] {project['id']} [{project['category']}] {project['title']} "
+                        f"(slot {active + 1}/{args.slots}, {len(todo) - next_index} left)",
+                        flush=True,
+                    )
+                    active += 1
+                    time.sleep(5)  # stagger container startup
+                except urllib.error.HTTPError as exc:
+                    print(f"[start] {project['id']} failed: HTTP {exc.code}", flush=True)
+
+            # --- submit new flags ---
             flags = http("GET", "/api/flags", args.session)
-            projects_now = http("GET", "/projects", args.session)
-            active = sum(1 for p in projects_now if p["status"] in ("running", "queued"))
             for record in flags:
                 ext = record["external_id"]
                 if not (record["flag"] and ext) or ext in state["submitted"]:
@@ -234,15 +289,14 @@ def cmd_auto(args) -> int:
                     break
                 except Ret2ShellError as exc:
                     print(f"[error] {label}: {exc}", flush=True)
-            score = sum(
-                1 for v in state["submitted"].values() if v.get("solved") is True
-            )
+
+            accepted = sum(1 for v in state["submitted"].values() if v.get("solved") is True)
             print(
-                f"... active={active} flags_found={sum(1 for f in flags if f['flag'])} "
-                f"platform_accepted={score} (Ctrl+C to stop)",
+                f"... dispatched={next_index}/{len(todo)} flags_found={sum(1 for f in flags if f['flag'])} "
+                f"platform_accepted={accepted} (Ctrl+C to stop)",
                 flush=True,
             )
-            if active == 0:
+            if next_index >= len(todo) and active == 0:
                 print("all projects finished; auto mode exiting")
                 return 0
             time.sleep(args.interval)
@@ -251,7 +305,8 @@ def cmd_auto(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", required=True, help="admin ipc_session cookie")
-    parser.add_argument("--auto", action="store_true", help="start all + auto-submit loop")
+    parser.add_argument("--auto", action="store_true", help="ranked dispatch + auto-submit loop")
+    parser.add_argument("--slots", type=int, default=8, help="max concurrent running projects")
     parser.add_argument("--start", action="store_true")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--submit", action="store_true")
