@@ -303,6 +303,24 @@ class Ret2ShellClient:
             "GET", f"/game/{game_id or self.game_id}/challenge/{challenge_id}/submit"
         )
 
+    def has_environment(self, challenge_id: int, game_id: int | None = None) -> bool:
+        """Whether the challenge ships a dynamic instance environment.
+
+        The env endpoint returns ``null`` for plain challenges and an
+        ``{"images": [...]}`` object for those with an online environment.
+        """
+
+        response = self._request(
+            "GET", f"/game/{game_id or self.game_id}/challenge/{challenge_id}/env"
+        )
+        if response.status_code >= 400:
+            return False
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        return bool(payload)
+
     # ---- attachments ----
 
     def list_files(self, challenge_id: int, game_id: int | None = None) -> list[dict[str, Any]]:

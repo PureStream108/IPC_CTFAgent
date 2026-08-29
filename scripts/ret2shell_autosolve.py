@@ -232,6 +232,36 @@ def rank_projects(projects: list[dict], ranking: dict) -> list[dict]:
     return sorted(projects, key=sort_key)
 
 
+def fetch_descriptions(session: str, projects: list[dict]) -> dict[str, str]:
+    """project_id -> origin fact text, for instance-need classification."""
+    descs: dict[str, str] = {}
+    for p in projects:
+        try:
+            detail = http("GET", f"/projects/{p['id']}", session, timeout=60)
+            detail = detail.get("detail", detail)
+            if isinstance(detail, str):
+                continue
+            descs[p["id"]] = " ".join(
+                f.get("description", "") for f in detail.get("facts", [])
+            )
+        except Exception:
+            continue
+    return descs
+
+
+INSTANCE_MARKS = ("nc ", "ncat", "ssh ", "wsrx", "实例", "instance", "远程环境", "连接题目环境")
+
+
+def needs_instance(project: dict, descriptions: dict[str, str], env_flags: dict[str, bool]) -> bool:
+    ext = str(project.get("external_id"))
+    if ext in env_flags:
+        return env_flags[ext]  # authoritative: the platform's env endpoint
+    if project["category"] == "pwn":
+        return True
+    text = (descriptions.get(project["id"], "") + " " + project["title"]).lower()
+    return any(mark in text for mark in INSTANCE_MARKS)
+
+
 def cmd_auto(args) -> int:
     """Full automation with controlled dispatch: keep at most --slots projects
     running, promoting the next-easiest challenge whenever a slot frees, and
@@ -258,14 +288,7 @@ def cmd_auto(args) -> int:
         print(f"excluded {len(skipped)} projects in categories: {sorted(excluded)}", flush=True)
     ranking = load_ranking()
     todo = rank_projects(todo, ranking)
-    print(
-        f"auto: {len(todo)} projects to run, {args.slots} slots, easiest-first order:",
-        flush=True,
-    )
-    for p in todo[:10]:
-        ext = str(p.get("external_id"))
-        print(f"  {p['id']} [{p['category']}] {p['title']} solves={ranking.get(ext, ('?',))[0]}", flush=True)
-
+    descriptions = fetch_descriptions(args.session, todo)
     state = load_state()
     client = Ret2ShellClient(
         base_url=os.getenv("IPC_R2S_BASE_URL", ""),
@@ -273,28 +296,96 @@ def cmd_auto(args) -> int:
         username=os.getenv("IPC_R2S_USERNAME", ""),
         password=os.getenv("IPC_R2S_PASSWORD", ""),
     )
-    next_index = 0
+    # Authoritative instance classification: ask the platform's env endpoint
+    # for every challenge (null = plain challenge, images = dynamic instance).
+    env_flags: dict[str, bool] = {}
+    for p in todo:
+        ext = p.get("external_id")
+        if ext is None:
+            continue
+        try:
+            env_flags[str(ext)] = client.has_environment(int(ext))
+        except Exception:
+            pass
+    env_count = sum(1 for v in env_flags.values() if v)
+    print(f"platform reports {env_count}/{len(todo)} challenges with dynamic environments", flush=True)
+    instance_todo = [p for p in todo if needs_instance(p, descriptions, env_flags)]
+    normal_todo = [p for p in todo if not needs_instance(p, descriptions, env_flags)]
+    print(
+        f"auto: {len(todo)} projects ({len(normal_todo)} normal + {len(instance_todo)} "
+        f"instance-type, at most 1 instance project running), {args.slots} slots",
+        flush=True,
+    )
+    for p in todo[:10]:
+        ext = str(p.get("external_id"))
+        print(f"  {p['id']} [{p['category']}] {p['title']} solves={ranking.get(ext, ('?',))[0]}", flush=True)
+
+    normal_index = 0
+    instance_index = 0
+    instance_started: dict[str, str] = {}  # project_id -> title
     with client:
         while True:
-            # --- dispatch: fill free slots with the next-easiest projects ---
+            # --- instance reconciliation: destroy instances of finished projects ---
+            try:
+                projects_now = http("GET", "/projects", args.session, timeout=60)
+                status_by_ext = {
+                    p.get("external_id"): p["status"] for p in projects_now
+                }
+                for inst in client.list_instances():
+                    ext = str(inst.get("challenge_id"))
+                    if status_by_ext.get(ext) not in ("running", "queued"):
+                        try:
+                            client.destroy_instance(int(ext))
+                            print(f"[instance] released finished challenge {ext}", flush=True)
+                        except Exception as exc:
+                            print(f"[instance] release failed for {ext}: {exc}", flush=True)
+            except Exception as exc:
+                print(f"[reconcile] failed: {exc}", flush=True)
+                projects_now = http("GET", "/projects", args.session, timeout=60)
+
+            # --- dispatch: normal projects fill slots; at most ONE instance ---
+            # type project runs at a time (platform quota is one instance/team).
             try:
                 runtime = http("GET", "/config/runtime", args.session, timeout=30)
                 active = len(runtime["limiter"]["active_tasks"])
             except Exception as exc:
                 print(f"[dispatch] runtime query failed: {exc}", flush=True)
                 active = 0
-            while active < args.slots and next_index < len(todo):
-                project = todo[next_index]
-                next_index += 1
+            instance_running = any(
+                next((p["status"] for p in projects_now if p["id"] == pid), "completed")
+                == "running"
+                for pid in instance_started
+            )
+            while active < args.slots and normal_index < len(normal_todo):
+                project = normal_todo[normal_index]
+                normal_index += 1
                 try:
                     http("POST", f"/projects/{project['id']}/start", args.session, timeout=60)
                     print(
                         f"[start] {project['id']} [{project['category']}] {project['title']} "
-                        f"(slot {active + 1}/{args.slots}, {len(todo) - next_index} left)",
+                        f"(slot {active + 1}/{args.slots}, normal {normal_index}/{len(normal_todo)})",
                         flush=True,
                     )
                     active += 1
                     time.sleep(5)  # stagger container startup
+                except urllib.error.HTTPError as exc:
+                    print(f"[start] {project['id']} failed: HTTP {exc.code}", flush=True)
+            if (
+                not instance_running
+                and instance_index < len(instance_todo)
+                and active < args.slots
+            ):
+                project = instance_todo[instance_index]
+                instance_index += 1
+                try:
+                    http("POST", f"/projects/{project['id']}/start", args.session, timeout=60)
+                    instance_started[project["id"]] = project["title"]
+                    print(
+                        f"[start] {project['id']} [{project['category']}] {project['title']} "
+                        f"(INSTANCE-TYPE {instance_index}/{len(instance_todo)}, slot {active + 1}/{args.slots})",
+                        flush=True,
+                    )
+                    active += 1
                 except urllib.error.HTTPError as exc:
                     print(f"[start] {project['id']} failed: HTTP {exc.code}", flush=True)
 
@@ -340,6 +431,15 @@ def cmd_auto(args) -> int:
                         "result": verdict,
                     }
                     save_state(state)
+                    if solved is True:
+                        # The platform accepted: the project is done with its
+                        # instance, and the team quota allows only one at a
+                        # time — release it immediately.
+                        try:
+                            client.destroy_instance(challenge_id)
+                            print(f"[instance] released for {label}", flush=True)
+                        except Exception as exc:
+                            print(f"[instance] release failed for {label}: {exc}", flush=True)
                     if solved is False:
                         record_feedback(
                             record["project_id"], record["title"], normalized, verdict
@@ -356,11 +456,17 @@ def cmd_auto(args) -> int:
 
             accepted = sum(1 for v in state["submitted"].values() if v.get("solved") is True)
             print(
-                f"... dispatched={next_index}/{len(todo)} flags_found={sum(1 for f in flags if f['flag'])} "
+                f"... dispatched={normal_index + instance_index}/{len(todo)} "
+                f"(normal {normal_index}/{len(normal_todo)}, instance {instance_index}/{len(instance_todo)}) "
+                f"flags_found={sum(1 for f in flags if f['flag'])} "
                 f"platform_accepted={accepted} (Ctrl+C to stop)",
                 flush=True,
             )
-            if next_index >= len(todo) and active == 0:
+            if (
+                normal_index >= len(normal_todo)
+                and instance_index >= len(instance_todo)
+                and active == 0
+            ):
                 print("all projects finished; auto mode exiting")
                 return 0
             time.sleep(args.interval)
