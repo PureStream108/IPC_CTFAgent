@@ -700,6 +700,9 @@ def _http_error_summary(exc: Exception) -> str:
 
 def _is_reasoning_model(model: str) -> bool:
     name = (model or "").strip().lower().rsplit("/", 1)[-1]
+    # Kimi For Coding always thinks; give it the reasoning-model budget.
+    if "kimi-for-coding" in name or name.startswith("kimi-k"):
+        return True
     if name.startswith("gpt-"):
         version = name[4:].split("-", 1)[0]
         try:
