@@ -356,6 +356,15 @@ def cmd_auto(args) -> int:
                 == "running"
                 for pid in instance_started
             )
+            # Hard gate on the platform's ground truth: classification can
+            # miss challenges (or a member may start one anyway), so never
+            # dispatch an instance project while ANY instance is alive.
+            try:
+                platform_instances = client.list_instances()
+                if platform_instances:
+                    instance_running = True
+            except Exception as exc:
+                print(f"[dispatch] instance query failed: {exc}", flush=True)
             while active < args.slots and normal_index < len(normal_todo):
                 project = normal_todo[normal_index]
                 normal_index += 1
