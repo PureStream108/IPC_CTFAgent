@@ -579,3 +579,55 @@ def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
     created = next(i for i in detail.intents if i.creator == "jade")
     assert created.from_ == [fact.id]
     assert any(link.src == "jade" and link.dst == f"intent:{created.id}" for link in detail.agent_links)
+
+
+def test_flag_gate_rejects_malformed_flag(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+    result = member._raise_flag(
+        pid, iid, MemberAction(kind="flag", thought="", args={"flag": "notaflag"}), 1
+    )
+    assert result is None
+    assert flags == []
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    assert detail.project.flag is None
+    assert detail.project.status != "flag_found"
+    assert any("flag gate" in o for o in member.observations)
+
+
+def test_flag_gate_rejects_blacklisted_flag(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.memory.add(
+        "lessons",
+        "Rejected flag submission",
+        "Platform judge REJECTED the flag 'flag{test}' for challenge 'T' (verdict: wrong).",
+        tags=["rejected-flag", "submission"],
+        project_id=pid,
+        source="verdict",
+    )
+    member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+    result = member._raise_flag(
+        pid, iid, MemberAction(kind="flag", thought="", args={"flag": "flag{test}"}), 1
+    )
+    assert result is None
+    assert flags == []
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    assert detail.project.flag is None
+
+
+def test_flag_gate_accepts_valid_flag(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+    result = member._raise_flag(
+        pid, iid, MemberAction(kind="flag", thought="", args={"flag": "flag{real}"}), 1
+    )
+    assert result is not None and result.status == "flag"
+    assert flags == [pid]
+    with db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    assert detail.project.flag == "flag{real}"

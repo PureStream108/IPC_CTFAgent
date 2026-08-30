@@ -14,6 +14,7 @@ PROJECT_STATES = (
     "flag_found",
     "wp_writing",
     "memory_writing",
+    "pending_verdict",
     "completed",
     "stopped",
 )
@@ -134,6 +135,20 @@ CREATE TABLE IF NOT EXISTS broadcasts (
     title TEXT NOT NULL,
     flag TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+-- Platform submission ledger. One row per (project, flag) pair: the dedup key
+-- for platform submissions and the source of truth for the platform verdict.
+CREATE TABLE IF NOT EXISTS submissions (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    flag TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending|solved|rejected|unknown
+    verdict TEXT,
+    submission_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, flag)
 );
 
 CREATE TABLE IF NOT EXISTS counters (

@@ -6,8 +6,12 @@ Three modes (composable):
 
   --start              Start projects (those over capacity queue automatically)
   --watch              Poll solved flags and print them as they appear
-  --submit             Submit unsent flags to the platform (rate-limited;
-                       default is a dry-run report unless --no-dry-run)
+  --submit             Submit unresolved flags via the backend platform-verdict
+                       API (default is a dry-run report unless --no-dry-run)
+
+Platform submission is owned by the backend verdict worker: a project only
+reaches "completed" after the platform accepts its flag, and rejections feed
+back into member context automatically.
 
 Run inside the ipc-app container next to the other ret2shell scripts:
 
@@ -26,87 +30,22 @@ import urllib.request
 from pathlib import Path
 
 API = "http://127.0.0.1:8000"
-STATE_FILE = Path("/app/data/ret2shell_submissions.json")
 
 
-def http(method: str, path: str, session: str, *, timeout: int = 120) -> dict:
+def http(method: str, path: str, session: str, *, timeout: int = 120, body: dict | None = None) -> dict:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(
         f"{API}{path}",
         method=method,
-        headers={"Cookie": f"ipc_session={session}"},
+        data=data,
+        headers={
+            "Cookie": f"ipc_session={session}",
+            **({"Content-Type": "application/json"} if data is not None else {}),
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
-        body = response.read()
-        return json.loads(body) if body else {}
-
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {"submitted": {}}
-
-
-PLATFORM_FLAG_PREFIX = "moectf"
-
-
-def normalize_flag_prefix(flag: str) -> tuple[str, bool]:
-    """The platform enforces a single flag prefix (moectf{...}). Members may
-    copy a literal ctf{...}/flag{...} string out of tutorial material, so the
-    prefix is rewritten before submission."""
-    import re
-
-    match = re.match(r"^[A-Za-z0-9_-]+\{(.+)\}$", flag.strip())
-    if match and not flag.strip().lower().startswith(PLATFORM_FLAG_PREFIX + "{"):
-        return f"{PLATFORM_FLAG_PREFIX}{{{match.group(1)}}}", True
-    return flag.strip(), False
-
-
-def record_feedback(project_id: str, title: str, flag: str, verdict: str) -> None:
-    """Feed the platform's verdict back to the agents via the persistent
-    experience memory, which every Member's memory search surfaces."""
-    try:
-        from backend.memory.memory_store import MemoryStore
-
-        root = os.environ.get("IPC_ROOT", "/app")
-        memory = MemoryStore(Path(root) / "data" / "memory")
-        verdict_l = (verdict or "").lower()
-        if "flag should be" in verdict_l or "format" in verdict_l:
-            title_text = "Platform flag format feedback"
-            content = (
-                f"Platform rejected flag {flag!r} for {title!r}: {verdict}. "
-                f"All submissions must use the {PLATFORM_FLAG_PREFIX}{{...}} prefix. "
-                "When you find a flag with a different prefix in challenge material, "
-                f"report it as {PLATFORM_FLAG_PREFIX}{{original-inner-content}}."
-            )
-            tags = ["flag-format", "submission", "ret2shell"]
-        else:
-            title_text = "Rejected flag submission"
-            content = (
-                f"Platform judge REJECTED the flag {flag!r} for challenge {title!r} "
-                f"(verdict: {verdict}). Never submit this exact flag again. Re-derive "
-                "the complete flag from the challenge material instead: inspect EVERY "
-                "file and resource (including binary XML such as AndroidManifest.xml, "
-                "dex strings, config files, and any encoded blob), and beware truncated "
-                "or misordered fragment assembly — recombine all fragments and verify "
-                "the result reads as a coherent sentence before reporting."
-            )
-            tags = ["rejected-flag", "submission", "ret2shell"]
-        memory.add(
-            "misc",
-            title_text,
-            content,
-            tags=tags,
-            project_id=project_id,
-            source="autosolve",
-        )
-        print(f"[feedback] memory entry recorded for {title!r}", flush=True)
-    except Exception as exc:  # never break the submit loop on feedback
-        print(f"[feedback] failed to record: {exc}", flush=True)
-
-
-def save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        payload = response.read()
+        return json.loads(payload) if payload else {}
 
 
 def cmd_start(args) -> int:
@@ -157,63 +96,41 @@ def cmd_watch(args) -> int:
 
 
 def cmd_submit(args) -> int:
-    from backend.platform.ret2shell import (
-        Ret2ShellClient,
-        Ret2ShellError,
-        Ret2ShellPreflightError,
-        Ret2ShellRateLimitError,
-    )
+    """Submit unresolved flags through the backend verdict API.
 
+    The backend owns platform submission (rate limiting, dedup by
+    (project, flag), verdict feedback), so this script only relays flags and
+    prints the platform verdicts.
+    """
     flags = [f for f in http("GET", "/api/flags", args.session) if f["flag"]]
-    state = load_state()
-    submitted = state["submitted"]
-    pending = [f for f in flags if f["external_id"] and f["external_id"] not in submitted]
-    print(f"flags found: {len(flags)}, unsent: {len(pending)}")
+    pending = [
+        f
+        for f in flags
+        if f["external_id"] and f.get("verdict") in (None, "rejected", "unknown")
+    ]
+    print(f"flags found: {len(flags)}, unresolved: {len(pending)}")
     if not pending:
         return 0
-
-    client = Ret2ShellClient(
-        base_url=os.getenv("IPC_R2S_BASE_URL", ""),
-        game_id=int(os.getenv("IPC_R2S_GAME_ID") or 37),
-        username=os.getenv("IPC_R2S_USERNAME", ""),
-        password=os.getenv("IPC_R2S_PASSWORD", ""),
-    )
-    with client:
-        for record in pending:
-            challenge_id = int(record["external_id"])
-            label = f"{record['title']} (challenge {challenge_id})"
-            if not args.no_dry_run:
-                print(f"[dry-run] would submit {record['flag']!r} for {label}")
-                submitted[record["external_id"]] = {"flag": record["flag"], "dry_run": True}
-                save_state(state)
-                continue
-            try:
-                status = client.challenge_status(challenge_id)
-                if isinstance(status, dict) and status.get("solved"):
-                    print(f"[skip] {label} already solved on platform")
-                    submitted[record["external_id"]] = {"flag": record["flag"], "solved": "platform"}
-                    save_state(state)
-                    continue
-                result = client.submit_flag(challenge_id, record["flag"], check_solved=False)
-                solved = result.get("solved")
-                print(
-                    f"[submit] {label} {record['flag']!r} -> "
-                    f"solved={solved} result={result.get('result')}"
-                )
-                submitted[record["external_id"]] = {
-                    "flag": record["flag"],
-                    "submission_id": result.get("id"),
-                    "solved": solved,
-                }
-                save_state(state)
-            except Ret2ShellPreflightError as exc:
-                print(f"[refused] {label}: {exc}")
-            except Ret2ShellRateLimitError as exc:
-                print(f"[rate-limit] stopping batch: {exc}")
-                return 1
-            except Ret2ShellError as exc:
-                print(f"[error] {label}: {exc}")
-    return 0
+    rc = 0
+    for record in pending:
+        label = f"{record['title']} (challenge {record['external_id']})"
+        if not args.no_dry_run:
+            print(f"[dry-run] would submit {record['flag']!r} for {label}")
+            continue
+        try:
+            result = http(
+                "POST",
+                f"/api/flags/{record['project_id']}/submit",
+                args.session,
+                timeout=90,
+                body={"flag": record["flag"]},
+            )
+            print(f"[submit] {label} -> {result}", flush=True)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+            print(f"[error] {label}: HTTP {exc.code} {detail}", flush=True)
+            rc = 1
+    return rc
 
 
 CATEGORY_DIFFICULTY = {"misc": 0, "web": 1, "crypto": 2, "ai": 3, "reverse": 4, "pwn": 5}
@@ -281,18 +198,15 @@ def needs_instance(project: dict, descriptions: dict[str, str], env_flags: dict[
 
 def cmd_auto(args) -> int:
     """Full automation with controlled dispatch: keep at most --slots projects
-    running, promoting the next-easiest challenge whenever a slot frees, and
-    submit each new flag as it appears."""
+    running, promoting the next-easiest challenge whenever a slot frees.
 
-    from backend.platform.ret2shell import (
-        Ret2ShellClient,
-        Ret2ShellError,
-        Ret2ShellPreflightError,
-        Ret2ShellRateLimitError,
-    )
+    Flag submission is handled by the backend verdict worker: a project only
+    completes after the platform accepts its flag, and rejections reopen the
+    project with feedback injected."""
+
+    from backend.platform.ret2shell import Ret2ShellClient
 
     projects = http("GET", "/projects", args.session)
-    state = load_state()
     client = Ret2ShellClient(
         base_url=os.getenv("IPC_R2S_BASE_URL", ""),
         game_id=int(os.getenv("IPC_R2S_GAME_ID") or 37),
@@ -301,8 +215,8 @@ def cmd_auto(args) -> int:
     )
     # Platform ground truth for every project: challenges already solved are
     # skipped regardless of local state, and local "completed" projects whose
-    # challenge is NOT solved (e.g. a rejected/decoy flag) are reopened so
-    # they re-enter this run's queue instead of being stranded forever.
+    # challenge is NOT solved (legacy runs predate platform adjudication) are
+    # reopened so they re-enter this run's queue instead of being stranded.
     solved_ext: set[str] = set()
     for p in projects:
         ext = p.get("external_id")
@@ -320,14 +234,10 @@ def cmd_auto(args) -> int:
         if p["status"] == "completed" and ext and ext not in solved_ext:
             try:
                 http("POST", f"/projects/{p['id']}/reopen", args.session, timeout=30)
-                # Drop any stale submission record so the next attempt's flag
-                # is not silently skipped by the dedup in the submit loop.
-                state["submitted"].pop(ext, None)
                 reopened.append(p["id"])
             except Exception as exc:
                 print(f"[reopen] {p['id']} failed: {exc}", flush=True)
     if reopened:
-        save_state(state)
         print(f"reopened {len(reopened)} completed-but-unsolved projects: {reopened}", flush=True)
         projects = http("GET", "/projects", args.session)
     todo = [
@@ -447,77 +357,15 @@ def cmd_auto(args) -> int:
                 except urllib.error.HTTPError as exc:
                     print(f"[start] {project['id']} failed: HTTP {exc.code}", flush=True)
 
-            # --- submit new flags ---
+            # --- flag submission is owned by the backend verdict worker ---
             flags = http("GET", "/api/flags", args.session)
-            for record in flags:
-                ext = record["external_id"]
-                if not (record["flag"] and ext) or ext in state["submitted"]:
-                    continue
-                challenge_id = int(ext)
-                label = f"{record['title']} (challenge {challenge_id})"
-                flag = record["flag"]
-                normalized, rewritten = normalize_flag_prefix(flag)
-                if rewritten:
-                    print(f"[normalize] {label}: {flag!r} -> {normalized!r}", flush=True)
-                try:
-                    status = client.challenge_status(challenge_id)
-                    if isinstance(status, dict) and status.get("solved"):
-                        print(f"[skip] {label} already solved on platform", flush=True)
-                        state["submitted"][ext] = {"flag": normalized, "solved": "platform"}
-                        save_state(state)
-                        continue
-                    result = client.submit_flag(challenge_id, normalized, check_solved=False)
-                    solved = result.get("solved")
-                    verdict = str(result.get("result") or "")
-                    # The platform tells us the expected prefix when the
-                    # format is wrong — honor that feedback immediately.
-                    if solved is False and "flag should be" in verdict.lower():
-                        fixed = f"{PLATFORM_FLAG_PREFIX}{{{normalized.split('{', 1)[1]}"
-                        print(f"[format-fix] retrying {label} with {fixed!r}", flush=True)
-                        result = client.submit_flag(challenge_id, fixed, check_solved=False)
-                        solved = result.get("solved")
-                        verdict = str(result.get("result") or "")
-                        normalized = fixed
-                    print(
-                        f"[submit] {label} {normalized!r} -> solved={solved} result={verdict}",
-                        flush=True,
-                    )
-                    state["submitted"][ext] = {
-                        "flag": normalized,
-                        "submission_id": result.get("id"),
-                        "solved": solved,
-                        "result": verdict,
-                    }
-                    save_state(state)
-                    if solved is True:
-                        # The platform accepted: the project is done with its
-                        # instance, and the team quota allows only one at a
-                        # time — release it immediately.
-                        try:
-                            client.destroy_instance(challenge_id)
-                            print(f"[instance] released for {label}", flush=True)
-                        except Exception as exc:
-                            print(f"[instance] release failed for {label}: {exc}", flush=True)
-                    if solved is False:
-                        record_feedback(
-                            record["project_id"], record["title"], normalized, verdict
-                        )
-                except Ret2ShellPreflightError as exc:
-                    print(f"[refused] {label}: {exc}", flush=True)
-                    state["submitted"][ext] = {"flag": normalized, "refused": str(exc)}
-                    save_state(state)
-                except Ret2ShellRateLimitError as exc:
-                    print(f"[rate-limit] backing off this cycle: {exc}", flush=True)
-                    break
-                except Ret2ShellError as exc:
-                    print(f"[error] {label}: {exc}", flush=True)
-
-            accepted = sum(1 for v in state["submitted"].values() if v.get("solved") is True)
+            accepted = sum(1 for f in flags if f.get("verdict") == "solved")
+            awaiting = sum(1 for f in flags if f["status"] == "pending_verdict")
             print(
                 f"... dispatched={normal_index + instance_index}/{len(todo)} "
                 f"(normal {normal_index}/{len(normal_todo)}, instance {instance_index}/{len(instance_todo)}) "
                 f"flags_found={sum(1 for f in flags if f['flag'])} "
-                f"platform_accepted={accepted} (Ctrl+C to stop)",
+                f"awaiting_verdict={awaiting} platform_accepted={accepted} (Ctrl+C to stop)",
                 flush=True,
             )
             if (

@@ -8,7 +8,8 @@ TRANSITIONS = {
     "running": {"flag_found", "stopped"},
     "flag_found": {"wp_writing", "stopped"},
     "wp_writing": {"memory_writing", "stopped"},
-    "memory_writing": {"completed", "stopped"},
+    "memory_writing": {"pending_verdict", "completed", "stopped"},
+    "pending_verdict": {"completed", "stopped"},
     "completed": set(),
     "stopped": {"running"},
 }

@@ -19,6 +19,7 @@ from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.memory_writer import write_memory
 from backend.core.project_manager import ProjectManager
 from backend.core.resource_manager import ResourceManager
+from backend.core.verdict_worker import VerdictWorker
 from backend.mcp.mcp_client import MCPClient, MCPRegistryTarget
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
@@ -71,6 +72,7 @@ class Orchestrator:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
+        self.verdicts = VerdictWorker(state)
         # optional per-(project,member) scripts for deterministic tests
         self.scripts = scripts or {}
 
@@ -107,7 +109,7 @@ class Orchestrator:
         status = self.lifecycle.status(project_id)
         if status is None:
             raise ValueError(f"project not found: {project_id}")
-        if status in ("flag_found", "wp_writing", "memory_writing", "completed"):
+        if status in ("flag_found", "wp_writing", "memory_writing", "pending_verdict", "completed"):
             return self.runtime_status(project_id)
         if status == "running" and not self._startup_in_progress(project_id):
             return self.runtime_status(project_id)
@@ -458,6 +460,7 @@ class Orchestrator:
             max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
             on_report=self.handle_report,
             on_flag=self.on_flag_found,
+            flag_pattern=self.state.config.runtime.flag_pattern,
         )
         script = self.scripts.get((project_id, member_name)) or self.scripts.get(member_name)
         member = create_member(cfg, deps, script=script)
@@ -630,6 +633,54 @@ class Orchestrator:
             state.logger.project("ipc_verification_failed", project_id, reasons=verdict["reasons"])
             return
 
+        with state.db.connect() as conn:
+            project_row = graph_store.get_project_row(conn, project_id)
+
+        # Platform-adjudicated completion: a project bound to a platform
+        # challenge only completes after the platform accepts the flag.
+        if project_row is not None and self._needs_platform_verdict(project_row):
+            self._enter_pending_verdict(project_id, project_row)
+            return
+        if project_row is not None and project_row["external_id"]:
+            state.logger.project(
+                "verdict_skipped_no_platform_client",
+                project_id,
+                detail="external_id set but no platform client; completing locally",
+            )
+        self._complete_and_close(project_id, verdict)
+
+    def _needs_platform_verdict(self, project_row) -> bool:
+        return bool(
+            self.state.config.runtime.verdict_enabled
+            and (project_row["external_id"] or "").strip()
+            and self.state.platform_client() is not None
+        )
+
+    def _enter_pending_verdict(self, project_id: str, project_row) -> None:
+        """Park the project until the platform judges the reported flag."""
+        state = self.state
+        flag = (project_row["flag"] or "").strip()
+        with state.db.connect() as conn:
+            graph_store.record_submission(conn, project_id, flag)
+        with suppress(LifecycleError):
+            self.lifecycle.transition(project_id, "pending_verdict")
+        self._set_runtime_phase(project_id, "awaiting_verdict")
+        state.logger.project("awaiting_platform_verdict", project_id, flag=flag)
+        # Solving is done for this round: release the task slot and container
+        # while the platform judges. A rejection reopens the project and it
+        # is dispatched again through the normal start path.
+        self._remove_queued_project(project_id)
+        self._clear_project_member_retries(project_id)
+        with state.db.connect() as conn:
+            conn.execute(
+                "UPDATE agents SET state = 'idle' WHERE project_id = ? AND role = 'member'",
+                (project_id,),
+            )
+        self.resources.release_project(project_id)
+        self.projects.teardown(project_id)
+
+    def _complete_and_close(self, project_id: str, verdict: dict) -> None:
+        state = self.state
         # COMPLETED
         self.diamond.draw_completion(project_id)
         with suppress(LifecycleError):
@@ -643,6 +694,13 @@ class Orchestrator:
             flag = row["flag"] if row else ""
             graph_store.add_broadcast(conn, project_id, title, flag or "")
         state.logger.project("completed", project_id, flag=verdict.get("flag"))
+        self.mark_completed(project_id)
+        self.stop_project(project_id)
+
+    def mark_completed(self, project_id: str) -> None:
+        """Archive outputs and publish the completed phase (post-verdict too)."""
+        state = self.state
+        self._set_runtime_phase(project_id, "completed")
         try:
             archive = archive_completed_project(state, project_id)
             state.logger.project(
@@ -659,7 +717,6 @@ class Orchestrator:
                 project_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
-        self.stop_project(project_id)
 
     def _cleanup_after_wp_failure(self, project_id: str, error: str) -> None:
         """Release the solved task without disguising a failed WP as a completed project."""
@@ -699,6 +756,7 @@ class Orchestrator:
     def _tick(self) -> None:
         self._reconcile_resources()
         self._drain_pending_projects()
+        self.verdicts.process_pending()
         with self.state.db.connect() as conn:
             graph_store.expire_reason_leases(conn, self.state.config.runtime.reason_timeout)
             edge_store.expire_workers(conn, self.state.config.runtime.intent_timeout)

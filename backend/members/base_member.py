@@ -17,6 +17,7 @@ from backend.core.difficulty import (
     max_difficulty,
     normalize_difficulty,
 )
+from backend.core.flag_gate import validate_flag
 from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
 from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction
@@ -56,6 +57,7 @@ class MemberDeps:
     on_report: Callable[[str, Any], None] | None = None   # (project_id, Report)
     on_flag: Callable[[str], None] | None = None           # (project_id)
     expected_flag: str | None = None
+    flag_pattern: str = ""                                 # local flag gate regex
 
 
 @dataclass
@@ -416,7 +418,10 @@ class BaseMember:
         if kind == "conclude":
             return DispatchResult(result=self._conclude(project_id, intent_id, action), graph_action="conclude")
         if kind == "flag":
-            return DispatchResult(result=self._raise_flag(project_id, intent_id, action, step), graph_action="flag")
+            result = self._raise_flag(project_id, intent_id, action, step)
+            # A gate-rejected flag returns None: the member stays on its task
+            # and retries with a verified flag instead of ending the round.
+            return DispatchResult(result=result, graph_action="flag" if result is not None else None)
         if kind == "done":
             self._release(project_id, intent_id)
             d.logger.project("member_done", project_id, member=self.name, reason=action.args.get("reason"))
@@ -932,10 +937,53 @@ class BaseMember:
         self.deps.logger.project("intent_concluded", project_id, member=self.name, intent=intent_id, fact=fact.id)
         return SolveResult(status="concluded", steps=0, fact_id=fact.id)
 
-    def _raise_flag(self, project_id, intent_id, action: MemberAction, step) -> SolveResult:
+    def _rejected_flags(self, project_id: str) -> list[str]:
+        """Flags the platform already rejected for this challenge.
+
+        Sources: the experience-memory blacklist (tagged ``rejected-flag``)
+        and the submissions ledger rows with status ``rejected``.
+        """
+        rejected: list[str] = []
+        try:
+            for m in self.deps.memory.list(None):
+                if m.project_id != project_id or "rejected-flag" not in m.tags:
+                    continue
+                rejected.extend(re.findall(r"'([^']+)'", m.content))
+        except Exception:
+            pass
+        try:
+            with self.deps.db.connect() as conn:
+                rejected.extend(graph_store.rejected_flags(conn, project_id))
+        except Exception:
+            pass
+        return sorted(set(rejected))
+
+    def _raise_flag(self, project_id, intent_id, action: MemberAction, step) -> SolveResult | None:
         d = self.deps
-        flag = self._string_arg(action.args.get("flag", ""))
+        flag = self._string_arg(action.args.get("flag", "")).strip()
         desc = self._string_arg(action.args.get("description", "flag captured")) or "flag captured"
+        reason = validate_flag(
+            flag,
+            d.flag_pattern or None,
+            rejected=self._rejected_flags(project_id),
+        )
+        if reason is not None:
+            d.logger.project(
+                "flag_rejected_by_gate",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                flag=flag,
+                reason=reason,
+            )
+            self._observe(
+                f"[flag gate] Your flag action was REJECTED locally: {reason}. "
+                "The flag was NOT recorded and the project is NOT complete. "
+                "Keep working: verify every character against the raw evidence "
+                "(no OCR beautification), make sure all fragments are assembled, "
+                "and only report a structurally valid flag."
+            )
+            return None
         with d.db.connect() as conn:
             row = edge_store.get_intent(conn, project_id, intent_id)
             # ensure the assigned intent is concluded into a fact first
@@ -1027,25 +1075,26 @@ class BaseMember:
                 "external_id is this challenge's platform id — use it with ret2shell MCP tools."
             ),
         ]
-        # Platform verdicts flow back through the experience memory: surface
-        # any flags the platform already rejected for THIS challenge so the
-        # member never resubmits them and re-derives a complete flag instead.
-        try:
-            rejected_flags: list[str] = []
-            for m in d.memory.list(None):
-                if m.project_id != project_id or "rejected-flag" not in m.tags:
-                    continue
-                rejected_flags.extend(re.findall(r"'([^']+)'", m.content))
-            if rejected_flags:
-                runtime_notes.append(
-                    "Platform already REJECTED these flag strings for this challenge — "
-                    f"do NOT resubmit them: {', '.join(sorted(set(rejected_flags)))}. "
-                    "Re-derive the complete flag from the challenge material (check every "
-                    "file/resource, including binary XML and encoded blobs; recombine ALL "
-                    "fragments) and only report a flag that reads as a coherent whole."
-                )
-        except Exception:
-            pass
+        # Platform verdicts flow back through the experience memory and the
+        # submissions ledger: surface any flags already rejected for THIS
+        # challenge so the member never resubmits them and re-derives a
+        # complete flag instead. The same list is enforced by the flag gate.
+        rejected_flags = self._rejected_flags(project_id)
+        if rejected_flags:
+            runtime_notes.append(
+                "Platform already REJECTED these flag strings for this challenge — "
+                f"do NOT resubmit them: {', '.join(rejected_flags)}. "
+                "Re-derive the complete flag from the challenge material (check every "
+                "file/resource, including binary XML and encoded blobs; recombine ALL "
+                "fragments) and only report a flag that reads as a coherent whole."
+            )
+        runtime_notes.append(
+            "Flag discipline: a flag action must contain the exact characters from the "
+            "evidence (never beautify OCR/noise), must match prefix{...} with no nested "
+            "braces, and must read as a coherent phrase after leet decoding "
+            "(4→a, @→a, $→s, 0→o, 7→t). Locally invalid or already-rejected flags are "
+            "dropped by the flag gate and never reach the platform."
+        )
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,

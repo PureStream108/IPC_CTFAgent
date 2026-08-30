@@ -605,3 +605,42 @@ def test_repeated_stalls_defer_original_intent_and_dispatch_alternative(state):
         for entry in entries
     )
     orch.shutdown()
+
+
+def test_platform_project_waits_for_verdict_then_completes(state, monkeypatch):
+    """A project with external_id parks at pending_verdict; only the platform
+    verdict moves it to completed."""
+    from backend.core.orchestrator import Orchestrator
+
+    class FakeClient:
+        def challenge_status(self, challenge_id):
+            return {"solved": False}
+
+        def submit_flag(self, challenge_id, flag, *, check_solved=True):
+            return {"id": 1, "solved": True, "result": "Correct"}
+
+    monkeypatch.setattr(state, "platform_client", lambda: FakeClient())
+    with state.db.connect() as conn:
+        pid = graph_store.create_project(
+            conn, "Demo", "http://target", "capture the flag", "web", external_id="123"
+        )
+    orch = Orchestrator(state, max_workers=4)
+    state.orchestrator = orch
+    orch.start_project(pid)
+    orch.wait(pid, timeout=20)
+    lc = Lifecycle(state.db)
+    for _ in range(40):
+        if lc.status(pid) == "pending_verdict":
+            break
+        time.sleep(0.1)
+    assert lc.status(pid) == "pending_verdict"
+
+    orch.verdicts.process_pending()
+
+    assert lc.status(pid) == "completed"
+    with state.db.connect() as conn:
+        row = graph_store.get_project_row(conn, pid)
+        sub = graph_store.get_submission(conn, pid, row["flag"])
+        broadcasts = graph_store.list_broadcasts(conn)
+    assert sub["status"] == "solved"
+    assert any(b.project_id == pid for b in broadcasts)

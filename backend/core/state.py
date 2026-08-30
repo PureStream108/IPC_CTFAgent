@@ -92,6 +92,7 @@ class AppState:
         # The ret2shell competition MCP (dynamic instance control) is only
         # registered when participant credentials are configured, so members
         # never see a platform they cannot reach.
+        self._platform_client: Ret2ShellClient | None = None
         if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
             self.mcps.register(build_ret2shell_mcp(Ret2ShellClient()))
 
@@ -164,6 +165,18 @@ class AppState:
                 return graph_store.project_log_filename(conn, project_id)
         except Exception:
             return project_id
+
+    def platform_client(self) -> Ret2ShellClient | None:
+        """Shared ret2shell client for the platform-verdict worker.
+
+        Returns None when no participant credentials are configured; in that
+        case projects complete locally without platform adjudication.
+        """
+        if not (os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN")):
+            return None
+        if self._platform_client is None:
+            self._platform_client = Ret2ShellClient()
+        return self._platform_client
 
     def attachments_dir(self, project_id: str) -> Path:
         d = self.projects_dir / project_id / "attachments"

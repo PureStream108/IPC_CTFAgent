@@ -100,6 +100,15 @@ class RuntimeConfig(BaseModel):
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
     zap_enabled: bool = False
+    # Local flag gate: a member-reported flag must match this structure regex
+    # before it can trigger the completion pipeline (and possibly spend a
+    # platform submission).
+    flag_pattern: str = r"^[A-Za-z0-9_-]+\{[^{}]+\}$"
+    # When a project has a platform external_id, only a positive platform
+    # verdict may move it to ``completed``; the model's claim alone cannot.
+    verdict_enabled: bool = True
+    verdict_max_attempts: int = Field(default=5, gt=0)
+    verdict_retry_seconds: int = Field(default=30, gt=0)
     browser_event_limit: int = Field(default=200, gt=0, le=1000)
     browser_console_limit: int = Field(default=100, gt=0, le=1000)
     browser_error_limit: int = Field(default=50, gt=0, le=1000)

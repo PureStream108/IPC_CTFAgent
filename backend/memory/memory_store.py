@@ -161,6 +161,40 @@ class MemoryStore:
             cur = conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             return cur.rowcount > 0
 
+    def delete_by_project(
+        self,
+        project_id: str,
+        categories: tuple[str, ...] | None = None,
+        keep_tags: tuple[str, ...] = (),
+    ) -> int:
+        """Delete a project's memory entries, optionally scoped to categories.
+
+        Entries carrying any ``keep_tags`` tag always survive (e.g. the
+        rejected-flag blacklist must outlive a project reopen).
+        """
+        removed: list[Memory] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE project_id = ?", (project_id,)
+            ).fetchall()
+            for row in rows:
+                mem = _row_to_memory(row)
+                if categories is not None and mem.category not in categories:
+                    continue
+                if any(tag in mem.tags for tag in keep_tags):
+                    continue
+                conn.execute("DELETE FROM memories WHERE id = ?", (mem.id,))
+                removed.append(mem)
+        for mem in removed:
+            self._remove_disk_mirror(mem)
+        return len(removed)
+
+    def _remove_disk_mirror(self, mem: Memory) -> None:
+        if self.export_dir is None:
+            return
+        target = self.export_dir / mem.category / f"{mem.id}.md"
+        target.unlink(missing_ok=True)
+
     def all(self) -> list[Memory]:
         return self.list()
 

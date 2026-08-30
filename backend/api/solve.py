@@ -46,7 +46,15 @@ def reopen_project(project_id: str, state: AppState = Depends(get_state)):
         graph_store.set_status(conn, project_id, "stopped")
         graph_store.set_runtime_phase(conn, project_id, "stopped")
         graph_store.clear_reason(conn, project_id)
-    state.logger.project("reopened", project_id)
+    # A reopened project was not actually solved: its old solution/exploit
+    # conclusions are pollution that would endorse the same wrong flag again.
+    # The rejected-flag blacklist (tagged entries) always survives.
+    purged = state.memory.delete_by_project(
+        project_id,
+        categories=("exploit", "lessons"),
+        keep_tags=("rejected-flag", "flag-format"),
+    )
+    state.logger.project("reopened", project_id, memories_purged=purged)
     return {"status": "stopped", "project_id": project_id}
 
 

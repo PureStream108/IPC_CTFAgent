@@ -440,6 +440,88 @@ def list_broadcasts(conn: sqlite3.Connection, limit: int = 50) -> list[Broadcast
     ]
 
 
+# ---------- submissions (platform verdict ledger) ----------
+
+
+def record_submission(
+    conn: sqlite3.Connection,
+    project_id: str,
+    flag: str,
+    *,
+    status: str = "pending",
+) -> None:
+    """Insert-or-ignore the (project, flag) dedup key for platform submissions."""
+    now = utcnow()
+    conn.execute(
+        "INSERT OR IGNORE INTO submissions (project_id, flag, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (project_id, flag, status, now, now),
+    )
+
+
+def update_submission(
+    conn: sqlite3.Connection,
+    project_id: str,
+    flag: str,
+    *,
+    status: str | None = None,
+    verdict: str | None = None,
+    submission_id: str | None = None,
+    bump_attempts: bool = False,
+) -> None:
+    row = conn.execute(
+        "SELECT * FROM submissions WHERE project_id = ? AND flag = ?",
+        (project_id, flag),
+    ).fetchone()
+    if row is None:
+        record_submission(conn, project_id, flag)
+        row = conn.execute(
+            "SELECT * FROM submissions WHERE project_id = ? AND flag = ?",
+            (project_id, flag),
+        ).fetchone()
+    conn.execute(
+        "UPDATE submissions SET status = ?, verdict = ?, submission_id = ?, attempts = ?, "
+        "updated_at = ? WHERE project_id = ? AND flag = ?",
+        (
+            status if status is not None else row["status"],
+            verdict if verdict is not None else row["verdict"],
+            submission_id if submission_id is not None else row["submission_id"],
+            row["attempts"] + 1 if bump_attempts else row["attempts"],
+            utcnow(),
+            project_id,
+            flag,
+        ),
+    )
+
+
+def get_submission(conn: sqlite3.Connection, project_id: str, flag: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM submissions WHERE project_id = ? AND flag = ?",
+        (project_id, flag),
+    ).fetchone()
+
+
+def latest_submission(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM submissions WHERE project_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+
+
+def rejected_flags(conn: sqlite3.Connection, project_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT flag FROM submissions WHERE project_id = ? AND status = 'rejected'",
+        (project_id,),
+    ).fetchall()
+    return [r["flag"] for r in rows]
+
+
+def pending_verdict_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM projects WHERE status = 'pending_verdict' ORDER BY updated_at"
+    ).fetchall()
+
+
 # ---------- assembly ----------
 
 
