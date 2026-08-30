@@ -38,16 +38,18 @@ class AppState:
         self.projects_dir = self.root / "projects"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
-        # Operational state lives in RAM: it is wiped when the container is
-        # removed. Only what the UI exports (below) is written to disk, so the
-        # paths here just name the in-RAM databases.
+        # Operational state lives in RAM by default: it is wiped when the
+        # container is removed. Set IPC_DB_PERSIST=1 to keep graph + memory in
+        # a file-backed SQLite (WAL) under data/, so restarts and rebuilds no
+        # longer lose project status, found flags, or member feedback memory.
         data_dir = self.root / "data"
-        self.db = Database(data_dir / "graph.db", in_memory=True).configure()
+        persist = _env_flag("IPC_DB_PERSIST")
+        self.db = Database(data_dir / "graph.db", in_memory=not persist).configure()
         with self.db.connect() as conn:
             graph_store.reset_project_counter_if_empty(conn)
             self._reserve_existing_project_ids(conn)
         self.memory = MemoryStore(
-            data_dir / "memory.db", export_dir=None, in_memory=True
+            data_dir / "memory.db", export_dir=None, in_memory=not persist
         ).configure()
         self.registry = ToolRegistry(cache_db=data_dir / "tool_cache.db", in_memory=True).load()
         self.catalog = ToolCatalog.load(self.registry)

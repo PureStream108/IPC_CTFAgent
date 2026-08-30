@@ -76,6 +76,7 @@ services:
       - "8000:8000"
     environment:
       - IPC_ROOT=/app
+      - IPC_DB_PERSIST=${IPC_DB_PERSIST:-1}
       - IPC_LOG_ENABLED=true
       - IPC_ZAP_ENABLED=${IPC_ZAP_ENABLED:-}
       - IPC_LOG_EXPORT_DIR=/app/data/logs
@@ -96,6 +97,7 @@ services:
       # outputs survive `docker compose down`. Solver blackboard, memory and
       # tool caches remain in RAM, so a fresh `up` starts those clean.
       - ./data:/app/data
+      - ./platform_targets:/app/platform_targets:ro
       - ./backend/config:/app/backend/config
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped

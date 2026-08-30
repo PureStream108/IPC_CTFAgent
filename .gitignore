@@ -237,3 +237,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.ipc-agent/

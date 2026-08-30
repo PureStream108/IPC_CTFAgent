@@ -193,7 +193,14 @@ class Database:
                 conn = sqlite3.connect(str(self.path), timeout=30)
             conn.row_factory = sqlite3.Row
             if ram is None:
-                conn.execute("PRAGMA journal_mode=WAL")
+                # WAL needs shared memory (-shm), which is unreliable on
+                # Windows bind mounts and when the file is opened from both
+                # the host and the container. Best effort: keep whatever
+                # journal mode the file already has if WAL cannot be set.
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    pass
             conn.execute("PRAGMA foreign_keys=ON")
             try:
                 yield conn

@@ -69,16 +69,33 @@ def record_feedback(project_id: str, title: str, flag: str, verdict: str) -> Non
 
         root = os.environ.get("IPC_ROOT", "/app")
         memory = MemoryStore(Path(root) / "data" / "memory")
-        memory.add(
-            "misc",
-            "Platform flag format feedback",
-            (
+        verdict_l = (verdict or "").lower()
+        if "flag should be" in verdict_l or "format" in verdict_l:
+            title_text = "Platform flag format feedback"
+            content = (
                 f"Platform rejected flag {flag!r} for {title!r}: {verdict}. "
                 f"All submissions must use the {PLATFORM_FLAG_PREFIX}{{...}} prefix. "
                 "When you find a flag with a different prefix in challenge material, "
                 f"report it as {PLATFORM_FLAG_PREFIX}{{original-inner-content}}."
-            ),
-            tags=["flag-format", "submission", "ret2shell"],
+            )
+            tags = ["flag-format", "submission", "ret2shell"]
+        else:
+            title_text = "Rejected flag submission"
+            content = (
+                f"Platform judge REJECTED the flag {flag!r} for challenge {title!r} "
+                f"(verdict: {verdict}). Never submit this exact flag again. Re-derive "
+                "the complete flag from the challenge material instead: inspect EVERY "
+                "file and resource (including binary XML such as AndroidManifest.xml, "
+                "dex strings, config files, and any encoded blob), and beware truncated "
+                "or misordered fragment assembly — recombine all fragments and verify "
+                "the result reads as a coherent sentence before reporting."
+            )
+            tags = ["rejected-flag", "submission", "ret2shell"]
+        memory.add(
+            "misc",
+            title_text,
+            content,
+            tags=tags,
             project_id=project_id,
             source="autosolve",
         )
@@ -275,9 +292,48 @@ def cmd_auto(args) -> int:
     )
 
     projects = http("GET", "/projects", args.session)
+    state = load_state()
+    client = Ret2ShellClient(
+        base_url=os.getenv("IPC_R2S_BASE_URL", ""),
+        game_id=int(os.getenv("IPC_R2S_GAME_ID") or 37),
+        username=os.getenv("IPC_R2S_USERNAME", ""),
+        password=os.getenv("IPC_R2S_PASSWORD", ""),
+    )
+    # Platform ground truth for every project: challenges already solved are
+    # skipped regardless of local state, and local "completed" projects whose
+    # challenge is NOT solved (e.g. a rejected/decoy flag) are reopened so
+    # they re-enter this run's queue instead of being stranded forever.
+    solved_ext: set[str] = set()
+    for p in projects:
+        ext = p.get("external_id")
+        if ext is None:
+            continue
+        try:
+            if client.challenge_status(int(ext)).get("solved"):
+                solved_ext.add(str(ext))
+        except Exception:
+            continue
+    print(f"platform reports {len(solved_ext)} challenges already solved by this account", flush=True)
+    reopened: list[str] = []
+    for p in projects:
+        ext = str(p.get("external_id") or "")
+        if p["status"] == "completed" and ext and ext not in solved_ext:
+            try:
+                http("POST", f"/projects/{p['id']}/reopen", args.session, timeout=30)
+                # Drop any stale submission record so the next attempt's flag
+                # is not silently skipped by the dedup in the submit loop.
+                state["submitted"].pop(ext, None)
+                reopened.append(p["id"])
+            except Exception as exc:
+                print(f"[reopen] {p['id']} failed: {exc}", flush=True)
+    if reopened:
+        save_state(state)
+        print(f"reopened {len(reopened)} completed-but-unsolved projects: {reopened}", flush=True)
+        projects = http("GET", "/projects", args.session)
     todo = [
         p for p in projects
         if p["status"] not in ("completed", "running", "queued")
+        and str(p.get("external_id") or "") not in solved_ext
     ]
     if args.category:
         todo = [p for p in todo if p["category"] == args.category]
@@ -289,13 +345,6 @@ def cmd_auto(args) -> int:
     ranking = load_ranking()
     todo = rank_projects(todo, ranking)
     descriptions = fetch_descriptions(args.session, todo)
-    state = load_state()
-    client = Ret2ShellClient(
-        base_url=os.getenv("IPC_R2S_BASE_URL", ""),
-        game_id=int(os.getenv("IPC_R2S_GAME_ID") or 37),
-        username=os.getenv("IPC_R2S_USERNAME", ""),
-        password=os.getenv("IPC_R2S_PASSWORD", ""),
-    )
     # Authoritative instance classification: ask the platform's env endpoint
     # for every challenge (null = plain challenge, images = dynamic instance).
     env_flags: dict[str, bool] = {}

@@ -237,11 +237,16 @@ class OpenAICompatibleAdapter(BaseAdapter):
         deepseek = self.config.api_format == "deepseek"
         reasoning_model = _is_reasoning_model(self.config.model)
         reasoning_effort = self._reasoning_effort(decision=True)
+        # Forced-reasoning models (e.g. kimi-for-coding) spend the output
+        # budget on hidden reasoning before any content; 4096 was observed
+        # being fully consumed by reasoning alone on large contexts, leaving
+        # an empty response with finish_reason=length.
+        decision_tokens = 16384 if reasoning_model else (4096 if deepseek else None)
         text = self._request_compatible(
             messages,
             system_prompt=_system_prompt_for_context(context),
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
-            max_tokens=4096 if deepseek or reasoning_model else None,
+            max_tokens=decision_tokens,
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -262,7 +267,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             [*messages, {"role": "user", "content": repair_message}],
             system_prompt=_system_prompt_for_context(context),
             temperature=0.0 if not reasoning_model else None,
-            max_tokens=4096 if deepseek or reasoning_model else 1024,
+            max_tokens=16384 if reasoning_model else (4096 if deepseek else 1024),
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -429,7 +434,14 @@ class OpenAICompatibleAdapter(BaseAdapter):
                         break
                     degraded = _degrade_profile(profile, issue, error_text)
                     if degraded is None or degraded.signature() in seen:
-                        raise
+                        # Surface the gateway's own reason (rate limit,
+                        # content filter, schema rejection...) — a bare
+                        # "400 Bad Request" is undiagnosable from logs.
+                        detail = (getattr(resp, "text", "") or "").strip()[:500]
+                        raise requests.HTTPError(
+                            f"{exc} | gateway response: {detail}",
+                            response=resp,
+                        ) from exc
                     profile = degraded
                     continue
 
