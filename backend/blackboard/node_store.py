@@ -1,9 +1,56 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from backend.blackboard.ids import next_fact_id, utcnow
 from backend.blackboard.models import Fact
+
+
+# Agent reports often restate the same source finding with a different lead-in
+# (for example, "Nday candidate" versus "confirmed candidate").  Keeping the
+# full prose is useful for audit, but these stable tokens are enough to prevent
+# a repeated conclusion from inflating the graph and retriggering Diamond.
+_FINDING_RE = re.compile(
+    r"(?P<path>[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx|h|hpp|py|js|ts|java))"
+    r"(?::|\s+lines?\s+)(?P<line>\d+(?:-\d+)?)"
+    r".*?(?P<commit>\b[0-9a-f]{7,40}\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _finding_key(description: str) -> tuple[str, str, str] | None:
+    match = _FINDING_RE.search(description)
+    if match is None:
+        return None
+    return (
+        match.group("path").replace("\\", "/").lower(),
+        match.group("line"),
+        match.group("commit").lower(),
+    )
+
+
+def _existing_equivalent_fact(conn: Any, project_id: str, description: str) -> Fact | None:
+    normalized = " ".join(description.split())
+    row = conn.execute(
+        "SELECT id, description, created_at FROM facts "
+        "WHERE project_id = %s AND description = %s ORDER BY created_at, id LIMIT 1",
+        (project_id, normalized),
+    ).fetchone()
+    if row is not None:
+        return Fact(id=row["id"], description=row["description"], created_at=row["created_at"])
+
+    key = _finding_key(normalized)
+    if key is None:
+        return None
+    rows = conn.execute(
+        "SELECT id, description, created_at FROM facts WHERE project_id = %s ORDER BY created_at, id",
+        (project_id,),
+    ).fetchall()
+    for row in rows:
+        if _finding_key(row["description"]) == key:
+            return Fact(id=row["id"], description=row["description"], created_at=row["created_at"])
+    return None
 
 
 def insert_fact(conn: Any, project_id: str, fact_id: str, description: str) -> Fact:
@@ -26,6 +73,10 @@ def reserve_fact(conn: Any, project_id: str, description: str) -> Fact:
 
 
 def create_fact(conn: Any, project_id: str, description: str) -> Fact:
+    description = " ".join(description.split())
+    existing = _existing_equivalent_fact(conn, project_id, description)
+    if existing is not None:
+        return existing
     fid = next_fact_id(conn, project_id)
     return insert_fact(conn, project_id, fid, description)
 

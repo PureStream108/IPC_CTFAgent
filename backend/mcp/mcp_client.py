@@ -12,11 +12,10 @@ from typing import Any
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_connected_server_and_client_session
 
-MCPClientTarget = FastMCP | StdioServerParameters | str
+MCPClientTarget = FastMCP | StdioServerParameters
 
 
 class MCPToolError(RuntimeError):
@@ -54,11 +53,9 @@ class MCPClient:
         target: MCPClientTarget,
         *,
         read_timeout: float | None = 120,
-        headers: Mapping[str, str] | None = None,
     ) -> None:
         self.target = target
         self.read_timeout = read_timeout
-        self.headers = dict(headers or {})
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -81,16 +78,6 @@ class MCPClient:
             **kwargs,
         )
 
-    @classmethod
-    def streamable_http(
-        cls,
-        url: str,
-        *,
-        headers: Mapping[str, str] | None = None,
-        **kwargs: Any,
-    ) -> MCPClient:
-        return cls(url, headers=headers, **kwargs)
-
     @property
     def session(self) -> ClientSession:
         if self._session is None:
@@ -112,17 +99,7 @@ class MCPClient:
                     )
                 )
             else:
-                if isinstance(self.target, StdioServerParameters):
-                    read_stream, write_stream = await stack.enter_async_context(stdio_client(self.target))
-                else:
-                    read_stream, write_stream, _ = await stack.enter_async_context(
-                        streamablehttp_client(
-                            self.target,
-                            headers=self.headers,
-                            timeout=self.read_timeout or 30,
-                            sse_read_timeout=self.read_timeout or 300,
-                        )
-                    )
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(self.target))
                 session = await stack.enter_async_context(
                     ClientSession(read_stream, write_stream, read_timeout_seconds=timeout)
                 )
@@ -258,10 +235,6 @@ class MCPRegistry:
     ) -> Any:
         async with self.session() as session:
             return await session.call_tool(server, tool, arguments)
-
-    async def describe(self) -> dict[str, list[dict[str, Any]]]:
-        async with self.session() as session:
-            return {name: await session.describe_tools(name) for name in self.names()}
 
 
 async def _run_cli(args: argparse.Namespace) -> int:

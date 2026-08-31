@@ -12,6 +12,7 @@ data/
 memory/
 projects/
 Wp/
+docs/
 exports/
 examples/
 log.txt
@@ -237,3 +238,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.ipc-agent/

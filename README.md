@@ -104,6 +104,7 @@ Member 在题目容器中使用按分类注册的 CTF 工具，并可通过 MCP 
 - `browser`：基于 Chromium 的浏览器自动化、下载与截图 Artifact。
 - `reverse`：PyGhidra 与 radare2 逆向分析。
 - `zap`：可选 OWASP ZAP 服务，必须同时开启运行配置和 Compose profile。
+- `ret2shell`：ret2shell 平台的动态实例控制（`instance_start` / `instance_status` / `instance_renew` / `instance_stop` / `challenge_status`），仅在配置 `IPC_R2S_USERNAME` 或 `IPC_R2S_TOKEN` 后注册；ws:// 隧道由镜像内置的 wsrx 转发到本地端口。
 
 分类覆盖 `web`、`pwn`、`reverse`、`crypto`、`misc`、`ai`、`osint`。浏览器下载、截图等内容以 Artifact 保存，避免将大型输出直接放入模型上下文。
 
@@ -141,7 +142,7 @@ Docker Compose 将数据库放入命名卷，将需要人工访问或跨容器�
 | Docker Socket | 必需 | App 需要创建题目容器；IPC Runner 同样依赖 Socket |
 | Linux Docker 主机 | 推荐/已验证 | Compose 会挂载 Docker Socket 与 Compose 插件 |
 | LLM 端点 | 开始解题时需要 | Diamond 与已启用 Member 使用 OpenAI、Anthropic、Claude Code、DeepSeek、Pi 或 Mock 适配器 |
-| 浏览器 | 可选 | 用于打开本地 Web UI |
+| 浏览器 | 可选 | 用于打开本地浏览器 |
 
 > [!WARNING]
 > 沙箱降低风险，但不能替代隔离主机或虚拟机。请只将题目、附件、模型密钥和 Docker Socket 放入可信环境。
@@ -357,6 +358,7 @@ IPC_CTFAgent/
 │   ├── memory/       # 经验记忆与工具目录
 │   ├── ops/          # IPC 行动代理与平台工作流
 │   ├── persistence/  # PostgreSQL schema 与 Alembic migrations
+│   ├── platform/     # 平台适配层（HTTP JSON / GZCTF / ret2shell 客户端）
 │   ├── sandbox/      # Docker/本地任务沙箱
 │   └── tools/        # 工具注册表、目录与文档
 ├── frontend/         # 单页 Web UI
@@ -424,10 +426,10 @@ docker run --rm \
   <a href="https://github.com/ecxwxz">
     <img src="https://github.com/ecxwxz.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
   </a>
+  <a href="https://github.com/springbot2025">
+    <img src="https://github.com/springbot2025.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
+  </a>
 </p>
-
-
----
 
 ## 🤝 Contribution
 

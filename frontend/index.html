@@ -962,7 +962,13 @@
       },
       currentElapsed(){ return this.projectElapsed(this.current?.project); },
 
-      async loadProjects(){ this.projects = await this.api("GET","/projects"); },
+      async loadProjects(){
+        const list = await this.api("GET","/projects");
+        // Running projects first, then queued/created, completed last; newest id first within a group.
+        const rank = (s) => (s === 'running' ? 0 : (s === 'completed' ? 2 : 1));
+        this.projects = [...list].sort((a, b) =>
+          (rank(a.status) - rank(b.status)) || (a.id < b.id ? 1 : -1));
+      },
       async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },
       async loadProject(id){ this.current = await this.api("GET","/projects/"+id); },
       async openProject(id){

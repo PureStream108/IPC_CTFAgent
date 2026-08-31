@@ -7,7 +7,6 @@ from pathlib import Path
 
 from backend.sandbox.resource_limiter import TaskSlotLimiter
 from backend.sandbox.sandbox import LocalSandbox, Sandbox
-from backend.sandbox.webui_proxy import webui_proxy_manager
 
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -113,15 +112,6 @@ class ContainerPool:
             network=self.network,
             attachments_dir=self.workspace_root / project_id / "attachments",
         )
-
-    def stop_member(self, project_id: str, member: str) -> None:
-        """Drop a Member's view. Does NOT stop the shared task container."""
-        key = self._key(project_id, member)
-        with self._lock:
-            sb = self._sandboxes.pop(key, None)
-        if sb is not None:
-            sb.stop()
-        webui_proxy_manager.close_member(project_id, member)
 
     def stop_project(self, project_id: str) -> None:
         with self._lock:
