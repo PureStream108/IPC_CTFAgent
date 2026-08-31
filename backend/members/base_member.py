@@ -1214,6 +1214,36 @@ class BaseMember:
         if callable(attachment_path):
             for attachment in attachments:
                 attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
+        runtime_notes = [
+            "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
+            "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
+            "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
+            "If attachment_true is true, inspect the listed attachments before blind target probing.",
+            (
+                "challenge_description contains the original challenge statement "
+                "(connection commands like nc/ssh, service addresses, flag format). "
+                "external_id is this challenge's platform id — use it with ret2shell MCP tools."
+            ),
+        ]
+        # Platform verdicts flow back through the experience memory: surface
+        # any flags the platform already rejected for THIS challenge so the
+        # member never resubmits them and re-derives a complete flag instead.
+        try:
+            rejected_flags: list[str] = []
+            for m in d.memory.list(None):
+                if m.project_id != project_id or "rejected-flag" not in m.tags:
+                    continue
+                rejected_flags.extend(re.findall(r"'([^']+)'", m.content))
+            if rejected_flags:
+                runtime_notes.append(
+                    "Platform already REJECTED these flag strings for this challenge — "
+                    f"do NOT resubmit them: {', '.join(sorted(set(rejected_flags)))}. "
+                    "Re-derive the complete flag from the challenge material (check every "
+                    "file/resource, including binary XML and encoded blobs; recombine ALL "
+                    "fragments) and only report a flag that reads as a coherent whole."
+                )
+        except Exception:
+            pass
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
@@ -1228,16 +1258,15 @@ class BaseMember:
                 "or new evidence justifies escalation. Do not repeat previous attempts."
             ),
             "sandbox_backend": getattr(d.sandbox, "__class__", type(d.sandbox)).__name__,
-            "runtime_notes": [
-                "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
-                "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
-                "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
-                "If attachment_true is true, inspect the listed attachments before blind target probing.",
-            ],
+            "runtime_notes": runtime_notes,
             "evaluate_now": evaluate_now,
             "eval_interval": d.eval_interval,
             "is_initial": is_initial,
             "expected_flag": d.expected_flag,
+            "challenge_description": next(
+                (f.description for f in detail.facts if f.id == "origin"), ""
+            ),
+            "external_id": detail.project.external_id,
             "goal": next((f.description for f in detail.facts if f.id == "goal"), ""),
             "assigned_intent": {"id": intent_id, "description": assigned.description if assigned else ""},
             "assigned_intent_sources": assigned.from_ if assigned else ["origin"],

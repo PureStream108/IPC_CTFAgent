@@ -277,7 +277,11 @@ class OpenAICompatibleAdapter(BaseAdapter):
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
-            max_tokens=4096 if deepseek or reasoning_model else None,
+            # Forced-reasoning models (e.g. kimi-for-coding) spend the output
+            # budget on hidden reasoning before any content; 4096 was observed
+            # being fully consumed by reasoning alone on large contexts, leaving
+            # an empty response with finish_reason=length.
+            max_tokens=16384 if reasoning_model else (4096 if deepseek else None),
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -298,7 +302,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             [*messages, {"role": "user", "content": repair_message}],
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if not reasoning_model else None,
-            max_tokens=4096 if deepseek or reasoning_model else 1024,
+            max_tokens=16384 if reasoning_model else (4096 if deepseek else 1024),
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -362,7 +366,15 @@ class OpenAICompatibleAdapter(BaseAdapter):
         thinking: str | None,
     ) -> _OpenAIProfile:
         reasoning_model = _is_reasoning_model(self.config.model)
-        native_or_reasoning = _is_native_openai(self.config.base_url) or reasoning_model
+        # Reasoning-model names alone do not guarantee that a compatible
+        # gateway implements OpenAI's strict JSON Schema wire shape.  When an
+        # operator explicitly selects Chat Completions on a non-native
+        # endpoint, prefer the broadly supported JSON Object mode (and its
+        # matching token parameter).  Native OpenAI keeps the strict schema
+        # profile used by Responses/Chat reasoning models.
+        native_or_reasoning = _is_native_openai(self.config.base_url) or (
+            reasoning_model and self.config.api_surface == "auto"
+        )
         if not structured:
             structured_mode = "none"
         elif self.config.api_format == "deepseek":
@@ -771,8 +783,14 @@ def _provider_error_from_response(response: Any, provider: str) -> ProviderError
     status = _response_status(response)
     retry_after = _retry_after_seconds(response)
     error_type = RetryableProviderError if _is_retryable_status(status) else NonRetryableProviderError
+    # Surface the gateway's own reason (rate limit, content filter, schema
+    # rejection...) — a bare "HTTP 400" is undiagnosable from logs.
+    detail = (getattr(response, "text", "") or "").strip()[:500]
+    message = f"{provider} endpoint returned HTTP {status}"
+    if detail:
+        message = f"{message} | gateway response: {detail}"
     return error_type(
-        f"{provider} endpoint returned HTTP {status}",
+        message,
         provider=provider,
         status_code=status,
         retry_after=retry_after,
@@ -882,6 +900,9 @@ def _http_error_summary(exc: Exception) -> str:
 
 def _is_reasoning_model(model: str) -> bool:
     name = (model or "").strip().lower().rsplit("/", 1)[-1]
+    # Kimi For Coding always thinks; give it the reasoning-model budget.
+    if "kimi-for-coding" in name or name.startswith("kimi-k"):
+        return True
     if name.startswith("gpt-"):
         version = name[4:].split("-", 1)[0]
         try:

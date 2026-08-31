@@ -1162,7 +1162,7 @@ def test_gpt_56_auto_uses_responses_structured_output(monkeypatch):
     assert calls[0][0] == "https://api.openai.com/v1/responses"
     body = calls[0][1]["json"]
     assert "input" in body and "messages" not in body
-    assert body["max_output_tokens"] == 4096
+    assert body["max_output_tokens"] == 16384
     assert body["reasoning"] == {"effort": "none"}
     assert body["text"]["format"]["type"] == "json_schema"
     assert "temperature" not in body
@@ -1209,7 +1209,7 @@ def test_gpt_56_auto_falls_back_to_chat_and_caches_surface(monkeypatch):
 
     assert calls[0][0].endswith("/v1/responses")
     assert calls[1][0].endswith("/v1/chat/completions")
-    assert calls[1][1]["max_completion_tokens"] == 4096
+    assert calls[1][1]["max_completion_tokens"] == 16384
     assert calls[1][1]["reasoning_effort"] == "none"
     assert calls[2][0].endswith("/v1/chat/completions")
     assert sum(url.endswith("/responses") for url, _ in calls) == 1
