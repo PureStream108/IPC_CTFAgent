@@ -14,6 +14,8 @@ from backend.blackboard.db import Database
 from backend.mcp.mcp_client import MCPRegistry
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
+from backend.platform.ret2shell import Ret2ShellClient
+from backend.platform.ret2shell_mcp import build_ret2shell_mcp
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
@@ -96,6 +98,11 @@ class AppState:
         self.mcps = MCPRegistry()
         self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
+        # The ret2shell competition MCP (dynamic instance control) is only
+        # registered when participant credentials are configured, so members
+        # never see a platform they cannot reach.
+        if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
+            self.mcps.register(build_ret2shell_mcp(Ret2ShellClient()))
 
         # Attached by module 8.
         self.orchestrator = None

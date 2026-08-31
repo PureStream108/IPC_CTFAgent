@@ -64,7 +64,12 @@ def pytest_collection_modifyitems(config, items) -> None:
     )
     has_database = bool(os.environ.get("IPC_TEST_DATABASE_URL", "").strip())
     for item in items:
-        if Path(str(item.fspath)).name not in POSTGRES_TEST_MODULES:
+        # Modules in POSTGRES_TEST_MODULES are entirely DB-backed; individual
+        # tests elsewhere may opt in with an explicit @pytest.mark.postgres.
+        if (
+            Path(str(item.fspath)).name not in POSTGRES_TEST_MODULES
+            and item.get_closest_marker("postgres") is None
+        ):
             continue
         item.add_marker("postgres")
         if not has_database:

@@ -179,3 +179,16 @@ Common first moves by challenge shape
   libraries; use RsaCtfTool for weak RSA.
 - Stego/forensics: exiftool, binwalk, zsteg/steghide/pngcheck, OCR, audio/video
   extraction.
+
+
+ret2shell platform (competition)
+--------------------------------
+- ret2shell MCP: dynamic instance control for challenges that need a remote
+  target. Tools: instance_start (starts the challenge instance and waits for
+  its endpoints), instance_status, instance_renew, instance_stop,
+  challenge_status (already-solved check). Credentials stay in the backend.
+- For pwn-style challenges with a remote endpoint, call instance_start first
+  and attack the returned address/port; renew the instance if it is about to
+  expire while you are still working.
+- Flag submission is operator-only (shared 10-per-5-minutes quota). When you
+  find the flag, emit the flag action; do not attempt to submit it yourself.
