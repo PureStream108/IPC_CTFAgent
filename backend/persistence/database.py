@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import random
-import time
 from collections.abc import Generator, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -10,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from psycopg import Connection
-from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -162,16 +159,6 @@ class PostgresDatabase:
         with self._pool.connection() as raw:
             with raw.transaction():
                 yield DatabaseConnection(raw)
-
-    def run_transaction(self, callback, *, retries: int = 3):
-        for attempt in range(retries):
-            try:
-                with self.connect() as connection:
-                    return callback(connection)
-            except (DeadlockDetected, SerializationFailure):
-                if attempt + 1 >= retries:
-                    raise
-                time.sleep((0.05 * (2**attempt)) + random.random() * 0.05)
 
     def close(self) -> None:
         if self._opened:

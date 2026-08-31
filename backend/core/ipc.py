@@ -139,17 +139,3 @@ def verify_postprocess(db, project_id: str, wp_dir: Path) -> dict:
     ):
         reasons.extend(f"invalid writeup: {error}" for error in errors)
     return {"ok": not reasons, "flag": flag, "wp_path": wp_path, "reasons": reasons}
-
-
-def verify_flag_and_wp(db, project_id: str, wp_dir: Path) -> dict:
-    """Compatibility aggregate used by older callers and export checks."""
-
-    flag = verify_flag(db, project_id)
-    postprocess = verify_postprocess(db, project_id, wp_dir)
-    reasons = [*flag.get("reasons", []), *postprocess.get("reasons", [])]
-    return {
-        "ok": not reasons,
-        "flag": flag.get("flag"),
-        "wp_path": postprocess.get("wp_path"),
-        "reasons": reasons,
-    }

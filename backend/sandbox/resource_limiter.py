@@ -43,12 +43,3 @@ class TaskSlotLimiter:
     def active_tasks(self) -> list[str]:
         with self._lock:
             return sorted(self._active)
-
-    @property
-    def active_count(self) -> int:
-        with self._lock:
-            return len(self._active)
-
-    def reset(self) -> None:
-        with self._lock:
-            self._active.clear()

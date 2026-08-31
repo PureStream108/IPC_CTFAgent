@@ -26,10 +26,6 @@ class Memory(BaseModel):
     source: str = "diamond"
     created_at: str
 
-    def keywords(self) -> set[str]:
-        text = f"{self.title} {self.content} {' '.join(self.tags)}".lower()
-        return {word for word in _tokenize(text) if len(word) >= 2}
-
 
 def _tokenize(text: str) -> list[str]:
     output: list[str] = []

@@ -28,9 +28,6 @@ class Lifecycle:
             row = graph_store.get_project_row(conn, project_id)
             return row["status"] if row else None
 
-    def can_transition(self, current: str, target: str) -> bool:
-        return target in TRANSITIONS.get(current, set())
-
     def transition(self, project_id: str, target: str) -> str:
         with self.db.connect() as conn:
             row = graph_store.get_project_row(conn, project_id)

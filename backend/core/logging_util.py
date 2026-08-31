@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -101,10 +100,6 @@ class IPCLogger:
                 path = self.root / sub / self._project_filename(project_id)
                 path.unlink(missing_ok=True)
 
-    def clear_all(self) -> None:
-        with self._lock:
-            shutil.rmtree(self.root, ignore_errors=True)
-
     @staticmethod
     def _read_array(path: Path) -> list[dict]:
         if not path.exists():
@@ -140,7 +135,3 @@ class IPCLogger:
     @staticmethod
     def jsonl_text(entries: list[dict]) -> str:
         return "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
-
-    @staticmethod
-    def write_jsonl(path: Path, entries: list[dict]) -> None:
-        path.write_text(IPCLogger.jsonl_text(entries), encoding="utf-8")
