@@ -142,7 +142,7 @@ Docker Compose 将数据库放入命名卷，将需要人工访问或跨容器�
 | Docker Socket | 必需 | App 需要创建题目容器；IPC Runner 同样依赖 Socket |
 | Linux Docker 主机 | 推荐/已验证 | Compose 会挂载 Docker Socket 与 Compose 插件 |
 | LLM 端点 | 开始解题时需要 | Diamond 与已启用 Member 使用 OpenAI、Anthropic、Claude Code、DeepSeek、Pi 或 Mock 适配器 |
-| 浏览器 | 可选 | 用于打开本地 Web UI |
+| 浏览器 | 可选 | 用于打开本地浏览器 |
 
 > [!WARNING]
 > 沙箱降低风险，但不能替代隔离主机或虚拟机。请只将题目、附件、模型密钥和 Docker Socket 放入可信环境。
@@ -426,12 +426,10 @@ docker run --rm \
   <a href="https://github.com/ecxwxz">
     <img src="https://github.com/ecxwxz.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
   </a>
+  <a href="https://github.com/springbot2025">
+    <img src="https://github.com/springbot2025.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
+  </a>
 </p>
-
-- `unknown <2922592941@qq.com>` — ret2 分支：ret2shell/GZCTF 平台接入、调度稳定性与成员上下文修复
-
-
----
 
 ## 🤝 Contribution
 
