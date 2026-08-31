@@ -104,6 +104,7 @@ Member 在题目容器中使用按分类注册的 CTF 工具，并可通过 MCP 
 - `browser`：基于 Chromium 的浏览器自动化、下载与截图 Artifact。
 - `reverse`：PyGhidra 与 radare2 逆向分析。
 - `zap`：可选 OWASP ZAP 服务，必须同时开启运行配置和 Compose profile。
+- `ret2shell`：ret2shell 平台的动态实例控制（`instance_start` / `instance_status` / `instance_renew` / `instance_stop` / `challenge_status`），仅在配置 `IPC_R2S_USERNAME` 或 `IPC_R2S_TOKEN` 后注册；ws:// 隧道由镜像内置的 wsrx 转发到本地端口。
 
 分类覆盖 `web`、`pwn`、`reverse`、`crypto`、`misc`、`ai`、`osint`。浏览器下载、截图等内容以 Artifact 保存，避免将大型输出直接放入模型上下文。
 
@@ -357,6 +358,7 @@ IPC_CTFAgent/
 │   ├── memory/       # 经验记忆与工具目录
 │   ├── ops/          # IPC 行动代理与平台工作流
 │   ├── persistence/  # PostgreSQL schema 与 Alembic migrations
+│   ├── platform/     # 平台适配层（HTTP JSON / GZCTF / ret2shell 客户端）
 │   ├── sandbox/      # Docker/本地任务沙箱
 │   └── tools/        # 工具注册表、目录与文档
 ├── frontend/         # 单页 Web UI
@@ -425,6 +427,8 @@ docker run --rm \
     <img src="https://github.com/ecxwxz.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
   </a>
 </p>
+
+- `unknown <2922592941@qq.com>` — ret2 分支：ret2shell/GZCTF 平台接入、调度稳定性与成员上下文修复
 
 
 ---
