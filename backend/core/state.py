@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import threading
@@ -59,6 +60,7 @@ class AppState:
         self.db = Database().configure()
         with self.db.connect() as conn:
             graph_store.reset_project_counter_if_empty(conn)
+            self._reserve_existing_project_ids(conn)
         self.memory = MemoryStore(self.db, export_dir=None).configure()
         self.registry = ToolRegistry().load()
         self.catalog = ToolCatalog.load(self.registry)
@@ -107,6 +109,30 @@ class AppState:
         # Attached by module 8.
         self.orchestrator = None
 
+    def _reserve_existing_project_ids(self, conn) -> None:
+        """Keep a fresh database from reusing surviving workspace ids.
+
+        PostgreSQL rows are durable, but the database can still be recreated
+        (e.g. a replaced container volume) while project workspace directories
+        on the shared Artifact root survive.  Reserve the largest surviving
+        numeric ID so a newly created project never inherits old progress or
+        artifacts merely because the database started empty.
+        """
+        if not self.projects_dir.is_dir():
+            return
+        highest = 0
+        for entry in self.projects_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            match = re.fullmatch(r"proj_(\d+)", entry.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if highest:
+            conn.execute(
+                "UPDATE counters SET value = GREATEST(value, %s) WHERE name = 'project'",
+                (highest,),
+            )
+
     def _clean_runtime_state(self) -> None:
         # Database rows are intentionally not deleted by a local clean start.
         # Durable exports are preserved; only live workspaces and generated
@@ -142,8 +168,14 @@ class AppState:
                 self.db.close()
 
     def project_log_filename(self, project_id: str) -> str | None:
-        with self.db.connect() as conn:
-            return graph_store.project_log_filename(conn, project_id)
+        # Called from logging paths, including the scheduler's crash handler;
+        # a failing database must degrade to the plain id instead of raising
+        # through the logger and killing the caller.
+        try:
+            with self.db.connect() as conn:
+                return graph_store.project_log_filename(conn, project_id)
+        except Exception:
+            return project_id
 
     def attachments_dir(self, project_id: str) -> Path:
         d = self.projects_dir / project_id / "attachments"

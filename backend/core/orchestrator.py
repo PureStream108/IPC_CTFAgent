@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+import sys
 from time import monotonic
 from typing import Any
 import uuid
@@ -56,6 +57,8 @@ class PostprocessLeaseLost(RuntimeError):
 
 class Orchestrator:
     _MEMBER_RETRY_DELAYS = (10, 30, 90, 300)
+    _MAX_CONSECUTIVE_STALLS = 3
+    _STALL_DEFER_SECONDS = 180
     _POSTPROCESS_LEASE_SECONDS = 120
 
     def __init__(self, state, max_workers: int | None = None, scripts: dict | None = None):
@@ -88,6 +91,7 @@ class Orchestrator:
         self._startup_futures: dict[str, Any] = {}
         self._member_failure_counts: dict[tuple[str, str], int] = {}
         self._member_retry_not_before: dict[tuple[str, str], float] = {}
+        self._member_stall_counts: dict[tuple[str, str], int] = {}
         self._project_leases: dict[str, str] = {}
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
         self._lock = threading.Lock()
@@ -1211,7 +1215,13 @@ class Orchestrator:
             try:
                 self._tick()
             except Exception as exc:
-                self.state.logger.project("scheduler_error", "system", error=str(exc))
+                # The fallback handler itself must never kill the loop: it
+                # logs through the DB-backed resolver, which is exactly what
+                # fails when the tick died on a database error.
+                try:
+                    self.state.logger.project("scheduler_error", "system", error=str(exc))
+                except Exception:
+                    print(f"[ipc-orchestrator] tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             self._stop.wait(interval)
 
     def _tick(self) -> None:
@@ -1438,6 +1448,32 @@ class Orchestrator:
             )[:1500],
         )
 
+    def _record_member_stall(self, project_id: str, intent_id: str) -> tuple[int, bool]:
+        """Defer a repeatedly stalled intent so a concrete alternate branch can run."""
+        key = (project_id, intent_id)
+        with self._lock:
+            count = self._member_stall_counts.get(key, 0) + 1
+            self._member_stall_counts[key] = count
+            should_defer = count >= self._MAX_CONSECUTIVE_STALLS
+            if should_defer:
+                self._member_retry_not_before[key] = monotonic() + self._STALL_DEFER_SECONDS
+        if should_defer:
+            # The finished-future path has already released the intent claim;
+            # only the redispatch backoff is needed here.
+            self.state.logger.project(
+                "member_intent_deferred",
+                project_id,
+                intent=intent_id,
+                stalls=count,
+                delay_seconds=self._STALL_DEFER_SECONDS,
+                reason="repeated_stalls",
+            )
+        return count, should_defer
+
+    def _clear_member_stalls(self, project_id: str, intent_id: str) -> None:
+        with self._lock:
+            self._member_stall_counts.pop((project_id, intent_id), None)
+
     def _clear_member_retry(self, project_id: str, intent_id: str) -> None:
         key = (project_id, intent_id)
         with self._lock:
@@ -1454,6 +1490,8 @@ class Orchestrator:
                 self._member_failure_counts.pop(key, None)
             for key in [key for key in self._member_retry_not_before if key[0] == project_id]:
                 self._member_retry_not_before.pop(key, None)
+            for key in [key for key in self._member_stall_counts if key[0] == project_id]:
+                self._member_stall_counts.pop(key, None)
 
     def _reconcile_resources(self) -> None:
         with self.state.db.connect() as conn:
@@ -1711,6 +1749,7 @@ class Orchestrator:
                 continue
             self._clear_member_retry(project_id, intent_id)
             if result.status == "stalled":
+                stalls, deferred = self._record_member_stall(project_id, intent_id)
                 self.state.logger.project(
                     "member_task_stalled",
                     project_id,
@@ -1719,14 +1758,19 @@ class Orchestrator:
                     retryable=result.retryable,
                     error_kind=result.error_kind,
                     error=result.error,
+                    consecutive_stalls=stalls,
+                    deferred=deferred,
                 )
             elif result.status == "done":
+                self._clear_member_stalls(project_id, intent_id)
                 self.state.logger.project("member_task_done", project_id, intent=intent_id, steps=result.steps)
             elif result.status == "concluded":
+                self._clear_member_stalls(project_id, intent_id)
                 self.state.logger.project("member_task_concluded", project_id, intent=intent_id, fact=result.fact_id)
                 if result.fact_id is not None:
                     self._broadcast_fact(project_id, result.fact_id, self._intent_worker(project_id, intent_id))
             elif result.status == "flag":
+                self._clear_member_stalls(project_id, intent_id)
                 self.state.logger.project("member_task_flag", project_id, intent=intent_id, flag=result.flag)
 
     def _intent_worker(self, project_id: str, intent_id: str) -> str | None:

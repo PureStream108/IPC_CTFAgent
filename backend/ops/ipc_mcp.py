@@ -388,7 +388,11 @@ class _Tools:
         return self._run_project_tool(project_id, "task_sandbox_health")
 
     def task_sandbox_exec(self, project_id: str, command: str, timeout: int) -> dict[str, Any]:
-        return self._run_project_tool(project_id, "task_sandbox_exec", project_id, command, timeout)
+        # ``_run_project_tool`` injects project_id into the executor payload;
+        # pass only the command arguments here.  Passing project_id twice made
+        # the MCP bridge fail with ``too many values to unpack`` before the
+        # sandbox command could run.
+        return self._run_project_tool(project_id, "task_sandbox_exec", command, timeout)
 
     def host_exec(self, command: str, timeout: int) -> dict[str, Any]:
         try:
