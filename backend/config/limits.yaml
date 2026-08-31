@@ -1,4 +1,4 @@
 limits:
-  total_cpu: 4               # cores across all containers
-  max_concurrent_tasks: 5    # max CTF tasks running at once (one container each)
+  total_cpu: 12              # cores across all containers (4P+8E)
+  max_concurrent_tasks: 8    # max CTF tasks running at once (one container each)
   network: true              # all containers may reach the network
