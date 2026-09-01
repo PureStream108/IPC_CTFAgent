@@ -45,7 +45,6 @@ def write_mock_config(config_dir: Path) -> Path:
         "  base_url: ''\n"
         "  model: ''\n"
         "runtime:\n"
-        "  eval_interval_steps: 20\n"
         "  interval: 2\n"
         "  intent_timeout: 30\n"
         "  reason_timeout: 30\n"

@@ -5,7 +5,7 @@ import threading
 from typing import Any, Literal
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -122,6 +122,25 @@ def tools(service: OpsAgentService = Depends(get_ops_service)):
 @router.get("/sessions")
 def list_sessions(service: OpsAgentService = Depends(get_ops_service)):
     return {"sessions": service.list_sessions()}
+
+
+@router.get("/skills")
+def list_skills(service: OpsAgentService = Depends(get_ops_service)):
+    return {"skills": service.list_skills()}
+
+
+@router.post("/skills", status_code=status.HTTP_201_CREATED)
+async def import_skill(file: UploadFile = File(...), service: OpsAgentService = Depends(get_ops_service)):
+    data = await file.read()
+    return _call(service.import_skill, filename=file.filename or "SKILL.md", data=data)
+
+
+@router.delete("/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_skill(name: str, service: OpsAgentService = Depends(get_ops_service)):
+    deleted = _call(service.delete_skill, name)
+    if not deleted:
+        raise HTTPException(404, "skill not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/sessions/{session_id}")

@@ -1449,3 +1449,106 @@ def test_anthropic_adapter_joins_text_blocks_and_ignores_thinking(monkeypatch):
     assert adapter.chat([{"role": "user", "content": "hello"}]) == "first\nsecond"
     assert adapter._last_response_meta["reasoning_present"] is True
     assert adapter._last_response_meta["completion_tokens"] == 2
+
+
+SKILL_MD = b"""---
+name: web-enum
+description: Enumerate web targets before exploiting
+---
+Always enumerate /admin and /api first. Never brute-force directories.
+"""
+
+
+def test_skill_import_list_delete_via_api(client):
+    response = client.post(
+        "/api/ops/skills",
+        files={"file": ("SKILL.md", SKILL_MD, "text/markdown")},
+    )
+    assert response.status_code == 201
+    assert response.json()["name"] == "web-enum"
+
+    skills = client.get("/api/ops/skills").json()["skills"]
+    assert [s["name"] for s in skills] == ["web-enum"]
+    assert skills[0]["description"] == "Enumerate web targets before exploiting"
+
+    assert client.delete("/api/ops/skills/web-enum").status_code == 204
+    assert client.get("/api/ops/skills").json()["skills"] == []
+    assert client.delete("/api/ops/skills/web-enum").status_code == 404
+
+
+def test_skill_import_rejects_invalid_files(client):
+    empty = client.post("/api/ops/skills", files={"file": ("SKILL.md", b"  ", "text/markdown")})
+    assert empty.status_code == 400
+    binary = client.post(
+        "/api/ops/skills",
+        files={"file": ("SKILL.md", b"\xff\xfe\x00binary", "text/markdown")},
+    )
+    assert binary.status_code == 400
+
+
+def test_skill_name_falls_back_to_sanitized_filename(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPC_ROOT", str(tmp_path))
+    store = OpsStore(tmp_path)
+    meta = store.import_skill("My Weird Skill.MD", "no frontmatter here")
+    assert meta["name"] == "my-weird-skill"
+    assert (store.skills_dir / "my-weird-skill.md").exists()
+
+
+def test_skills_prompt_text_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("IPC_ROOT", str(tmp_path))
+    store = OpsStore(tmp_path)
+    assert store.skills_prompt_text() == ""
+    store.import_skill("a.md", "---\nname: alpha\n---\n" + "x" * 9000)
+    store.import_skill("b.md", "---\nname: beta\n---\nshort body")
+    text = store.skills_prompt_text()
+    assert "<ipc-skills>" in text and "alpha" in text and "beta" in text
+    assert len(text) <= 24_500
+
+
+def test_chat_injects_imported_skills(client, monkeypatch):
+    configure_mock(client)
+    client.post("/api/ops/skills", files={"file": ("SKILL.md", SKILL_MD, "text/markdown")})
+
+    class RecordingAdapter:
+        calls = []
+
+        def chat(self, messages, **kwargs):
+            self.calls.append(messages)
+            return json.dumps({"reply": "ok", "workflow": None})
+
+    recorder = RecordingAdapter()
+    monkeypatch.setattr("backend.ops.service.make_adapter", lambda config, name="agent": recorder)
+    response = client.post("/api/ops/chat", json={"message": "help me with the web task"})
+
+    assert response.status_code == 200
+    first = recorder.calls[0][0]
+    assert first["role"] == "user"
+    assert "web-enum" in first["content"]
+    assert "enumerate /admin" in first["content"]
+
+
+def test_claude_code_prompt_prefixes_skills():
+    from backend.ops.service import _claude_code_conversation
+
+    skills = "SKILLS-BLOCK"
+    resumed = _claude_code_conversation(
+        history=[{"role": "user", "content": "hi"}],
+        latest_message="next",
+        resume_session_id="claude-session-1",
+        skills_text=skills,
+    )
+    assert resumed == "SKILLS-BLOCK\n\nnext"
+
+    bootstrapped = _claude_code_conversation(
+        history=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}],
+        latest_message="next",
+        skills_text=skills,
+    )
+    assert bootstrapped.startswith("SKILLS-BLOCK\n\nRestore this IPC conversation")
+
+    plain = _claude_code_conversation(
+        history=[{"role": "user", "content": "hi"}],
+        latest_message="next",
+        resume_session_id="claude-session-1",
+    )
+    assert plain == "next"

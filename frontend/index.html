@@ -716,9 +716,28 @@
           <div class="text-lg font-semibold text-slate-700">IPC</div>
           <div class="text-[11px] text-slate-400" x-text="opsCfg?.api_format==='claudecode'?'Claude Code action agent with native session context, live logs, and host-root maintenance access.':opsCfg?.api_format==='openai'?'OpenAI-compatible action agent with durable IPC history, live tool logs, and host-root maintenance access.':'API-backed action agent with durable IPC history and host-root maintenance access.'"></div>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 relative">
           <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in Config'"></span>
           <button x-show="opsBusy" x-cloak class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50" :disabled="opsInterrupting" @click="interruptOpsRun()" x-text="opsInterrupting?'Interrupting…':'Interrupt IPC'"></button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" :class="showOpsSkills?'text-brand-600':''" @click="toggleOpsSkills()">SKILL<span x-show="opsSkills.length" class="ml-1 rounded-full bg-brand-100 px-1.5 text-[10px] text-brand-700" x-text="opsSkills.length"></span></button>
+          <input type="file" x-ref="opsSkillFile" accept=".md,text/markdown" class="hidden" @change="importOpsSkill()" />
+          <div x-show="showOpsSkills" x-cloak @click.outside="showOpsSkills=false" class="absolute right-0 top-9 z-40 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Skills</div>
+              <button class="rounded-lg border border-brand-200 bg-brand-50 px-2.5 py-1 text-[11px] text-brand-700 hover:bg-brand-100 disabled:opacity-50" :disabled="opsSkillBusy" @click="$refs.opsSkillFile.click()" x-text="opsSkillBusy?'Importing…':'Import SKILL.md'"></button>
+            </div>
+            <div class="text-[10px] text-slate-400 mb-2">Imported skills are injected into every IPC conversation as operator guidance.</div>
+            <template x-for="skill in opsSkills" :key="skill.name">
+              <div class="group rounded-lg border border-slate-100 px-2.5 py-2 mb-1.5 hover:border-slate-200">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-medium text-slate-700 break-all" x-text="skill.name"></span>
+                  <button class="text-[10px] text-rose-400 opacity-0 group-hover:opacity-100" @click="deleteOpsSkill(skill.name)">Delete</button>
+                </div>
+                <div class="text-[10px] text-slate-400 mt-0.5 break-words" x-text="skill.description||'SKILL.md'"></div>
+              </div>
+            </template>
+            <div class="text-xs text-slate-400 text-center py-3" x-show="opsSkills.length===0">No skills imported yet.</div>
+          </div>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">Config</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false">Close</button>
         </div>
@@ -879,7 +898,7 @@
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
       opsBusy: false, opsStreaming: false, opsInterrupting: false, opsRunId: null, opsQueuedMessage: null, opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAtBottom: true,
       opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
-      opsConfirmInput: "", opsResult: null,
+      opsConfirmInput: "", opsResult: null, opsSkills: [], showOpsSkills: false, opsSkillBusy: false,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
@@ -890,7 +909,7 @@
         this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
         this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
         this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
-        this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
+        this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null; this.opsSkills=[]; this.showOpsSkills=false; this.opsSkillBusy=false;
         if(this.cy){ this.cy.destroy(); this.cy=null; }
       },
       async startApp(){
@@ -1415,9 +1434,37 @@
         this.showOps=true; this.opsResult=null;
         try{
           this.opsCfg=await this.api("GET","/api/ops/config");
-          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows(),this.loadOpsSkills()]);
           if(this.opsSessionId) await this.selectOpsSession(this.opsSessionId);
         }catch(error){}
+      },
+      async loadOpsSkills(){
+        const data=await this.api("GET","/api/ops/skills");
+        this.opsSkills=data.skills||[];
+      },
+      async toggleOpsSkills(){
+        this.showOpsSkills=!this.showOpsSkills;
+        if(this.showOpsSkills){ try{ await this.loadOpsSkills(); }catch(error){} }
+      },
+      async importOpsSkill(){
+        const input=this.$refs.opsSkillFile;
+        const file=input.files&&input.files[0];
+        input.value="";
+        if(!file) return;
+        this.opsSkillBusy=true;
+        try{
+          const fd=new FormData(); fd.append("file",file);
+          const r=await fetch("/api/ops/skills",{method:"POST",body:fd,credentials:"same-origin"});
+          const data=await r.json().catch(()=>({}));
+          if(!r.ok){ this.flash((data&&data.detail)||("error "+r.status)); return; }
+          this.flash("Skill imported: "+(data.name||file.name));
+          await this.loadOpsSkills();
+        }catch(error){ this.flash(error.message||"skill import failed"); }
+        finally{ this.opsSkillBusy=false; }
+      },
+      async deleteOpsSkill(name){
+        await this.api("DELETE","/api/ops/skills/"+encodeURIComponent(name));
+        await this.loadOpsSkills();
       },
       async loadOpsSessions(){
         const data=await this.api("GET","/api/ops/sessions");

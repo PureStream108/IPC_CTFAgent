@@ -18,6 +18,7 @@ POSTGRES_TEST_MODULES = {
     "test_lifecycle.py",
     "test_members.py",
     "test_memory.py",
+    "test_monitor.py",
     "test_ops_agent.py",
     "test_optional_startup.py",
     "test_orchestration.py",

@@ -14,7 +14,22 @@ def test_mock_config_loads_and_starts(tmp_path: Path):
     assert cfg.startup_errors() == []
     assert len(cfg.members) == 4
     assert {m.name for m in cfg.members} == {"aventurine", "pearl", "jade", "topaz"}
-    assert cfg.runtime.eval_interval_steps == 20
+    assert cfg.runtime.max_member_steps == 60
+
+
+def test_load_config_drops_legacy_eval_interval(tmp_path: Path):
+    config_dir = write_mock_config(tmp_path / "config")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "runtime:\n", "runtime:\n  eval_interval_steps: 7\n"
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_dir)
+
+    assert "eval_interval_steps" not in cfg.runtime.model_dump()
 
 
 def test_mock_is_always_configured():

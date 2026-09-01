@@ -57,8 +57,8 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
                                "label": i.id, "detail": facts_by_id.get(i.to, ""), "order": 3})
 
     events.extend(
-        {"ts": r.created_at, "kind": "difficulty_report",
-         "label": r.member, "detail": f"{r.difficulty}: {r.progress}", "order": 2}
+        {"ts": r.created_at, "kind": "progress_report",
+         "label": r.member, "detail": r.progress, "order": 2}
         for r in detail.reports
     )
 

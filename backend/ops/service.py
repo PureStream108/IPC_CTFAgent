@@ -195,6 +195,27 @@ class OpsAgentService:
             raise ValueError("interrupt the active IPC run before deleting this conversation")
         return self.store.delete_session(session_id)
 
+    # ---- operator-imported skills ----
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        return self.store.list_skills()
+
+    def import_skill(self, *, filename: str, data: bytes) -> dict[str, Any]:
+        if not data:
+            raise ValueError("skill file is empty")
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("skill file must be UTF-8 markdown") from exc
+        return self.store.import_skill(filename, content)
+
+    def delete_skill(self, name: str) -> bool:
+        return self.store.delete_skill(name)
+
+    def _skills_message(self) -> dict[str, str] | None:
+        text = self.store.skills_prompt_text()
+        return {"role": "user", "content": text} if text else None
+
     def interrupt_chat(self, *, session_id: str, run_id: str) -> dict[str, Any]:
         """Ask the runtime to stop the active IPC process for a chat."""
 
@@ -268,6 +289,9 @@ class OpsAgentService:
             {"role": item["role"], "content": item["content"]}
             for item in history
         ]
+        skills_message = self._skills_message()
+        if skills_message is not None:
+            messages.insert(0, skills_message)
         if available_secrets:
             messages.insert(
                 0,
@@ -543,6 +567,9 @@ class OpsAgentService:
                 {"role": item["role"], "content": item["content"]}
                 for item in history
             ]
+            skills_message = self._skills_message()
+            if skills_message is not None:
+                messages.insert(0, skills_message)
             if available_secrets:
                 messages.insert(
                     0,
@@ -744,10 +771,12 @@ class OpsAgentService:
         resume_session_id: str | None,
         redaction_values: dict[str, str],
     ) -> None:
+        skills_text = self.store.skills_prompt_text()
         prompt = _claude_code_conversation(
             history=history,
             latest_message=safe_message,
             resume_session_id=resume_session_id,
+            skills_text=skills_text,
         )
         attempted_resume = resume_session_id
         while True:
@@ -781,6 +810,7 @@ class OpsAgentService:
                     history=history,
                     latest_message=safe_message,
                     resume_session_id=None,
+                    skills_text=skills_text,
                 )
 
         if outcome["status"] == "interrupted":
@@ -951,10 +981,12 @@ class OpsAgentService:
         known_secret_values: dict[str, str],
     ) -> dict[str, Any]:
         resume_session_id = self.store.claude_session_id(session_id)
+        skills_text = self.store.skills_prompt_text()
         prompt = _claude_code_conversation(
             history=history,
             latest_message=safe_message,
             resume_session_id=resume_session_id,
+            skills_text=skills_text,
         )
         try:
             result = self.claude_runner.run(
@@ -976,6 +1008,7 @@ class OpsAgentService:
                         history=history,
                         latest_message=safe_message,
                         resume_session_id=None,
+                        skills_text=skills_text,
                     ),
                     api_key=config.api_key,
                     base_url=config.base_url,
@@ -1449,6 +1482,7 @@ def _claude_code_conversation(
     history: list[dict[str, Any]],
     latest_message: str,
     resume_session_id: str | None = None,
+    skills_text: str = "",
 ) -> str:
     """Build a Claude Code user prompt without replacing its native prompt.
 
@@ -1456,12 +1490,15 @@ def _claude_code_conversation(
     receives only the new operator message through ``--resume``. Legacy IPC
     sessions are bootstrapped once from durable history. IPC capabilities and
     lifecycle guidance continue to come from the mounted ``ipc`` MCP server.
+    Operator-imported skills are prefixed every turn so resume-mode sessions
+    always see the current set.
     """
 
+    prefix = skills_text.strip() + "\n\n" if skills_text and skills_text.strip() else ""
     if resume_session_id:
-        return latest_message
+        return prefix + latest_message
     if len(history) <= 1:
-        return latest_message
+        return prefix + latest_message
 
     transcript: list[str] = []
     for item in history[-40:]:
@@ -1471,7 +1508,8 @@ def _claude_code_conversation(
             content = content[:8_000] + "\n[message clipped]"
         transcript.append(f"{role}:\n{content}")
     return (
-        "Restore this IPC conversation from its durable transcript below. "
+        prefix
+        + "Restore this IPC conversation from its durable transcript below. "
         "The newest USER entry is the current operator request; respond to it once.\n\n"
         + "\n\n".join(transcript)
     )

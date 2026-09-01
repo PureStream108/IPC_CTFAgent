@@ -79,8 +79,6 @@ class LimitsConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Difficulty self-evaluation cadence for Members.
-    eval_interval_steps: int = Field(default=20, gt=0)
     # Scheduler tick + heartbeat cadence (seconds).
     interval: int = Field(default=2, gt=0)
     intent_timeout: int = Field(default=30, ge=5)
@@ -194,9 +192,16 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
 # so an existing config.yaml/limits.yaml does not fail extra="forbid" validation.
 _LEGACY_LIMIT_KEYS = ("total_memory_gb", "total_disk_gb", "per_agent_memory_gb")
 
+# Runtime keys removed with the member difficulty-feedback mechanism.
+_LEGACY_RUNTIME_KEYS = ("eval_interval_steps",)
+
 
 def _strip_legacy_limits(limits: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in limits.items() if k not in _LEGACY_LIMIT_KEYS}
+
+
+def _strip_legacy_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in runtime.items() if k not in _LEGACY_RUNTIME_KEYS}
 
 
 def load_config(config_dir: Path | None = None) -> AppConfig:
@@ -211,6 +216,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
 
     if isinstance(raw.get("limits"), dict):
         raw["limits"] = _strip_legacy_limits(raw["limits"])
+
+    if isinstance(raw.get("runtime"), dict):
+        raw["runtime"] = _strip_legacy_runtime(raw["runtime"])
 
     cfg = AppConfig.model_validate(raw)
     _apply_models_defaults(cfg, models)

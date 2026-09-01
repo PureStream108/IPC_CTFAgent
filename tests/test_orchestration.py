@@ -9,6 +9,7 @@ import pytest
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.diamond import Diamond
 from backend.core.lifecycle import Lifecycle, LifecycleError
+from backend.core.monitor import MonitorVerdict
 from backend.core.postprocess_store import (
     claim_next_job,
     complete_job,
@@ -102,11 +103,12 @@ def test_diamond_reinforcements_on_high_difficulty(state):
     d = Diamond(state.db, state.config, state.logger)
     d.assign_initial(pid)  # aventurine active
     with state.db.connect() as conn:
-        report = graph_store.create_report(
-            conn, pid, "aventurine", "stuck on auth", "high", "origin",
+        graph_store.create_report(
+            conn, pid, "aventurine", "stuck on auth", "low", "origin",
             ["recon done"], ["try jwt forge", "try sqli", "try ssti"], ["web"],
         )
-    assignments = d.decide_reinforcements(pid, report)
+    verdict = MonitorVerdict(difficulty="high", evidence=["distinct_exploit_classes:3"])
+    assignments = d.reinforce_from_monitor(pid, verdict, category="web")
     # high difficulty -> up to 3, but capped by idle members (3 remaining)
     assert 1 <= len(assignments) <= 3
     names = {a.member for a in assignments}
@@ -118,11 +120,12 @@ def test_diamond_reinforcement_dedupes_duplicate_directions(state):
     d = Diamond(state.db, state.config, state.logger)
     d.assign_initial(pid)
     with state.db.connect() as conn:
-        report = graph_store.create_report(
-            conn, pid, "aventurine", "stuck on login", "high", "origin",
+        graph_store.create_report(
+            conn, pid, "aventurine", "stuck on login", "low", "origin",
             ["recon done"], ["try sqli", "Try SQLi!!", "try sqli"], ["web"],
         )
-    assignments = d.decide_reinforcements(pid, report)
+    verdict = MonitorVerdict(difficulty="high", evidence=["credible_attack_surfaces:3"])
+    assignments = d.reinforce_from_monitor(pid, verdict, category="web")
     assert len(assignments) == 1
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
@@ -137,11 +140,8 @@ def test_diamond_no_reinforce_low_difficulty(state):
     pid = _make_project(state)
     d = Diamond(state.db, state.config, state.logger)
     d.assign_initial(pid)
-    with state.db.connect() as conn:
-        report = graph_store.create_report(
-            conn, pid, "aventurine", "easy", "low", "origin", [], [], ["web"]
-        )
-    assert d.decide_reinforcements(pid, report) == []
+    verdict = MonitorVerdict(difficulty="low", evidence=[])
+    assert d.reinforce_from_monitor(pid, verdict, category="web") == []
 
 
 def test_diamond_medium_difficulty_adds_one_helper(state):
@@ -149,13 +149,22 @@ def test_diamond_medium_difficulty_adds_one_helper(state):
     d = Diamond(state.db, state.config, state.logger)
     d.assign_initial(pid)
     with state.db.connect() as conn:
-        report = graph_store.create_report(
-            conn, pid, "aventurine", "branching web target", "medium", "origin",
+        graph_store.create_report(
+            conn, pid, "aventurine", "branching web target", "low", "origin",
             ["basic recon done"], ["check source leak", "check auth bypass"], ["web"],
         )
-    assignments = d.decide_reinforcements(pid, report)
+    verdict = MonitorVerdict(difficulty="medium", evidence=["distinct_exploit_classes:2"])
+    assignments = d.reinforce_from_monitor(pid, verdict, category="web")
     assert len(assignments) == 1
     assert assignments[0].member != "aventurine"
+
+
+def test_diamond_never_reinforces_crypto_projects(state):
+    pid = _make_project(state, "crypto")
+    d = Diamond(state.db, state.config, state.logger)
+    d.assign_initial(pid)
+    verdict = MonitorVerdict(difficulty="ex", evidence=["combined_stuckness"])
+    assert d.reinforce_from_monitor(pid, verdict, category="crypto") == []
 
 
 def test_full_solve_pipeline_to_solved(state):
@@ -269,34 +278,88 @@ def test_postprocess_worker_fencing_rejects_stale_completion(state):
     }
 
 
-def test_reinforcement_pipeline_with_scripts(state):
-    """A scripted member reports high difficulty -> Diamond adds members; initial script flags."""
+def test_monitor_escalation_reinforces_running_web_project(state):
+    """Tick-level monitor: escalating evidence adds members; crypto stays solo."""
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        edge_store.create_intent(conn, pid, ["origin"], "explore the app", "diamond", worker="aventurine")
+        graph_store.add_agent(conn, pid, "aventurine", "member", state="active", start_fact_id="origin")
+
+    orch = Orchestrator(state, max_workers=4)
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+
+    # baseline observation records the level without dispatching anyone
+    orch._monitor_project(pid)
+    assert launched == []
+    assert orch._monitor_levels[pid] in ("low", "medium")
+
+    # new evidence escalates the project -> monitor opens a reinforcement branch
+    with state.db.connect() as conn:
+        node_store.create_fact(conn, pid, "sqli auth bypass confirmed; jwt secret hardcoded in source")
+    orch._monitor_project(pid)
+    assert orch._monitor_levels[pid] in ("medium", "high", "ex")
+
+    # steady state: no further escalation, no duplicate reinforcement
+    orch._monitor_project(pid)
+    with state.db.connect() as conn:
+        detail = graph_store.project_detail(conn, pid)
+    members = {a.name for a in detail.agents if a.role == "member"}
+    assert "aventurine" in members
+    orch.shutdown()
+
+
+def test_crypto_project_never_gets_reinforced(state):
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "crypto")
-    # aventurine: report high difficulty then flag
-    scripts = {
-        "aventurine": [
-            {"action": "report", "progress": "hard rsa", "difficulty": "high",
-             "steps": ["got n,e,c"], "directions": ["lattice attack", "common modulus"], "knowledge": ["rsa"]},
-            {"action": "flag", "flag": "flag{rsa_pwned}", "description": "broke rsa"},
-        ],
-    }
-    orch = Orchestrator(state, max_workers=6, scripts=scripts)
-    state.orchestrator = orch
-    orch.start_project(pid)
-    orch.wait(pid, timeout=20)
-    for _ in range(40):
-        if Lifecycle(state.db).status(pid) == "solved":
-            break
-        time.sleep(0.1)
-    assert Lifecycle(state.db).status(pid) == "solved"
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        edge_store.create_intent(conn, pid, ["origin"], "attack the rsa service", "diamond", worker="aventurine")
+        graph_store.add_agent(conn, pid, "aventurine", "member", state="active", start_fact_id="origin")
+
+    orch = Orchestrator(state, max_workers=4)
+    orch._monitor_levels[pid] = "low"
+    orch._monitor_project(pid)
+    with state.db.connect() as conn:
+        node_store.create_fact(conn, pid, "rsa modulus reused across keys; lattice attack viable; oracle leaks parity")
+    orch._monitor_project(pid)
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
-    # reinforcements were assigned (more than just aventurine got an assign link)
-    assigned = {link.dst for link in detail.agent_links if link.kind == "assign"}
-    assert len(assigned) >= 2
-    assert detail.project.flag == "flag{rsa_pwned}"
+    members = {a.name for a in detail.agents if a.role == "member"}
+    assert members == {"aventurine"}
+    entries = state.logger.read_log("project", pid, None)
+    assert any(e["event"] == "diamond_no_reinforce" and e.get("reason") == "crypto_single_agent" for e in entries)
+    orch.shutdown()
+
+
+def test_crypto_project_dispatches_at_most_one_member(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "crypto")
+    with state.db.connect() as conn:
+        edge_store.create_intent(conn, pid, ["origin"], "first branch", "diamond")
+        edge_store.create_intent(conn, pid, ["origin"], "second branch", "diamond")
+
+    orch = Orchestrator(state, max_workers=2)
+    launched = []
+
+    def capture_launch(project_id, member_name, intent_id, category, is_initial):
+        launched.append((project_id, member_name, intent_id, category, is_initial))
+        return True
+
+    orch._launch_member = capture_launch
+    orch._dispatch_project(pid)
+    assert len(launched) == 1
+    assert launched[0][3] == "crypto"
     orch.shutdown()
 
 
@@ -748,4 +811,35 @@ def test_repeated_stalls_defer_original_intent_and_dispatch_alternative(state):
         and entry["reason"] == "repeated_stalls"
         for entry in entries
     )
+    orch.shutdown()
+
+
+def test_crypto_member_launched_with_unlimited_budget(state):
+    """Orchestrator hands crypto members a zero (unlimited) step budget."""
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "crypto")
+    with state.db.connect() as conn:
+        intent = edge_store.create_intent(conn, pid, ["origin"], "grind the lattice", "diamond")
+
+    state.config.runtime.sandbox_backend = "local"
+    state.limiter.max_concurrent_tasks = 1
+    assert state.limiter.acquire(pid) is True
+    state.pool.get(pid, "jade")
+
+    # 22 rounds already exceed the default per-task budget (min(60, 20) = 20).
+    script = [{"action": "bash", "command": f"echo round{i}"} for i in range(22)]
+    script.append({"action": "done", "reason": "crypto finished"})
+    orch = Orchestrator(state, max_workers=1, scripts={"jade": script})
+    launched = orch._launch_member(pid, "jade", intent.id, "crypto", False)
+
+    assert launched is True
+    with orch._lock:
+        futures = list(orch._futures.get(pid, []))
+    assert futures
+    result = futures[0].result(timeout=60)
+    assert result.status == "done"
+    assert result.steps == 23  # 22 scripted bash rounds + done, past any default cap
+    entries = state.logger.read_log("project", pid, None)
+    assert any(entry["event"] == "member_done" and entry["member"] == "jade" for entry in entries)
     orch.shutdown()

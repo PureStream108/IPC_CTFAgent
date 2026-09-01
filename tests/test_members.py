@@ -65,7 +65,7 @@ def deps(tmp_path):
     flags = []
     d = MemberDeps(
         db=db, logger=IPCLogger(tmp_path / "logs", enabled=True), sandbox=sb,
-        mcps=mcps, registry=reg, memory=mem, eval_interval=7, max_steps=20,
+        mcps=mcps, registry=reg, memory=mem, max_steps=20,
         on_report=lambda pid, r: reports.append(r),
         on_flag=lambda pid: flags.append(pid),
         expected_flag="flag{test}",
@@ -308,17 +308,15 @@ def test_member_dispatch_validation_error_is_non_retryable(deps):
     assert row["worker"] is None
 
 
-def test_member_reports_difficulty_on_eval_step(deps):
+def test_member_default_arc_concludes_without_difficulty_reports(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="aventurine", api_format="mock")
-    # use default (non-script) behaviour but force eval interval small
-    d.eval_interval = 3
     member = create_member(cfg, d)
-    member.solve(pid, iid, "web", is_initial=False)
-    # default arc concludes at step 3 which is also eval step -> report fires first
-    assert len(reports) >= 1
-    assert reports[0].difficulty in ("medium", "high")
+    result = member.solve(pid, iid, "web", is_initial=False)
+    # The default mock arc never reports; difficulty is the monitor's job now.
+    assert result.status == "concluded"
+    assert reports == []
 
 
 def test_scripted_member_tool_and_done(deps):
@@ -441,7 +439,7 @@ def test_scripted_member_category_tools_mcp(deps):
     assert any(entry["event"] == "tool_search" and entry.get("automatic") for entry in tool_entries)
     with db.connect() as conn:
         graph_store.create_hint(conn, pid, "check /flag before deeper recon", "human")
-    context = member._build_context(pid, iid, "web", 1, False, False)
+    context = member._build_context(pid, iid, "web", 1, False)
     assert "browser" in context["public_mcps"]
     assert "zap" not in context["public_mcps"]
     assert "zap" not in {tool["name"] for tool in context["exposed_tools"]}
@@ -476,7 +474,7 @@ def test_member_context_uses_sandbox_visible_attachment_paths(deps):
     )
     member = create_member(MemberConfig(name="jade", api_format="mock"), d)
 
-    context = member._build_context(pid, iid, "web", 1, False, False)
+    context = member._build_context(pid, iid, "web", 1, False)
 
     assert context["attachment_true"] is True
     assert context["attachments"] == [
@@ -499,7 +497,7 @@ def test_member_context_includes_challenge_description_and_external_id(deps):
         intent = edge_store.create_intent(conn, pid, ["origin"], "pwn the service", "diamond")
     member = create_member(MemberConfig(name="jade", api_format="mock"), d)
 
-    context = member._build_context(pid, intent.id, "pwn", 1, False, False)
+    context = member._build_context(pid, intent.id, "pwn", 1, False)
 
     assert context["external_id"] == "chal-42"
     assert context["challenge_description"] == origin
@@ -513,7 +511,7 @@ def test_member_context_defaults_without_external_id(deps):
     pid, iid = _project(db)
     member = create_member(MemberConfig(name="jade", api_format="mock"), d)
 
-    context = member._build_context(pid, iid, "web", 1, False, False)
+    context = member._build_context(pid, iid, "web", 1, False)
 
     assert context["external_id"] is None
     assert context["challenge_description"] == "origin"
@@ -535,69 +533,22 @@ def test_member_report_defaults_to_low_when_unspecified(deps):
     assert reports[0].difficulty == "low"
 
 
-def test_member_suppresses_same_difficulty_without_new_evidence(deps):
+def test_member_reports_are_never_suppressed(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 3
     script = [
-        {"action": "report", "progress": "branching but stable", "difficulty": "medium",
+        {"action": "report", "progress": "branching but stable",
          "steps": ["checked login"], "directions": ["continue auth"], "knowledge": ["web"]},
-        {"action": "report", "progress": "still branching", "difficulty": "medium",
+        {"action": "report", "progress": "still branching",
          "steps": ["checked login again"], "directions": ["continue auth"], "knowledge": ["web"]},
         {"action": "done", "reason": "reported"},
     ]
     cfg = MemberConfig(name="jade", api_format="mock")
     member = create_member(cfg, d, script=script)
     member.solve(pid, iid, "web", is_initial=False)
-    assert len(reports) == 1
-    assert reports[0].difficulty == "medium"
-
-
-def test_member_reports_same_difficulty_when_evidence_accumulates(deps):
-    db, d, reports, flags = deps
-    pid, iid = _project(db)
-    d.max_actions_per_task = 3
-    script = [
-        {"action": "report", "progress": "tried sqli", "difficulty": "medium",
-         "steps": ["union select failed"], "directions": ["collect a second signal"], "knowledge": ["sqli"]},
-        {"action": "report", "progress": "tried ssti too", "difficulty": "medium",
-         "steps": ["jinja probe failed"], "directions": ["collect another signal"], "knowledge": ["ssti"]},
-        {"action": "done", "reason": "reported"},
-    ]
-    cfg = MemberConfig(name="jade", api_format="mock")
-    member = create_member(cfg, d, script=script)
-    member.solve(pid, iid, "web", is_initial=False)
     assert len(reports) == 2
-    assert reports[1].difficulty == "medium"
-    assert "evidence:distinct_exploit_classes:2" in reports[1].knowledge
-
-
-def test_no_new_fact_accumulates_for_same_intent_across_members(deps):
-    db, d, reports, flags = deps
-    pid, iid = _project(db)
-    intent_tag = f"intent:{iid}"
-    with db.connect() as conn:
-        graph_store.create_report(
-            conn, pid, "pearl", "no fact", "low", "origin",
-            ["short task exhausted"], ["switch angle"], [intent_tag, "short_task_stall", "no_new_fact"],
-        )
-        graph_store.create_report(
-            conn, pid, "topaz", "still no fact", "low", "origin",
-            ["short task exhausted"], ["switch exploit class"], [intent_tag, "short_task_stall", "no_new_fact"],
-        )
-    d.max_actions_per_task = 2
-    script = [
-        {"action": "report", "progress": "third short task produced no new fact", "difficulty": "low",
-         "steps": ["short task exhausted"], "directions": ["try a different attack surface"],
-         "knowledge": ["short_task_stall", "no_new_fact"]},
-        {"action": "done", "reason": "reported"},
-    ]
-    cfg = MemberConfig(name="jade", api_format="mock")
-    member = create_member(cfg, d, script=script)
-    member.solve(pid, iid, "web", is_initial=False)
-    assert len(reports) == 1
-    assert reports[0].difficulty == "high"
-    assert "evidence:no_new_fact_short_tasks:3" in reports[0].knowledge
+    assert all(r.difficulty == "low" for r in reports)
 
 
 def test_member_duplicate_intent_does_not_count_as_progress(deps):
@@ -618,7 +569,7 @@ def test_member_duplicate_intent_does_not_count_as_progress(deps):
     assert [i.id for i in detail.intents] == [iid]
 
 
-def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps):
+def test_member_report_stores_neutral_difficulty(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     with db.connect() as conn:
@@ -627,15 +578,12 @@ def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps)
             pid,
             "Flask source code leak shows app.py and POST /check exec(data) on port 9000.",
         )
-        edge_store.create_intent(conn, pid, ["origin"], "try session cookie forgery on the web app", "diamond")
-        edge_store.create_intent(conn, pid, ["origin"], "attempt file read of the local flag path", "diamond")
-        edge_store.create_intent(conn, pid, ["origin"], "probe extra api routes on port 9000", "diamond")
     d.max_actions_per_task = 2
     script = [
         {
             "action": "report",
             "progress": "source disclosure confirms a small Flask pyjail with restricted builtins",
-            "difficulty": "low",
+            "difficulty": "ex",
             "steps": ["read leaked app.py source", "identified the /check sink"],
             "directions": ["try cookie ideas later", "try file read later"],
             "knowledge": ["web"],
@@ -646,7 +594,8 @@ def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps)
     member = create_member(cfg, d, script=script)
     member.solve(pid, iid, "web", is_initial=False)
     assert len(reports) == 1
-    assert reports[0].difficulty in ("low", "medium")
+    # Member-supplied difficulty is ignored; grading belongs to the monitor.
+    assert reports[0].difficulty == "low"
 
 
 def test_member_creates_at_most_one_new_intent_per_task(deps):
@@ -686,3 +635,19 @@ def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
     created = next(i for i in detail.intents if i.creator == "jade")
     assert created.from_ == [fact.id]
     assert any(link.src == "jade" and link.dst == f"intent:{created.id}" for link in detail.agent_links)
+
+
+def test_crypto_member_runs_unlimited_steps(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    # The crypto policy: a non-positive budget means no step limit.
+    d.max_steps = 0
+    d.max_actions_per_task = 0
+    script = [{"action": "bash", "command": f"echo round{i}"} for i in range(25)]
+    script.append({"action": "done", "reason": "crypto finished"})
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    result = member.solve(pid, iid, "crypto", is_initial=False)
+
+    assert result.status == "done"
+    assert result.steps == 26

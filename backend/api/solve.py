@@ -110,7 +110,11 @@ def resume_solving(project_id: str, state: AppState = Depends(get_state)):
 
 @router.post("/projects/{project_id}/reports", response_model=Report, status_code=201)
 def submit_report(project_id: str, body: ReportRequest, state: AppState = Depends(get_state)):
-    """A Member submits a difficulty report to Diamond (Seed.md 角色联动)."""
+    """A Member shares a progress report with Diamond and its siblings.
+
+    Difficulty is graded by Diamond's global monitor, not by this endpoint;
+    the stored difficulty field is inert.
+    """
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
             raise HTTPException(404, "Project not found")
@@ -121,10 +125,10 @@ def submit_report(project_id: str, body: ReportRequest, state: AppState = Depend
         # draw the report line Member -> Diamond
         graph_store.add_link(conn, project_id, body.member, "diamond", "report")
     state.logger.project(
-        "difficulty_report", project_id, member=body.member,
-        difficulty=body.difficulty, directions=body.directions,
+        "progress_report", project_id, member=body.member,
+        directions=body.directions,
     )
-    # Let Diamond react (assign more members) if orchestrator is live.
+    # Broadcast the findings to running siblings if the orchestrator is live.
     if state.orchestrator is not None:
         state.orchestrator.handle_report(project_id, report)
     return report

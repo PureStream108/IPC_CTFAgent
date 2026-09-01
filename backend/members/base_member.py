@@ -10,13 +10,6 @@ from typing import Any
 from collections.abc import Callable
 
 from backend.blackboard import edge_store, graph_store, node_store
-from backend.core.difficulty import (
-    DIFFICULTY_RANK,
-    detect_attack_surfaces,
-    detect_exploit_classes,
-    max_difficulty,
-    normalize_difficulty,
-)
 from backend.core.logging_util import IPCLogger
 from backend.core.ipc import FlagConflictError, accept_verified_flag
 from backend.core.postprocess_store import enqueue_postprocess
@@ -52,7 +45,7 @@ class MemberDeps:
     registry: ToolRegistry
     memory: MemoryStore
     container_mcps: dict[str, MCPRegistryTarget] | None = None
-    eval_interval: int = 7
+    # A non-positive budget means unlimited steps (crypto policy).
     max_steps: int = 60
     max_actions_per_task: int = 4
     on_report: Callable[[str, Any], None] | None = None   # (project_id, Report)
@@ -175,14 +168,14 @@ class BaseMember:
         self._seed_tool_inventory(project_id)
         self._prime_tool_context(project_id, intent_id, category)
         step = 0
-        task_budget = max(1, min(d.max_steps, d.max_actions_per_task))
+        unlimited = d.max_steps <= 0 or d.max_actions_per_task <= 0
+        task_budget = None if unlimited else max(1, min(d.max_steps, d.max_actions_per_task))
         graph_actions: list[str] = []
         branch_intents = 0
         invalid_actions = 0
-        while step < task_budget and not self._stop.is_set():
+        while not self._stop.is_set() and (task_budget is None or step < task_budget):
             step += 1
-            evaluate_now = step % d.eval_interval == 0
-            context = self._build_context(project_id, intent_id, category, step, is_initial, evaluate_now)
+            context = self._build_context(project_id, intent_id, category, step, is_initial)
             try:
                 action = self.adapter.decide(context)
             except DecisionOutputError as exc:
@@ -296,7 +289,6 @@ class BaseMember:
                     intent_id,
                     category,
                     step,
-                    difficulty_hint="medium",
                     extra_knowledge=["action_signature_repeat"],
                 )
                 self._release(project_id, intent_id)
@@ -364,7 +356,6 @@ class BaseMember:
                         intent_id,
                         category,
                         step,
-                        difficulty_hint="medium",
                         extra_knowledge=["invalid_action_contract", *invalid_knowledge],
                     )
                     self._release(project_id, intent_id)
@@ -777,6 +768,12 @@ class BaseMember:
         return None
 
     def _submit_report(self, project_id, intent_id, action: MemberAction):
+        """Persist a progress report for siblings and the monitor.
+
+        Members no longer assess difficulty — that is Diamond's global-monitor
+        job — so the stored difficulty column stays at its neutral default and
+        no report is ever suppressed.
+        """
         d = self.deps
         a = dict(action.args)
         with d.db.connect() as conn:
@@ -792,42 +789,16 @@ class BaseMember:
             intent_tag = f"intent:{intent_id}"
             if intent_tag not in knowledge:
                 knowledge.append(intent_tag)
-            difficulty, evidence = self._calibrate_difficulty(
-                conn,
-                project_id,
-                intent_id,
-                node_id,
-                progress,
-                self._string_arg(a.get("difficulty", "low")) or "low",
-                steps,
-                directions,
-                knowledge,
-            )
-            for item in evidence:
-                tag = f"evidence:{item}"
-                if tag not in knowledge:
-                    knowledge.append(tag)
-            if self._should_suppress_report(conn, project_id, intent_id, node_id, difficulty, evidence):
-                d.logger.project(
-                    "difficulty_report_suppressed",
-                    project_id,
-                    member=self.name,
-                    intent=intent_id,
-                    difficulty=difficulty,
-                    reason="unchanged_difficulty",
-                )
-                return None
             report = graph_store.create_report(
-                conn, project_id, self.name, progress, difficulty,
+                conn, project_id, self.name, progress, "low",
                 node_id, steps, directions, knowledge,
             )
             graph_store.add_link(conn, project_id, self.name, "diamond", "report")
         d.logger.project(
-            "difficulty_report",
+            "progress_report",
             project_id,
             member=self.name,
-            difficulty=report.difficulty,
-            evidence=evidence,
+            intent=intent_id,
         )
         if d.on_report is not None:
             d.on_report(project_id, report)
@@ -840,114 +811,6 @@ class BaseMember:
             return [str(item) for item in value if str(item).strip()]
         text = str(value).strip()
         return [text] if text else []
-
-    def _calibrate_difficulty(
-        self,
-        conn,
-        project_id: str,
-        intent_id: str,
-        node_id: str | None,
-        progress: str,
-        requested: str,
-        steps: list[str],
-        directions: list[str],
-        knowledge: list[str],
-    ) -> tuple[str, list[str]]:
-        level = normalize_difficulty(requested)
-        evidence: list[str] = []
-        reports = graph_store.list_reports(conn, project_id)
-        intent_tag = f"intent:{intent_id}"
-        scoped = [
-            report for report in reports
-            if intent_tag in report.knowledge or (node_id is not None and report.node_id == node_id)
-        ]
-
-        if "short_task_stall" in knowledge or "no_new_fact" in knowledge:
-            prior_no_fact = sum(
-                1 for report in scoped
-                if "short_task_stall" in report.knowledge or "no_new_fact" in report.knowledge
-            )
-            no_fact_count = prior_no_fact + 1
-            if no_fact_count >= 3:
-                level = max_difficulty(level, "high")
-                evidence.append(f"no_new_fact_short_tasks:{no_fact_count}")
-            elif no_fact_count >= 2:
-                level = max_difficulty(level, "medium")
-                evidence.append(f"no_new_fact_short_tasks:{no_fact_count}")
-
-        if "action_signature_repeat" in knowledge:
-            prior_repeats = sum(1 for report in scoped if "action_signature_repeat" in report.knowledge)
-            level = max_difficulty(level, "high" if prior_repeats else "medium")
-            evidence.append("action_signature_repeat")
-
-        # Calibrate from observed evidence, not speculative next-step phrasing.
-        texts = [progress, *steps, *knowledge]
-        for report in scoped[-5:]:
-            texts.extend([report.progress, *report.steps, *report.knowledge])
-        exploit_classes = detect_exploit_classes(texts)
-        if len(exploit_classes) >= 4:
-            level = max_difficulty(level, "ex")
-            evidence.append("distinct_exploit_classes:4+")
-        elif len(exploit_classes) >= 3:
-            level = max_difficulty(level, "high")
-            evidence.append("distinct_exploit_classes:3")
-        elif len(exploit_classes) >= 2:
-            level = max_difficulty(level, "medium")
-            evidence.append("distinct_exploit_classes:2")
-
-        surface_texts = list(texts)
-        surface_texts.extend(f.description for f in node_store.list_facts(conn, project_id))
-        surface_texts.extend(h.content for h in graph_store.list_hints(conn, project_id))
-        surface_texts.extend(a.filename for a in graph_store.list_attachments(conn, project_id))
-        surfaces = detect_attack_surfaces(surface_texts)
-        if len(surfaces) >= 4:
-            level = max_difficulty(level, "ex")
-            evidence.append("credible_attack_surfaces:4+")
-        elif len(surfaces) >= 3:
-            level = max_difficulty(level, "high")
-            evidence.append("credible_attack_surfaces:3")
-        elif len(surfaces) >= 2:
-            level = max_difficulty(level, "medium")
-            evidence.append("credible_attack_surfaces:2")
-
-        if (
-            DIFFICULTY_RANK[level] >= DIFFICULTY_RANK["high"]
-            and len(exploit_classes) >= 2
-            and len(surfaces) >= 2
-            and any(item.startswith("no_new_fact_short_tasks:") for item in evidence)
-        ):
-            level = max_difficulty(level, "ex")
-            evidence.append("combined_stuckness")
-
-        return level, evidence
-
-    def _should_suppress_report(
-        self,
-        conn,
-        project_id: str,
-        intent_id: str,
-        node_id: str | None,
-        difficulty: str,
-        evidence: list[str],
-    ) -> bool:
-        intent_tag = f"intent:{intent_id}"
-        reports = [
-            report for report in graph_store.list_reports(conn, project_id)
-            if report.member == self.name
-            and (intent_tag in report.knowledge or (node_id is not None and report.node_id == node_id))
-        ]
-        if not reports:
-            return False
-        latest = reports[-1]
-        if normalize_difficulty(latest.difficulty) != normalize_difficulty(difficulty):
-            return False
-        latest_evidence = {
-            item.removeprefix("evidence:")
-            for item in latest.knowledge
-            if item.startswith("evidence:")
-        }
-        new_evidence = [item for item in evidence if item not in latest_evidence]
-        return not new_evidence
 
     def _declare_intent(self, project_id, current_intent_id, action: MemberAction):
         a = action.args
@@ -1014,7 +877,6 @@ class BaseMember:
         category,
         step,
         *,
-        difficulty_hint: str = "low",
         extra_knowledge: list[str] | None = None,
     ) -> None:
         recent = self.observations[-4:]
@@ -1027,7 +889,6 @@ class BaseMember:
             thought="short task budget exhausted; sharing observations for follow-up",
             args={
                 "progress": progress[:1800],
-                "difficulty": difficulty_hint,
                 "steps": recent or [f"Used {step} short-task actions on {category} intent."],
                 "directions": [
                     "Try a different concrete approach for this intent.",
@@ -1167,8 +1028,9 @@ class BaseMember:
             )
         )
 
-    def _build_context(self, project_id, intent_id, category, step, is_initial, evaluate_now) -> dict:
+    def _build_context(self, project_id, intent_id, category, step, is_initial) -> dict:
         d = self.deps
+        unlimited = d.max_steps <= 0 or d.max_actions_per_task <= 0
         with d.db.connect() as conn:
             detail = graph_store.project_detail(conn, project_id)
         if detail is None:
@@ -1186,7 +1048,6 @@ class BaseMember:
         sibling_insights = [
             {
                 "member": r.member,
-                "difficulty": r.difficulty,
                 "progress": r.progress,
                 "directions": r.directions,
                 "knowledge": r.knowledge,
@@ -1198,7 +1059,6 @@ class BaseMember:
         previous_attempts = [
             {
                 "member": r.member,
-                "difficulty": r.difficulty,
                 "progress": r.progress,
                 "directions": r.directions,
             }
@@ -1244,23 +1104,28 @@ class BaseMember:
                 )
         except Exception:
             pass
+        if unlimited:
+            task_contract = (
+                "This crypto task has no step limit. Keep working until you can flag, conclude a "
+                "confirmed fact, or declare a concrete follow-up intent. Do not stop early just "
+                "because progress is slow, and do not repeat the same action signature."
+            )
+        else:
+            task_contract = (
+                "This is a short exploration task. Produce one clear result quickly: "
+                "flag, conclude, a useful new intent, or a progress report with concrete next directions. "
+                "Do not repeat previous attempts."
+            )
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
             "category": category,
             "step": step,
-            "max_steps": min(d.max_steps, d.max_actions_per_task),
-            "short_task": True,
-            "task_contract": (
-                "This is a short exploration task. Produce one clear result quickly: "
-                "flag, conclude, a useful new intent, or a difficulty report with concrete next directions. "
-                "Evaluate difficulty every eval_interval steps, but report only when the assessed level changes "
-                "or new evidence justifies escalation. Do not repeat previous attempts."
-            ),
+            "max_steps": "unlimited" if unlimited else min(d.max_steps, d.max_actions_per_task),
+            "short_task": not unlimited,
+            "task_contract": task_contract,
             "sandbox_backend": getattr(d.sandbox, "__class__", type(d.sandbox)).__name__,
             "runtime_notes": runtime_notes,
-            "evaluate_now": evaluate_now,
-            "eval_interval": d.eval_interval,
             "is_initial": is_initial,
             "expected_flag": d.expected_flag,
             "challenge_description": next(

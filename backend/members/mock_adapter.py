@@ -10,7 +10,6 @@ class MockAdapter(BaseAdapter):
     def __init__(self, config: LLMConfig, name: str = "agent", script: list[dict] | None = None):
         super().__init__(config, name=name)
         self._script = list(script) if script else None
-        self._reported = False
 
     def health(self) -> dict:
         return {"ok": True, "status": 200, "format": "mock"}
@@ -44,22 +43,6 @@ class MockAdapter(BaseAdapter):
         intent_desc = context.get("assigned_intent", {}).get("description", "explore")
         category = context.get("category", "misc")
         is_initial = context.get("is_initial", False)
-        evaluate_now = context.get("evaluate_now", False)
-
-        if evaluate_now and not self._reported:
-            self._reported = True
-            difficulty = "high" if is_initial else "medium"
-            return MemberAction(
-                kind="report",
-                thought=f"step {step}: evaluating difficulty of '{intent_desc}'",
-                args={
-                    "progress": f"explored '{intent_desc}', {step} steps in",
-                    "difficulty": difficulty,
-                    "steps": [f"recon on {category} target", f"analysed '{intent_desc}'"],
-                    "directions": [f"investigate alternate {category} vector", "check component CVEs"],
-                    "knowledge": [category, "recon"],
-                },
-            )
 
         if step == 1:
             return MemberAction(kind="bash", thought="initial recon",

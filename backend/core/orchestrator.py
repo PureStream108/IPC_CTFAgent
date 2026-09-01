@@ -18,6 +18,7 @@ from backend.core.diamond import Diamond
 from backend.core.ipc import accept_verified_flag, verify_flag
 from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.memory_writer import write_memory
+from backend.core.monitor import assess_project, escalated
 from backend.core.postprocess_store import (
     claim_next_job,
     complete_job,
@@ -94,6 +95,7 @@ class Orchestrator:
         self._member_stall_counts: dict[tuple[str, str], int] = {}
         self._project_leases: dict[str, str] = {}
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
+        self._monitor_levels: dict[str, str] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
@@ -133,6 +135,13 @@ class Orchestrator:
         with self.state.db.connect() as conn:
             row = graph_store.get_project_row(conn, project_id)
             return row["category"] if row else "misc"
+
+    def _max_running_for(self, category: str) -> int:
+        # Crypto challenges are deep single-threaded problems: one agent with
+        # an unlimited step budget, never a swarm.
+        if category == "crypto":
+            return 1
+        return self.state.config.runtime.max_members_per_report
 
     # ---- start solving ----
 
@@ -634,29 +643,60 @@ class Orchestrator:
     # ---- reinforcements ----
 
     def handle_report(self, project_id: str, report) -> None:
+        # Reports are now only a knowledge-sharing channel (bump to siblings).
+        # Reinforcement decisions belong to the global monitor in ``_tick``.
         if self.lifecycle.status(project_id) != "running":
             return
         self._broadcast_bump(project_id, report)
+
+    def _monitor_project(self, project_id: str) -> None:
+        """Diamond's global watch: grade difficulty from blackboard evidence.
+
+        Runs every scheduler tick for each running project.  Only a difficulty
+        *escalation* triggers reinforcement; the first observation records the
+        baseline, and de-escalation never kills running members.
+        """
+        with self.state.db.connect() as conn:
+            detail = graph_store.project_detail(conn, project_id)
+        if detail is None:
+            return
+        with self._lock:
+            struggle = sum(
+                count
+                for (pid, _), count in {**self._member_stall_counts, **self._member_failure_counts}.items()
+                if pid == project_id
+            )
+        verdict = assess_project(detail, struggle_count=struggle)
+        previous = self._monitor_levels.get(project_id)
+        self._monitor_levels[project_id] = verdict.difficulty
+        if previous != verdict.difficulty:
+            self.state.logger.project(
+                "diamond_monitor_assess",
+                project_id,
+                previous=previous,
+                difficulty=verdict.difficulty,
+                evidence=verdict.evidence,
+            )
+        if not escalated(previous, verdict.difficulty):
+            return
+        category = detail.project.category
         available_slots = max(
             0,
-            self.state.config.runtime.max_members_per_report - self._project_running_future_count(project_id),
+            self._max_running_for(category) - self._project_running_future_count(project_id),
         )
-        assignments = self.diamond.decide_reinforcements(
+        self.state.logger.project(
+            "diamond_monitor_escalate",
             project_id,
-            report,
+            difficulty=verdict.difficulty,
+            evidence=verdict.evidence,
             available_slots=available_slots,
         )
-        category = self._category(project_id)
-        for a in assignments:
-            try:
-                self._launch_member(project_id, a.member, a.intent_id, category, a.is_initial)
-            except SandboxStartupError as exc:
-                self._mark_project_startup_failure(
-                    project_id,
-                    exc,
-                    event="project_sandbox_start_failed",
-                )
-                return
+        self.diamond.reinforce_from_monitor(
+            project_id,
+            verdict,
+            category=category,
+            available_slots=available_slots,
+        )
 
     def _broadcast_bump(self, project_id: str, report) -> None:
         insights = self._format_report_bump(report)
@@ -674,12 +714,11 @@ class Orchestrator:
                 project_id,
                 source=report.member,
                 targets=bumped,
-                difficulty=report.difficulty,
             )
 
     def _format_report_bump(self, report) -> str:
         parts = [
-            f"{report.member} reports difficulty={report.difficulty}.",
+            f"{report.member} shared a progress report.",
             f"Progress: {report.progress}",
         ]
         if report.steps:
@@ -748,6 +787,10 @@ class Orchestrator:
         member = None
         try:
             sandbox = self.resources.sandbox_for(project_id, member_name)
+            # Crypto members run without a step budget: 0 means unlimited.
+            # Loop-break / invalid-action guards and the intent lease still
+            # apply, so a spinning model is still stopped deterministically.
+            unlimited = category == "crypto"
             deps = MemberDeps(
                 db=self.state.db,
                 logger=self.state.logger,
@@ -756,9 +799,10 @@ class Orchestrator:
                 registry=self.state.registry,
                 memory=self.state.memory,
                 container_mcps=self._container_mcps(project_id, member_name),
-                eval_interval=self.state.config.runtime.eval_interval_steps,
-                max_steps=self.state.config.runtime.max_member_steps,
-                max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
+                max_steps=0 if unlimited else self.state.config.runtime.max_member_steps,
+                max_actions_per_task=(
+                    0 if unlimited else self.state.config.runtime.max_member_actions_per_task
+                ),
                 on_report=self.handle_report,
                 on_flag=self.on_flag_found,
                 lease_owner=lease_owner,
@@ -1265,6 +1309,7 @@ class Orchestrator:
             # second Member until that startup worker reaches ``ready``.
             if self._startup_in_progress(summary.id):
                 continue
+            self._monitor_project(summary.id)
             if not self.resources.acquire_task(summary.id):
                 self._queue_project(summary.id)
                 continue
@@ -1342,10 +1387,11 @@ class Orchestrator:
                 self._startup_futures.pop(project_id, None)
 
     def _dispatch_project(self, project_id: str) -> None:
+        category = self._category(project_id)
         with self._lock:
             project_tasks = {k: f for k, f in self._task_index.items() if k[0] == project_id and not f.done()}
             active_members = set(self._members.get(project_id, {}).keys())
-        max_running = self.state.config.runtime.max_members_per_report
+        max_running = self._max_running_for(category)
         available_slots = max_running - len(project_tasks)
         if available_slots <= 0:
             return
@@ -1355,7 +1401,6 @@ class Orchestrator:
             return
         running = {intent_id for (pid, intent_id), fut in project_tasks.items() if pid == project_id and not fut.done()}
         open_intents = [i for i in detail.intents if i.to is None]
-        category = detail.project.category
         all_claimable = [i for i in open_intents if i.id not in running]
         claimable = [
             intent for intent in all_claimable
@@ -1628,6 +1673,9 @@ class Orchestrator:
         for project_id in list(self._reason_checkpoints):
             if project_id not in running_ids:
                 self._reason_checkpoints.pop(project_id, None)
+        for project_id in list(self._monitor_levels):
+            if project_id not in running_ids:
+                self._monitor_levels.pop(project_id, None)
         for summary in summaries:
             if summary.status != "running" or summary.id in self._reason_checkpoints:
                 continue

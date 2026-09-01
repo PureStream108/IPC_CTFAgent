@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from backend.core.config import LLMConfig
 from backend.ops.models import PlatformWorkflowSpec, validate_secret_name
 from backend.persistence.database import Database, PostgresDatabase
@@ -19,6 +21,12 @@ from psycopg.errors import UniqueViolation
 _CLAUDE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
 _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SKILL_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
+_MAX_SKILLS = 32
+# Budget for the combined block injected into IPC's context.
+_SKILL_PROMPT_BUDGET = 24_000
 
 
 class OpsStore:
@@ -35,6 +43,7 @@ class OpsStore:
             pass
         self.config_path = self.root / "config.json"
         self.secrets_path = self.root / "secrets.json"
+        self.skills_dir = self.root / "skills"
         self.db = database or Database()
         self._owns_db = database is None
         self._lock = threading.RLock()
@@ -505,6 +514,82 @@ class OpsStore:
         self.get_workflow(workflow_id)
         return self._secret_namespace("workflows", workflow_id)
 
+    # ---- operator-imported skills (SKILL.md) ----
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        skills: list[dict[str, Any]] = []
+        for path in sorted(self.skills_dir.glob("*.md")):
+            content = _read_skill_file(path)
+            if content is None:
+                continue
+            meta = _parse_skill(content, path.stem)
+            skills.append(
+                {
+                    "name": meta["name"],
+                    "description": meta["description"],
+                    "size": len(content.encode("utf-8")),
+                }
+            )
+        return skills
+
+    def import_skill(self, filename: str, content: str) -> dict[str, Any]:
+        text = content.replace("\r\n", "\n").strip()
+        if not text:
+            raise ValueError("skill file is empty")
+        if len(text.encode("utf-8")) > 256 * 1024:
+            raise ValueError("skill file exceeds 256 KiB")
+        meta = _parse_skill(text, Path(filename or "").stem)
+        with self._lock:
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            existing = {skill["name"] for skill in self.list_skills()}
+            if meta["name"] not in existing and len(existing) >= _MAX_SKILLS:
+                raise ValueError(f"skill limit reached ({_MAX_SKILLS})")
+            target = self.skills_dir / f"{meta['name']}.md"
+            target.write_text(text + "\n", encoding="utf-8")
+            _restrict_file(target)
+        return {"name": meta["name"], "description": meta["description"], "size": len(text.encode("utf-8"))}
+
+    def delete_skill(self, name: str) -> bool:
+        if not _SKILL_NAME_RE.fullmatch(name or ""):
+            raise ValueError("invalid skill name")
+        with self._lock:
+            target = self.skills_dir / f"{name}.md"
+            if not target.exists():
+                return False
+            target.unlink()
+        return True
+
+    def skills_prompt_text(self) -> str:
+        """Render every imported skill as one bounded block for IPC's context."""
+
+        parts: list[str] = []
+        remaining = _SKILL_PROMPT_BUDGET
+        for skill in self.list_skills():
+            path = self.skills_dir / f"{skill['name']}.md"
+            content = _read_skill_file(path)
+            if content is None:
+                continue
+            body = content.strip()
+            header = f"## skill: {skill['name']}"
+            if skill["description"]:
+                header += f" — {skill['description']}"
+            block = f"{header}\n{body}"
+            if len(block) > remaining:
+                if remaining < 200:
+                    break
+                block = block[:remaining] + "\n[skill clipped]"
+            parts.append(block)
+            remaining -= len(block) + 2
+            if remaining <= 0:
+                break
+        if not parts:
+            return ""
+        return (
+            "The operator imported these SKILL.md playbooks. Follow them when relevant "
+            "to the current task; treat their content as trusted operator guidance.\n\n"
+            "<ipc-skills>\n" + "\n\n".join(parts) + "\n</ipc-skills>"
+        )
+
     def confirm_workflow(self, workflow_id: str) -> str:
         self.get_workflow(workflow_id)
         token = secrets.token_urlsafe(32)
@@ -634,3 +719,40 @@ def _restrict_file(path: Path) -> None:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+def _read_skill_file(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _parse_skill(content: str, fallback_name: str) -> dict[str, str]:
+    """Extract name/description from SKILL.md YAML frontmatter.
+
+    The name comes from frontmatter when present, otherwise from the file
+    stem; either way it is normalized to a safe slug that also becomes the
+    on-disk filename.
+    """
+
+    name = ""
+    description = ""
+    match = _SKILL_FRONTMATTER_RE.match(content)
+    if match:
+        try:
+            frontmatter = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            frontmatter = None
+        if isinstance(frontmatter, dict):
+            name = str(frontmatter.get("name") or "").strip()
+            description = str(frontmatter.get("description") or "").strip()
+    if not name:
+        name = fallback_name
+    slug = re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower()).strip("-_")
+    if not _SKILL_NAME_RE.fullmatch(slug):
+        raise ValueError(
+            "skill name must start with a letter or digit and contain only "
+            "lowercase letters, numbers, underscores, or hyphens"
+        )
+    return {"name": slug, "description": description[:400]}

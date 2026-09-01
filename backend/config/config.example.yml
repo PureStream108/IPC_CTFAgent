@@ -36,7 +36,8 @@ members:
   model: deepseek-v4-flash
   name: topaz
 runtime:
-  eval_interval_steps: 20
+  # Difficulty is graded by Diamond's global monitor; members never self-report it.
+  # Crypto projects always run as a single agent with an unlimited step budget.
   interval: 2
   intent_timeout: 30
   reason_timeout: 30

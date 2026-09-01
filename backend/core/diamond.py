@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.config import AppConfig, MemberConfig
-from backend.core.difficulty import extra_members_for_difficulty, normalize_difficulty
+from backend.core.difficulty import extra_members_for_difficulty
 from backend.core.logging_util import IPCLogger
+from backend.core.monitor import MonitorVerdict
 from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, generate_wp_content, write_wp
 from backend.members.adapters import make_adapter
 
@@ -57,12 +58,28 @@ class Diamond:
         self.logger.project("diamond_assign_initial", project_id, member=initial.name, intent=intent.id)
         return Assignment(member=initial.name, intent_id=intent.id, is_initial=True)
 
-    # ---- reinforcements on report ----
+    # ---- monitor-driven reinforcements ----
 
-    def decide_reinforcements(self, project_id: str, report, available_slots: int | None = None) -> list[Assignment]:
-        """On a difficulty report, add 1..N idle members on fresh directions."""
-        difficulty = normalize_difficulty(report.difficulty)
-        want = extra_members_for_difficulty(difficulty)
+    def reinforce_from_monitor(
+        self,
+        project_id: str,
+        verdict: MonitorVerdict,
+        *,
+        category: str,
+        available_slots: int | None = None,
+    ) -> list[Assignment]:
+        """Add 1..N idle members on fresh directions after a monitor escalation.
+
+        Difficulty comes from the deterministic global monitor (blackboard
+        evidence), never from member self-reports.  Crypto projects are
+        single-agent by design and are never reinforced.
+        """
+        if category == "crypto":
+            self.logger.project(
+                "diamond_no_reinforce", project_id, reason="crypto_single_agent"
+            )
+            return []
+        want = extra_members_for_difficulty(verdict.difficulty)
         if want <= 0:
             self.logger.project("diamond_no_reinforce", project_id, reason="low difficulty")
             return []
@@ -76,10 +93,22 @@ class Diamond:
                 self.logger.project("diamond_no_reinforce", project_id, reason="project_member_cap")
                 return []
 
-        directions = self._dedupe_directions(
-            report.directions or [f"alternate approach to: {report.progress}"]
-        )
-        start_node = report.node_id or "origin"
+        with self.db.connect() as conn:
+            detail = graph_store.project_detail(conn, project_id)
+        if detail is None:
+            return []
+        # Reuse the directions members already shared when available; otherwise
+        # branch from the latest confirmed fact.
+        directions: list[str] = []
+        for report in reversed(detail.reports):
+            if report.directions:
+                directions = list(report.directions)
+                break
+        facts = [fact for fact in detail.facts if fact.id not in ("origin", "goal")]
+        start_node = facts[-1].id if facts else "origin"
+        if not directions:
+            directions = [f"monitor escalation: try a different concrete approach from {start_node}"]
+        directions = self._dedupe_directions(directions)
 
         assignments: list[Assignment] = []
         with self.db.connect() as conn:
@@ -106,7 +135,8 @@ class Diamond:
             return []
         self.logger.project(
             "diamond_reinforce", project_id, count=len(assignments),
-            members=[a.member for a in assignments], difficulty=difficulty,
+            members=[a.member for a in assignments], difficulty=verdict.difficulty,
+            evidence=verdict.evidence,
         )
         return assignments
 
