@@ -1,9 +1,12 @@
 <h1 align="center">IPC CTF Agent</h1>
 
-<img src="frontend/ipc.png" alt="IPC CTF Agent logo" width="160" />
-
 <div align="center">
 
+<img src="frontend/ipc.png" alt="IPC CTF Agent logo" width="160" />
+
+</div>
+
+<div align="center">
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

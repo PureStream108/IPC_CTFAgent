@@ -15,12 +15,7 @@ Wp/
 docs/
 exports/
 examples/
-log.txt
-change.md
-change2.md
-chane3.md
-README_old.md
-XBEN-logs-20260802T065039Z/
+
 
 # C extensions
 *.so
