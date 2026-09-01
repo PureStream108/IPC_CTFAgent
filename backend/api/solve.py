@@ -12,7 +12,7 @@ from backend.blackboard.models import (
     ReportRequest,
 )
 from backend.core.state import AppState
-from backend.core.ipc import FlagConflictError, accept_verified_flag
+from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 
 router = APIRouter(tags=["solve"])
@@ -148,13 +148,14 @@ def complete_project(project_id: str, body: CompleteRequest, state: AppState = D
             intent = edge_store.complete_goal_intent(
                 conn, project_id, body.from_, body.description, body.worker, body.worker
             )
-            accept_verified_flag(
+            candidate = submit_flag_candidate(
                 conn,
                 project_id,
                 body.flag,
                 source=f"api:{body.worker}",
             )
-            enqueue_postprocess(conn, project_id)
+            if candidate["mode"] == "verified":
+                enqueue_postprocess(conn, project_id)
             graph_store.add_link(conn, project_id, f"fact:{body.from_[0]}", "flag", "flag")
             intent_model = edge_store.intent_to_model(
                 conn, edge_store.get_intent(conn, project_id, intent.id), project_id

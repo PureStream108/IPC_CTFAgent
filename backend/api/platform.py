@@ -114,6 +114,7 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
                     "capture the flag",
                     challenge.category,
                     external_id=challenge.external_id,
+                    platform=body.mapping.platform,
                 )
                 created_project_ids.append(project_id)
                 attachment_dir = state.attachments_dir(project_id)

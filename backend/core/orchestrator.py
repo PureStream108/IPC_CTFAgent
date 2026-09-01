@@ -15,7 +15,12 @@ import uuid
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.archive import archive_completed_project
 from backend.core.diamond import Diamond
-from backend.core.ipc import accept_verified_flag, verify_flag
+from backend.core.ipc import (
+    accept_verified_flag,
+    lock_project_completion,
+    requires_platform_verdict,
+    verify_flag,
+)
 from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.memory_writer import write_memory
 from backend.core.postprocess_store import (
@@ -32,6 +37,11 @@ from backend.core.resource_manager import ResourceManager
 from backend.mcp.mcp_client import MCPClient, MCPRegistryTarget
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
+from backend.platform.ret2shell import (
+    Ret2ShellError,
+    Ret2ShellPreflightError,
+    Ret2ShellRateLimitError,
+)
 from backend.sandbox.errors import SandboxStartupError
 from backend.sandbox.task_sandbox import member_workdir, task_container_name
 from backend.core.wp_writer import persist_validated_writeup
@@ -60,6 +70,10 @@ class Orchestrator:
     _MAX_CONSECUTIVE_STALLS = 3
     _STALL_DEFER_SECONDS = 180
     _POSTPROCESS_LEASE_SECONDS = 120
+    # Consecutive platform-verdict failures (rate limit, network, judge poll
+    # timeout) tolerated before the candidate is parked as ``error`` and the
+    # project resumes solving instead of retrying forever.
+    _VERDICT_MAX_UNKNOWN_ATTEMPTS = 3
 
     def __init__(self, state, max_workers: int | None = None, scripts: dict | None = None):
         self.state = state
@@ -98,6 +112,8 @@ class Orchestrator:
         self._stop = threading.Event()
         self._loop_thread: threading.Thread | None = None
         self._postprocess_future: Any | None = None
+        self._verdict_unknown_attempts: dict[str, int] = {}
+        self._verdict_deferred_logged: set[str] = set()
         # optional per-(project,member) scripts for deterministic tests
         self.scripts = scripts or {}
 
@@ -961,13 +977,22 @@ class Orchestrator:
                 return
             self._completing.add(project_id)
         try:
-            self._finalize(project_id)
-        finally:
+            async_verdict = self._finalize(project_id)
+        except Exception:
+            with self._lock:
+                self._completing.discard(project_id)
+            raise
+        if not async_verdict:
             with self._lock:
                 self._completing.discard(project_id)
 
-    def _finalize(self, project_id: str) -> None:
-        state = self.state
+    def _finalize(self, project_id: str) -> bool:
+        """Close out a reported Flag.
+
+        Returns True when an asynchronous platform-verdict job took over and
+        now owns the ``_completing`` guard; the job clears it on exit.
+        """
+
         # Stop competing solvers as soon as a candidate reaches verification.
         with self._lock:
             members = list(self._members.get(project_id, {}).values())
@@ -978,6 +1003,13 @@ class Orchestrator:
             with suppress(LifecycleError):
                 self.lifecycle.transition(project_id, "flag_found")
 
+        if self._platform_verdict_needed(project_id):
+            return self._dispatch_platform_verdict(project_id)
+        self._finalize_local(project_id)
+        return False
+
+    def _finalize_local(self, project_id: str) -> None:
+        state = self.state
         verdict = verify_flag(state.db, project_id)
         if not verdict["ok"]:
             state.logger.project("ipc_verification_failed", project_id, reasons=verdict["reasons"])
@@ -989,13 +1021,18 @@ class Orchestrator:
                 )
             self.stop_project(project_id)
             return
+        self._commit_solved(project_id, verdict["flag"], source="orchestrator")
 
+    def _commit_solved(self, project_id: str, flag: str, *, source: str) -> None:
+        """Accept a verified Flag and run the solved close-out pipeline."""
+
+        state = self.state
         with state.db.connect() as connection:
             solved = accept_verified_flag(
                 connection,
                 project_id,
-                verdict["flag"],
-                source="orchestrator",
+                flag,
+                source=source,
             )
             enqueue_postprocess(connection, project_id)
             row = graph_store.get_project_row(connection, project_id)
@@ -1011,6 +1048,196 @@ class Orchestrator:
         self._set_runtime_phase(project_id, "solved")
         self.stop_project(project_id)
         self._dispatch_postprocess()
+
+    # ---- platform verdict gate (ret2shell) ----
+
+    def _platform_verdict_needed(self, project_id: str) -> bool:
+        with self.state.db.connect() as conn:
+            row = graph_store.get_project_row(conn, project_id)
+        return requires_platform_verdict(row)
+
+    def _dispatch_platform_verdict(self, project_id: str) -> bool:
+        if getattr(self.state, "ret2shell_client", None) is None:
+            # Without credentials the candidate cannot be judged.  Stay in
+            # flag_found: the scheduler tick re-arms verification, so the
+            # project completes as soon as credentials appear.  Log once —
+            # the tick would otherwise repeat this every interval.
+            with self._lock:
+                already_logged = project_id in self._verdict_deferred_logged
+                self._verdict_deferred_logged.add(project_id)
+            if not already_logged:
+                self.state.logger.project(
+                    "platform_verdict_deferred",
+                    project_id,
+                    reason="ret2shell credentials are not configured",
+                )
+            return False
+        with self._lock:
+            self._verdict_deferred_logged.discard(project_id)
+        self._set_runtime_phase(project_id, "judging")
+        self.executor.submit(self._run_platform_verdict, project_id)
+        return True
+
+    def _run_platform_verdict(self, project_id: str) -> None:
+        try:
+            self._judge_pending_submissions(project_id)
+        except Exception as exc:
+            self.state.logger.project(
+                "platform_verdict_crashed",
+                project_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            with suppress(Exception):
+                with self.state.db.connect() as conn:
+                    conn.execute(
+                        "UPDATE flag_submissions SET status = 'pending' "
+                        "WHERE project_id = %s AND status = 'judging'",
+                        (project_id,),
+                    )
+        finally:
+            with self._lock:
+                self._completing.discard(project_id)
+
+    def _judge_pending_submissions(self, project_id: str) -> None:
+        client = self.state.ret2shell_client
+        while not self._stop.is_set():
+            with self.state.db.connect() as conn:
+                # A crashed judge leaves rows stuck in ``judging``; reclaim them.
+                conn.execute(
+                    "UPDATE flag_submissions SET status = 'pending' "
+                    "WHERE project_id = %s AND status = 'judging'",
+                    (project_id,),
+                )
+                submission = conn.execute(
+                    """
+                    UPDATE flag_submissions SET status = 'judging'
+                    WHERE id = (
+                        SELECT id FROM flag_submissions
+                        WHERE project_id = %s AND status = 'pending'
+                        ORDER BY id LIMIT 1
+                    )
+                    RETURNING id, normalized_flag
+                    """,
+                    (project_id,),
+                ).fetchone()
+                row = graph_store.get_project_row(conn, project_id)
+            if submission is None:
+                # Nothing left to judge and no Flag was accepted: resume solving.
+                self._resume_after_verdict(project_id, reason="no pending flag submissions")
+                return
+            external_id = str(row["external_id"] or "") if row else ""
+            verdict, detail = self._submit_to_platform(
+                client, external_id, submission["normalized_flag"]
+            )
+            if verdict == "correct":
+                self._verdict_unknown_attempts.pop(project_id, None)
+                self._commit_solved(
+                    project_id,
+                    submission["normalized_flag"],
+                    source="platform:ret2shell",
+                )
+                return
+            if verdict == "wrong":
+                self._verdict_unknown_attempts.pop(project_id, None)
+                self._reject_submission(project_id, row, submission, detail)
+                continue
+            attempts = self._verdict_unknown_attempts.get(project_id, 0) + 1
+            self._verdict_unknown_attempts[project_id] = attempts
+            exhausted = attempts >= self._VERDICT_MAX_UNKNOWN_ATTEMPTS
+            with self.state.db.connect() as conn:
+                conn.execute(
+                    "UPDATE flag_submissions SET status = %s, error = %s WHERE id = %s",
+                    ("error" if exhausted else "pending", detail, submission["id"]),
+                )
+            self.state.logger.project(
+                "platform_verdict_unknown",
+                project_id,
+                flag=submission["normalized_flag"],
+                attempt=attempts,
+                error=detail,
+            )
+            if not exhausted:
+                # Back to pending; the scheduler tick re-arms verification.
+                return
+            self._verdict_unknown_attempts.pop(project_id, None)
+            self._resume_after_verdict(project_id, reason=detail)
+            return
+
+    def _submit_to_platform(self, client, external_id: str, flag: str) -> tuple[str, str]:
+        """Ask the platform judge about one candidate.
+
+        Returns ``(verdict, detail)`` where verdict is ``correct``, ``wrong``
+        or ``unknown`` (transient failure: quota, network, judge timeout).
+        """
+
+        try:
+            challenge_id = int(external_id)
+        except (TypeError, ValueError):
+            return "unknown", f"external_id {external_id!r} is not a ret2shell challenge id"
+        try:
+            submission = client.submit_flag(challenge_id, flag)
+        except Ret2ShellPreflightError as exc:
+            if "already solved" in str(exc):
+                # The platform already credits our team: accept locally.
+                return "correct", "platform already marks the challenge solved"
+            return "unknown", f"submit preflight failed: {exc}"
+        except Ret2ShellRateLimitError as exc:
+            return "unknown", str(exc)
+        except Ret2ShellError as exc:
+            return "unknown", f"platform submit failed: {exc}"
+        except Exception as exc:  # requests/session failures
+            return "unknown", f"{type(exc).__name__}: {exc}"
+        solved = submission.get("solved") if isinstance(submission, dict) else None
+        if solved is True:
+            return "correct", str(submission.get("result") or "accepted")
+        if solved is False:
+            return "wrong", str(submission.get("result") or "rejected")
+        return "unknown", "platform judge did not answer before the poll timeout"
+
+    def _reject_submission(self, project_id: str, project_row, submission, detail: str) -> None:
+        with self.state.db.connect() as conn:
+            conn.execute(
+                "UPDATE flag_submissions SET status = 'rejected', error = %s WHERE id = %s",
+                (detail, submission["id"]),
+            )
+        self.state.logger.project(
+            "platform_flag_rejected",
+            project_id,
+            flag=submission["normalized_flag"],
+            external_id=project_row["external_id"] if project_row else None,
+            verdict=detail,
+        )
+        # Surface the rejection through experience memory so Members never
+        # resubmit the same string (BaseMember lists 'rejected-flag' notes).
+        if project_row is not None:
+            try:
+                category = str(project_row["category"] or "misc")
+                self.state.memory.add(
+                    "lessons",
+                    title=f"{project_row['title']}: platform rejected flag",
+                    content=(
+                        f"Platform rejected candidate flag '{submission['normalized_flag']}' "
+                        f"for challenge '{project_row['title']}' "
+                        f"(external_id={project_row['external_id']}). Verdict: {detail}"
+                    ),
+                    tags=[category, "rejected-flag"],
+                    project_id=project_id,
+                    source="platform",
+                )
+            except Exception as exc:
+                self.state.logger.project(
+                    "rejected_flag_memory_failed",
+                    project_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+    def _resume_after_verdict(self, project_id: str, *, reason: str) -> None:
+        if self.lifecycle.status(project_id) != "flag_found":
+            return
+        with suppress(LifecycleError):
+            self.lifecycle.transition(project_id, "running")
+        self._set_runtime_phase(project_id, "running")
+        self.state.logger.project("platform_verdict_resumed", project_id, reason=reason)
 
     def _dispatch_postprocess(self) -> None:
         with self._lock:
@@ -1066,7 +1293,7 @@ class Orchestrator:
                 continue
 
             try:
-                row = self._commit_postprocess_job(job, prepared)
+                self._commit_postprocess_job(job, prepared)
             except PostprocessLeaseLost:
                 self._log_stale_postprocess_job(job, stage="commit")
             except Exception as exc:
@@ -1088,8 +1315,6 @@ class Orchestrator:
                     job.project_id,
                     attempt=job.attempts,
                 )
-                if row is not None and row["postprocess_status"] == "completed":
-                    self.diamond.draw_completion(job.project_id)
 
     def _heartbeat_postprocess_job(self, job, stop: threading.Event, lost: threading.Event) -> None:
         interval = max(1, self._POSTPROCESS_LEASE_SECONDS // 3)
@@ -1126,6 +1351,10 @@ class Orchestrator:
         written_memories = []
         try:
             with self.state.db.connect() as connection:
+                # Serialize with finalizer transactions (accept + enqueue) per
+                # project; without this gate the jobs->projects lock order here
+                # deadlocks against their projects->jobs order.
+                lock_project_completion(connection, job.project_id)
                 if not lock_job(
                     connection,
                     job,
@@ -1167,6 +1396,11 @@ class Orchestrator:
                         f"postprocess lease expired while committing job {job.id}"
                     )
                 row = graph_store.get_project_row(connection, job.project_id)
+                if row is not None and row["postprocess_status"] == "completed":
+                    # Draw the completion links in the same transaction so an
+                    # observer never sees postprocess_status='completed' before
+                    # the Diamond -> IPC return edge exists.
+                    self.diamond.draw_completion(job.project_id, connection=connection)
         except Exception:
             if rollback_file is not None:
                 rollback_file()

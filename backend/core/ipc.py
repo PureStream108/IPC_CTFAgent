@@ -12,6 +12,18 @@ class FlagConflictError(ValueError):
     """A project already committed a different verified flag."""
 
 
+def lock_project_completion(connection, project_id: str) -> None:
+    """Serialize per project every transaction spanning projects + postprocess_jobs.
+
+    Finalizers lock the projects row and then insert postprocess jobs, while
+    postprocess workers claim a job row and then update the projects row —
+    opposite orders that deadlock under concurrency.  Taking one advisory
+    transaction lock per project at both entry points breaks the cycle.
+    """
+
+    connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (project_id,))
+
+
 def assert_flag_compatible(connection, project_id: str, flag: str) -> dict:
     """Check a candidate Flag while holding the project completion mutex.
 
@@ -20,6 +32,7 @@ def assert_flag_compatible(connection, project_id: str, flag: str) -> dict:
     finalizer from changing the accepted Flag between the check and write.
     """
 
+    lock_project_completion(connection, project_id)
     normalized = flag.strip()
     if not normalized:
         raise ValueError("flag must not be empty")
@@ -102,6 +115,7 @@ def accept_verified_flag(
         """,
         (project_id, flag, normalized, source, evidence_artifact, key, now, now),
     )
+    supersede_pending_flags(connection, project_id)
     connection.execute(
         """
         UPDATE projects
@@ -119,6 +133,120 @@ def accept_verified_flag(
         "verified_at": project["flag_verified_at"] or now,
         "idempotency_key": key,
     }
+
+
+# Flag submission lifecycle for platform-judged projects:
+# pending -> judging -> verified | rejected | error (transient, may re-pend).
+# ``superseded`` marks candidates that lost the race against an accepted flag.
+PENDING_FLAG_STATUSES = ("pending", "judging", "error")
+
+
+def record_pending_flag(
+    connection,
+    project_id: str,
+    flag: str,
+    *,
+    source: str,
+    evidence_artifact: str | None = None,
+) -> dict:
+    """Queue a candidate Flag for platform verdict without solving the project.
+
+    The project row lock is held so a concurrent finalizer cannot accept a
+    different Flag between our compatibility check and the insert.  Replays of
+    the same candidate reuse the idempotency key: an already verified row
+    stays verified, anything else is queued for (another) judgement.
+    """
+
+    normalized = flag.strip()
+    project = assert_flag_compatible(connection, project_id, normalized)
+    key = hashlib.sha256(f"{project_id}\0{normalized}".encode("utf-8")).hexdigest()
+    now = utcnow()
+    row = connection.execute(
+        """
+        INSERT INTO flag_submissions (
+            project_id, candidate, normalized_flag, status, source,
+            evidence_artifact, idempotency_key, created_at
+        ) VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s)
+        ON CONFLICT (idempotency_key) DO UPDATE
+        SET status = CASE
+                WHEN flag_submissions.status = 'verified' THEN 'verified'
+                ELSE 'pending' END,
+            error = NULL,
+            evidence_artifact = COALESCE(EXCLUDED.evidence_artifact, flag_submissions.evidence_artifact)
+        RETURNING status
+        """,
+        (project_id, flag, normalized, source, evidence_artifact, key, now),
+    ).fetchone()
+    return {
+        "ok": True,
+        "mode": "verified" if row and row["status"] == "verified" else "pending",
+        "flag": normalized,
+        "idempotency_key": key,
+        "project_status": project["status"],
+    }
+
+
+def requires_platform_verdict(project_row) -> bool:
+    """A project solved on ret2shell must be judged by the platform, not locally."""
+
+    return bool(
+        project_row
+        and project_row["platform"] == "ret2shell"
+        and str(project_row["external_id"] or "").strip()
+    )
+
+
+def submit_flag_candidate(
+    connection,
+    project_id: str,
+    flag: str,
+    *,
+    source: str,
+    evidence_artifact: str | None = None,
+) -> dict:
+    """Record a candidate Flag: platform-judged when linked, local otherwise.
+
+    Platform-linked projects only queue a pending submission here; the
+    orchestrator's verdict worker promotes it via :func:`accept_verified_flag`
+    once the platform judge confirms it.  All other projects keep the
+    historical behaviour and are accepted immediately on local evidence.
+    """
+
+    project = connection.execute(
+        "SELECT platform, external_id FROM projects WHERE id = %s",
+        (project_id,),
+    ).fetchone()
+    if project is None:
+        raise ValueError("project not found")
+    if requires_platform_verdict(project):
+        return record_pending_flag(
+            connection,
+            project_id,
+            flag,
+            source=source,
+            evidence_artifact=evidence_artifact,
+        )
+    result = accept_verified_flag(
+        connection,
+        project_id,
+        flag,
+        source=source,
+        evidence_artifact=evidence_artifact,
+    )
+    result["mode"] = "verified"
+    return result
+
+
+def supersede_pending_flags(connection, project_id: str) -> None:
+    """Close out queued candidates once one Flag has been accepted."""
+
+    connection.execute(
+        """
+        UPDATE flag_submissions SET status = 'superseded'
+        WHERE project_id = %s AND status = ANY(%s)
+        """,
+        (project_id, list(PENDING_FLAG_STATUSES)),
+    )
 
 
 def verify_postprocess(db, project_id: str, wp_dir: Path) -> dict:

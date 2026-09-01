@@ -102,9 +102,12 @@ class AppState:
         self.mcps.register(build_tool_search_mcp(self.registry))
         # The ret2shell competition MCP (dynamic instance control) is only
         # registered when participant credentials are configured, so members
-        # never see a platform they cannot reach.
+        # never see a platform they cannot reach.  The same client backs the
+        # orchestrator's platform-verdict gate for ret2shell-linked projects.
+        self.ret2shell_client: Ret2ShellClient | None = None
         if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
-            self.mcps.register(build_ret2shell_mcp(Ret2ShellClient()))
+            self.ret2shell_client = Ret2ShellClient()
+            self.mcps.register(build_ret2shell_mcp(self.ret2shell_client))
 
         # Attached by module 8.
         self.orchestrator = None

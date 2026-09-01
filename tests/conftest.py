@@ -22,6 +22,7 @@ POSTGRES_TEST_MODULES = {
     "test_optional_startup.py",
     "test_orchestration.py",
     "test_platform.py",
+    "test_platform_verdict.py",
     "test_wp_writer.py",
 }
 

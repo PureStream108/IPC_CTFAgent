@@ -73,8 +73,13 @@ python scripts/ret2shell_submit.py --challenge <id> --flag 'flag{...}'
 - `instance_status` / `instance_renew` / `instance_stop`
 - `challenge_status(challenge_id)`：已解状态与全站解出数
 
-**flag 提交不暴露给 Member**——共享限额只由操作者经 `scripts/ret2shell_submit.py`
-消耗，避免 agent 误操作烧掉提交次数。
+**flag 提交不暴露给 Member**——Member 只能通过 `flag` 动作上报候选 flag。
+对 platform 为 `ret2shell` 的项目，候选先落 `flag_submissions`（pending），
+由 orchestrator 的判定 worker 经平台客户端提交并轮询异步判题：判对才
+`accept_verified_flag` 置 solved；判错记 `rejected`、写入 `rejected-flag`
+经验记忆（Member 上下文会列出，防止重复上报），项目回到 running 继续解；
+限流/网络/判题超时等瞬时失败重试 3 次后把候选停为 `error` 并恢复求解。
+手动补交仍可用 `scripts/ret2shell_submit.py`（默认 dry-run）。
 
 ## 已知限制与运维注意
 

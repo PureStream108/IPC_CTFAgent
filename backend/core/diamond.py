@@ -223,9 +223,15 @@ class Diamond:
             evidence_logs=evidence_logs,
         )
 
-    def draw_completion(self, project_id: str) -> None:
-        """Draw the WP -> Diamond -> IPC return lines after flag (Seed.md 流程图)."""
-        with self.db.connect() as conn:
+    def draw_completion(self, project_id: str, connection=None) -> None:
+        """Draw the WP -> Diamond -> IPC return lines after flag (Seed.md 流程图).
+
+        Pass ``connection`` to draw inside the caller's transaction so the
+        return lines become visible atomically with the triggering state
+        change; otherwise a private transaction is used.
+        """
+
+        def _draw(conn) -> None:
             if not graph_store.link_exists(conn, project_id, "flag", "wp", "wp"):
                 graph_store.add_link(conn, project_id, "flag", "wp", "wp")
             if not graph_store.link_exists(conn, project_id, "wp", "diamond", "wp"):
@@ -235,3 +241,9 @@ class Diamond:
             graph_store.set_agent_state(conn, project_id, "diamond", "done")
             for name in graph_store.active_member_names(conn, project_id):
                 graph_store.set_agent_state(conn, project_id, name, "done")
+
+        if connection is not None:
+            _draw(connection)
+            return
+        with self.db.connect() as conn:
+            _draw(conn)

@@ -18,7 +18,7 @@ from backend.core.difficulty import (
     normalize_difficulty,
 )
 from backend.core.logging_util import IPCLogger
-from backend.core.ipc import FlagConflictError, accept_verified_flag
+from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
 from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction, ProviderError
@@ -1143,13 +1143,17 @@ class BaseMember:
                 edge_store.complete_goal_intent(
                     conn, project_id, [from_fact], desc, self.name, self.name
                 )
-                accept_verified_flag(
+                # Platform-linked projects only queue the candidate here; the
+                # orchestrator's verdict worker accepts it once the platform
+                # judge confirms.  Local projects are accepted immediately.
+                candidate = submit_flag_candidate(
                     conn,
                     project_id,
                     flag,
                     source=f"member:{self.name}",
                 )
-                enqueue_postprocess(conn, project_id)
+                if candidate["mode"] == "verified":
+                    enqueue_postprocess(conn, project_id)
                 graph_store.add_link(conn, project_id, f"fact:{from_fact}", "flag", "flag")
         except _IntentLeaseLost:
             return SolveResult(status="stalled", steps=step, error="intent lease lost")

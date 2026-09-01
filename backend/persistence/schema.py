@@ -64,6 +64,7 @@ SCHEMA_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         external_id TEXT,
+        platform TEXT,
         title TEXT NOT NULL,
         category TEXT NOT NULL DEFAULT 'misc',
         status TEXT NOT NULL DEFAULT 'created',
@@ -90,6 +91,10 @@ SCHEMA_STATEMENTS = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_projects_lease ON projects(lease_expires_at) WHERE lease_owner IS NOT NULL",
+    # Existing databases created before the platform column keep working:
+    # configure() runs these statements on every startup, so the idempotent
+    # ALTER upgrades them in place.
+    "ALTER TABLE projects ADD COLUMN IF NOT EXISTS platform TEXT",
     """
     CREATE TABLE IF NOT EXISTS facts (
         id TEXT NOT NULL,

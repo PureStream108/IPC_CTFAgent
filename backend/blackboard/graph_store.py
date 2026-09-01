@@ -157,6 +157,7 @@ def create_project(
     category: str,
     hints: list[tuple[str, str]] | None = None,
     external_id: str | None = None,
+    platform: str | None = None,
 ) -> str:
     pid = next_project_id(conn)
     now = utcnow()
@@ -166,9 +167,9 @@ def create_project(
     ]
     log_filename = numbered_filename(title, ".jsonl", used, fallback=pid)
     conn.execute(
-        "INSERT INTO projects (id, external_id, title, category, status, log_filename, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, 'created', %s, %s, %s)",
-        (pid, external_id, title, category, log_filename, now, now),
+        "INSERT INTO projects (id, external_id, platform, title, category, status, log_filename, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, 'created', %s, %s, %s)",
+        (pid, external_id, platform, title, category, log_filename, now, now),
     )
     node_store.insert_fact(conn, pid, "origin", origin)
     node_store.insert_fact(conn, pid, "goal", goal)

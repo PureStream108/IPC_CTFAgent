@@ -1343,6 +1343,7 @@ class OpsAgentService:
                         "capture the flag",
                         challenge.category,
                         external_id=challenge.external_id,
+                        platform=spec.challenges.platform,
                     )
                     created.append(project_id)
                     for path in adapter.download_attachments(
