@@ -260,7 +260,7 @@ async def _run_cli(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Call an IPC MCP server through an async stdio session")
-    parser.add_argument("server", choices=("browser", "reverse", "memory", "tool_search", "tools", "zap"))
+    parser.add_argument("server", choices=("browser", "reverse", "memory", "tool_search", "tools"))
     parser.add_argument("tool", nargs="?")
     parser.add_argument("--arguments", default="{}", help="JSON object passed to the tool")
     parser.add_argument("--root", default=".")

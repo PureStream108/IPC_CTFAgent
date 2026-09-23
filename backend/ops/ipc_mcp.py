@@ -56,6 +56,17 @@ operator request.""",
     )
     tools = _Tools(state_provider)
 
+    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store.")
+    def question(operation_key: str, title: str, options: list[str] | None = None,
+                 workflow_id: str | None = None, secret_name: str | None = None,
+                 ctx: Context | None = None) -> dict:
+        from backend.ops.questions import QuestionStore
+        session_id = _session_id_from_context(ctx)
+        if not session_id:
+            raise ValueError("question requires an IPC session")
+        return QuestionStore(state_provider()).create(session_id=session_id, operation_key=operation_key,
+                    title=title, options=options, workflow_id=workflow_id, secret_name=secret_name)
+
     @server.tool(
         name="ipc_list_projects",
         description="List live IPC projects and their status, including whether a task sandbox is active.",

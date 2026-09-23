@@ -33,46 +33,20 @@ def test_check_reports_ui_ready_without_llm_credentials(monkeypatch, capsys):
 
 def test_config_update_keeps_fixed_member_roster():
     state = SimpleNamespace(config=AppConfig(), save_config=lambda: None)
-
-    view = update_config(
-        ConfigUpdate(
-            diamond=LLMUpdate(api_format="mock"),
-            members={" Aventurine ": LLMUpdate(api_format="mock")},
-            runtime=RuntimeUpdate(zap_enabled=True),
-        ),
-        state,
-    )
-
-    assert [member.name for member in state.config.members] == list(MEMBER_NAMES)
-    assert view["members"][0]["configured"] is True
-    assert view["runtime"]["zap_enabled"] is True
+    view = update_config(ConfigUpdate(diamond=LLMUpdate(api_format="mock"), member=LLMUpdate(api_format="mock")), state)
+    assert [m.name for m in state.config.members] == list(MEMBER_NAMES)
+    assert all(m["configured"] for m in view["members"])
     assert view["startup_errors"] == []
-
-    view = update_config(
-        ConfigUpdate(remove_members=["AVENTURINE"]),
-        state,
-    )
-    assert [member.name for member in state.config.members] == list(MEMBER_NAMES)
-    assert state.config.members[0].configured is False
-    assert view["startup_errors"]
+    with pytest.raises(HTTPException):
+        update_config(ConfigUpdate(remove_members=["amber"]), state)
 
 
-def test_config_update_rejects_invalid_member_names():
+def test_config_update_rejects_per_member_endpoints():
     state = SimpleNamespace(config=AppConfig(), save_config=lambda: None)
-
-    with pytest.raises(HTTPException, match="member name"):
-        update_config(
-            ConfigUpdate(members={"../escape": LLMUpdate(api_format="mock")}),
-            state,
-        )
+    with pytest.raises(HTTPException, match="shared member"):
+        update_config(ConfigUpdate(members={"amber": LLMUpdate(api_format="mock")}), state)
 
 
-def test_zap_environment_override_is_optional(tmp_path, monkeypatch):
-    monkeypatch.delenv("IPC_ZAP_ENABLED", raising=False)
-    assert load_config(tmp_path).runtime.zap_enabled is False
-
+def test_removed_zap_environment_does_not_restore_integration(tmp_path, monkeypatch):
     monkeypatch.setenv("IPC_ZAP_ENABLED", "true")
-    assert load_config(tmp_path).runtime.zap_enabled is True
-
-    monkeypatch.setenv("IPC_ZAP_ENABLED", "false")
-    assert load_config(tmp_path).runtime.zap_enabled is False
+    assert "zap_enabled" not in load_config(tmp_path).runtime.model_dump()

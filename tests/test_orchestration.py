@@ -481,28 +481,25 @@ def test_orchestrator_builds_task_container_mcp_targets(state):
     assert set(targets) == {"browser", "reverse"}
     reverse_args = targets["reverse"].target.args
     assert reverse_args == [
-        "exec", "-i", "-w", "/workspace/aventurine", "ipc-task-proj_001",
+        "exec", "-i", "-w", "/workspace/shared", "ipc-task-proj_001",
         "python3", "-m", "backend.mcp.mcp_server", "reverse",
     ]
     assert targets["reverse"].read_timeout == 600
     browser_args = targets["browser"].target.args
     assert "IPC_BROWSER_PROJECT_ID=proj_001" in browser_args
     assert "IPC_BROWSER_MEMBER=aventurine" in browser_args
-    assert "IPC_BROWSER_WORKDIR=/workspace/aventurine" in browser_args
+    assert "IPC_BROWSER_WORKDIR=/workspace/shared" in browser_args
     assert "IPC_BROWSER_SHARED_DIR=/workspace/shared" in browser_args
-    assert "IPC_BROWSER_ARTIFACT_ROOT=/workspace/aventurine/browser-artifacts" in browser_args
+    assert "IPC_BROWSER_ARTIFACT_ROOT=/workspace/shared/browser-artifacts" in browser_args
     assert "IPC_BROWSER_EVENT_LIMIT=200" in browser_args
     assert "IPC_BROWSER_RESPONSE_PREVIEW_BYTES=4096" in browser_args
     assert "IPC_BROWSER_ALLOWED_ORIGINS=[]" in browser_args
     assert browser_args[-7:] == [
-        "-w", "/workspace/aventurine", "ipc-task-proj_001",
+        "-w", "/workspace/shared", "ipc-task-proj_001",
         "python3", "-m", "backend.mcp.mcp_server", "browser",
     ]
 
-    state.config.runtime.zap_enabled = True
-    targets = orch._container_mcps("proj_001", "aventurine")
-    assert set(targets) == {"browser", "reverse", "zap"}
-    assert "ZAP_API_URL=http://ipc-zap:8080" in targets["zap"].target.args
+    assert set(targets) == {"browser", "reverse"}
     orch.shutdown()
 
 

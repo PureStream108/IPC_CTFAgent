@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -18,9 +19,13 @@ CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", 
 ApiFormat = Literal["openai", "anthropic", "claudecode", "deepseek", "pi", "mock"]
 ApiSurface = Literal["auto", "chat_completions", "responses"]
 ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+SelectedReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 # Default member names. These are worker identities, not different roles.
-MEMBER_NAMES: tuple[str, ...] = ("aventurine", "pearl", "jade", "topaz")
+MEMBER_NAMES: tuple[str, ...] = (
+    "amber", "agate", "topaz", "sugilite", "aventurine",
+    "pearl", "sapphire", "jade", "obsidian", "opal",
+)
 MEMBER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -41,7 +46,7 @@ class LLMConfig(BaseModel):
     api_surface: ApiSurface = "auto"
     # Kept provider-neutral in configuration.  Adapters translate this to
     # ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat).
-    reasoning_effort: ReasoningEffort = "auto"
+    reasoning_effort: ReasoningEffort = "high"
 
     @property
     def configured(self) -> bool:
@@ -72,7 +77,7 @@ class LimitsConfig(BaseModel):
     total_cpu: int = 4
     # Max CTF tasks running concurrently. Each task owns one shared container;
     # containers are not memory-capped, so there is no per-agent memory limit.
-    max_concurrent_tasks: int = Field(default=5, gt=0)
+    max_concurrent_tasks: int = Field(default=10, gt=0, le=10)
     network: bool = True
 
 
@@ -90,7 +95,6 @@ class RuntimeConfig(BaseModel):
     sandbox_backend: Literal["local", "docker"] = "docker"
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
-    zap_enabled: bool = False
     browser_event_limit: int = Field(default=200, gt=0, le=1000)
     browser_console_limit: int = Field(default=100, gt=0, le=1000)
     browser_error_limit: int = Field(default=50, gt=0, le=1000)
@@ -130,6 +134,8 @@ class AppConfig(BaseModel):
 
     log_enabled: bool = True
     diamond: LLMConfig = Field(default_factory=LLMConfig)
+    member: LLMConfig | None = None
+    member_config_conflict: bool = False
     members: list[MemberConfig] = Field(default_factory=list)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
@@ -147,20 +153,29 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_unique(self) -> AppConfig:
-        # Keep the complete built-in worker roster visible in the Config UI.
-        # Empty entries are harmless: ``available_members`` excludes them
-        # until an API key/base URL (or mock format) is configured.
-        by_name = {member.name: member for member in self.members}
-        builtins = [by_name.pop(name, MemberConfig(name=name)) for name in MEMBER_NAMES]
-        # Preserve any explicitly configured custom workers after the fixed
-        # built-in roster.
-        self.members = builtins + list(by_name.values())
+        if self.member is None:
+            # Compare complete legacy endpoints, never silently pick a key.
+            blank = LLMConfig().model_dump()
+            candidates = [m.model_dump(exclude={"name"}) for m in self.members
+                          if m.model_dump(exclude={"name"}) != blank]
+            if candidates and any(item != candidates[0] for item in candidates[1:]):
+                self.member_config_conflict = True
+            elif not self.member_config_conflict:
+                self.member = LLMConfig.model_validate(candidates[0] if candidates else {})
+        if self.member is not None:
+            self.member_config_conflict = False
+            self.members = [MemberConfig(name=name, **self.member.model_dump()) for name in MEMBER_NAMES]
         return self
 
     # --- startup validation (Seed.md launch rules) ---
     def startup_errors(self) -> list[str]:
         """Return human-readable reasons the system cannot start (empty if OK)."""
         errors: list[str] = []
+        if self.member_config_conflict:
+            errors.append("Member configurations differ. Select one shared Member configuration in Config.")
+        for label, llm in (("Diamond", self.diamond), ("Member", self.member)):
+            if llm and llm.configured and llm.api_format != "mock" and llm.reasoning_effort in {"auto", "none", "minimal"}:
+                errors.append(f"{label}: select low, medium, high, xhigh or max for the migrated reasoning setting.")
         if not self.diamond.configured:
             errors.append("Diamond requires api_key and base_url (or api_format: mock).")
         if not self.members:
@@ -171,7 +186,7 @@ class AppConfig(BaseModel):
 
     def available_members(self) -> list[MemberConfig]:
         """Members that have credentials — the upper bound on parallelism."""
-        return [m for m in self.members if m.configured]
+        return [] if self.member_config_conflict else [m for m in self.members if m.configured]
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -188,6 +203,8 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
     for m in cfg.members:
         if m.model == "":
             m.model = defaults.get(m.api_format, "")
+    if cfg.member is not None and cfg.member.model == "":
+        cfg.member.model = defaults.get(cfg.member.api_format, "")
 
 
 # Limit keys removed in the task-slot model. Silently dropped from old configs
@@ -211,6 +228,8 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
 
     if isinstance(raw.get("limits"), dict):
         raw["limits"] = _strip_legacy_limits(raw["limits"])
+    if isinstance(raw.get("runtime"), dict):
+        raw["runtime"].pop("zap_enabled", None)
 
     cfg = AppConfig.model_validate(raw)
     _apply_models_defaults(cfg, models)
@@ -219,9 +238,6 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     env_log = os.environ.get("IPC_LOG_ENABLED")
     if env_log is not None:
         cfg.log_enabled = env_log.strip().lower() in ("1", "true", "yes", "on")
-    env_zap = os.environ.get("IPC_ZAP_ENABLED")
-    if env_zap is not None and env_zap.strip():
-        cfg.runtime.zap_enabled = env_zap.strip().lower() in ("1", "true", "yes", "on")
     return cfg
 
 
@@ -231,11 +247,28 @@ def save_config(cfg: AppConfig, config_dir: Path | None = None) -> None:
     data = {
         "log_enabled": cfg.log_enabled,
         "diamond": cfg.diamond.model_dump(),
-        "members": [m.model_dump() for m in cfg.members],
+        "member": cfg.member.model_dump() if cfg.member is not None else None,
+        "member_config_conflict": cfg.member_config_conflict,
+        "members": [m.model_dump() for m in cfg.members] if cfg.member_config_conflict else [],
         "runtime": cfg.runtime.model_dump(),
         "limits": cfg.limits.model_dump(),
     }
-    (base / "config.yaml").write_text(
-        yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
-    )
+    # Serialize before touching disk, then publish a complete file on the same
+    # filesystem. A failed write must preserve the previous configuration.
+    content = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    temporary: Path | None = None
+    try:
+        # NamedTemporaryFile uses owner-only permissions on POSIX: credentials
+        # must not become world-readable while staging or after replacement.
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=base,
+            prefix=".config-", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, base / "config.yaml")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

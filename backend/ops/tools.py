@@ -27,6 +27,17 @@ _MAX_OUTPUT_LENGTH = 16_000
 # catalogue can be included in the prompt and exposed by the API/UI.
 _TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
+        "name": "question",
+        "description": "Ask for missing platform information. Stop the dependent operation until answered; reuse the same operation_key when resuming. For credentials specify workflow_id and secret_name, never ask for credentials in chat.",
+        "parameters": {
+            "type": "object",
+            "properties": {"operation_key": {"type": "string"}, "title": {"type": "string"},
+                           "options": {"type": "array", "items": {"type": "string"}},
+                           "workflow_id": {"type": "string"}, "secret_name": {"type": "string"}},
+            "required": ["operation_key", "title"], "additionalProperties": False,
+        },
+    },
+    {
         "name": "list_task_sandboxes",
         "description": "List CTF projects and whether their task sandbox is active.",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -107,10 +118,18 @@ class OpsToolExecutor:
     def catalog(self) -> list[dict[str, Any]]:
         return tool_definitions()
 
-    def execute(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    def execute(self, name: str, arguments: dict[str, Any] | None = None, *, session_id: str | None = None) -> dict[str, Any]:
         args = arguments or {}
         if not isinstance(args, dict):
             raise OpsToolError("tool arguments must be an object")
+        if name == "question":
+            from backend.ops.questions import QuestionStore
+            if not session_id:
+                raise OpsToolError("question requires a conversation session")
+            try:
+                return QuestionStore(self.state).create(session_id=session_id, **args)
+            except (ValueError, TypeError) as exc:
+                raise OpsToolError(str(exc)) from exc
         handlers = {
             "list_task_sandboxes": self.list_task_sandboxes,
             "task_sandbox_health": self.task_sandbox_health,

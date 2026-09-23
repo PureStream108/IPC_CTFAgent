@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import stat
 
 import pytest
 import yaml
 
-from backend.core.config import AppConfig, LLMConfig, MemberConfig, RuntimeConfig, load_config, save_config
+from backend.core.config import AppConfig, MEMBER_NAMES, LLMConfig, MemberConfig, RuntimeConfig, load_config, save_config
 from tests.helpers import write_mock_config
 
 
 def test_mock_config_loads_and_starts(tmp_path: Path):
     cfg = load_config(write_mock_config(tmp_path / "config"))
     assert cfg.startup_errors() == []
-    assert len(cfg.members) == 4
-    assert {m.name for m in cfg.members} == {"aventurine", "pearl", "jade", "topaz"}
+    assert len(cfg.members) == 10
+    assert tuple(m.name for m in cfg.members) == MEMBER_NAMES
     assert cfg.runtime.eval_interval_steps == 20
 
 
@@ -79,8 +81,8 @@ def test_available_members_filters_unconfigured():
         ],
     )
     avail = cfg.available_members()
-    assert len(avail) == 1
-    assert avail[0].name == "a"
+    assert len(avail) == 10
+    assert all(m.api_key == "k" for m in avail)
 
 
 def test_duplicate_member_names_rejected():
@@ -109,6 +111,44 @@ def test_save_and_reload_roundtrip(tmp_path: Path):
     assert reloaded.diamond.api_format == "openai"
     assert reloaded.diamond.api_surface == "responses"
     assert reloaded.diamond.reasoning_effort == "low"
+
+
+@pytest.mark.parametrize("failure_point", ["fsync", "replace"])
+def test_failed_config_save_preserves_previous_file_and_cleans_staging(tmp_path, monkeypatch, failure_point):
+    original = AppConfig(diamond=LLMConfig(api_key="previous-key"))
+    save_config(original, tmp_path)
+    previous_bytes = (tmp_path / "config.yaml").read_bytes()
+    replacement = AppConfig(diamond=LLMConfig(api_key="replacement-key"))
+
+    def fail(*args):
+        raise OSError("simulated storage failure")
+
+    monkeypatch.setattr(f"backend.core.config.os.{failure_point}", fail)
+    with pytest.raises(OSError, match="simulated storage failure"):
+        save_config(replacement, tmp_path)
+
+    assert (tmp_path / "config.yaml").read_bytes() == previous_bytes
+    assert load_config(tmp_path).diamond.api_key == "previous-key"
+    assert list(tmp_path.glob(".config-*.tmp")) == []
+
+
+def test_failed_first_config_save_leaves_no_partial_file(tmp_path, monkeypatch):
+    def fail(*args):
+        raise OSError("simulated disk full")
+
+    monkeypatch.setattr("backend.core.config.os.fsync", fail)
+    with pytest.raises(OSError, match="simulated disk full"):
+        save_config(AppConfig(), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permissions; Windows uses inherited ACLs")
+def test_saved_config_credentials_are_owner_only(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text("log_enabled: true\n", encoding="utf-8")
+    target.chmod(0o644)
+    save_config(AppConfig(diamond=LLMConfig(api_key="private-key")), tmp_path)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_models_yaml_fills_empty_model(tmp_path: Path):

@@ -16,7 +16,6 @@ SERVER_NAMES = (
     "memory",
     "tool_search",
     "tools",
-    "zap",
 )
 
 
@@ -55,11 +54,6 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
         from backend.mcp.reverse_mcp import build_reverse_mcp
 
         return build_reverse_mcp()
-    if name == "zap":
-        from backend.mcp.shared import build_zap_mcp
-
-        return build_zap_mcp()
-
     # Stateful debug servers use the same PostgreSQL DSN as the main app.
     if name == "memory":
         from backend.memory.memory_mcp import build_memory_mcp

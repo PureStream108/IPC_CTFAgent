@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -239,21 +239,52 @@ class _BrowserSession:
             if self._context is not None:
                 return
             from playwright.async_api import async_playwright
-
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox"],
-            )
-            self._context = await self._browser.new_context(accept_downloads=True)
-            if self.allowed_origins:
-                await self._context.route("**/*", self._route_request)
-            self._context.on("request", self._on_request)
-            self._context.on("response", self._on_response)
-            self._context.on("requestfailed", self._on_request_failed)
-            page = await self._context.new_page()
-            self._register_page(page, preferred_id="main")
-            self._context.on("page", self._on_new_page)
+            try:
+                self._playwright = await async_playwright().start()
+                launch_options: dict[str, Any] = {
+                    "headless": True,
+                    "args": ["--no-sandbox"],
+                }
+                # Playwright is a library dependency of the task image.  A
+                # browser executable is deployment-owned and optional; accepting
+                # an explicit path lets Linux workers use an already provisioned
+                # Edge/Chromium-compatible binary without downloading one here.
+                executable = os.environ.get("IPC_PLAYWRIGHT_EXECUTABLE", "").strip()
+                if executable:
+                    launch_options["executable_path"] = executable
+                self._browser = await self._playwright.chromium.launch(**launch_options)
+                self._context = await self._browser.new_context(accept_downloads=True)
+                if self.allowed_origins:
+                    await self._context.route("**/*", self._route_request)
+                self._context.on("request", self._on_request)
+                self._context.on("response", self._on_response)
+                self._context.on("requestfailed", self._on_request_failed)
+                page = await self._context.new_page()
+                self._register_page(page, preferred_id="main")
+                self._context.on("page", self._on_new_page)
+            except BaseException:
+                # ``async_playwright().start()`` owns a driver process even
+                # when the deployment intentionally supplies no browser.  A
+                # failed launch must release that process before the error is
+                # reported, otherwise Windows leaves a closed-pipe transport
+                # for interpreter shutdown.
+                context, browser, playwright = (
+                    self._context, self._browser, self._playwright
+                )
+                self._context = self._browser = self._playwright = None
+                self._pages.clear()
+                self._page_ids.clear()
+                self._active_page_id = None
+                if context is not None:
+                    with suppress(Exception):
+                        await context.close()
+                if browser is not None:
+                    with suppress(Exception):
+                        await browser.close()
+                if playwright is not None:
+                    with suppress(Exception):
+                        await playwright.stop()
+                raise
 
     async def _route_request(self, route: Any, request: Any) -> None:
         try:
@@ -1150,57 +1181,5 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
             }
         except Exception as exc:
             return _tool_unavailable("browser.download", str(exc), page_id=page_id)
-
-    return server
-
-
-def _zap_base() -> str:
-    return os.environ.get("ZAP_API_URL", "http://ipc-zap:8080").rstrip("/")
-
-
-def _zap_get(path: str, **params: Any) -> dict[str, Any]:
-    api_key = os.environ.get("ZAP_API_KEY")
-    if api_key:
-        params["apikey"] = api_key
-    resp = requests.get(f"{_zap_base()}{path}", params=params, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _spider(url: str) -> dict[str, Any]:
-    try:
-        scan = _zap_get("/JSON/spider/action/scan/", url=url)
-        scan_id = scan.get("scan")
-        urls = _zap_get("/JSON/core/view/urls/", baseurl=url).get("urls", [])
-    except (requests.RequestException, ValueError) as exc:
-        return _tool_unavailable("zap.spider", str(exc), url=url, urls_found=[])
-    return {"available": True, "url": url, "scan": scan_id, "urls_found": urls}
-
-
-def _active_scan(url: str) -> dict[str, Any]:
-    try:
-        scan = _zap_get("/JSON/ascan/action/scan/", url=url)
-        alerts = _zap_get("/JSON/core/view/alerts/", baseurl=url).get("alerts", [])
-    except (requests.RequestException, ValueError) as exc:
-        return _tool_unavailable("zap.active_scan", str(exc), url=url, alerts=[])
-    return {"available": True, "url": url, "scan": scan.get("scan"), "alerts": alerts}
-
-
-def build_zap_mcp() -> MCPServer:
-    server = create_mcp_server("zap", "OWASP ZAP API adapter")
-
-    @server.tool(
-        name="spider",
-        description="Run ZAP spider against a target URL and return discovered URLs.",
-    )
-    async def spider(url: str) -> dict[str, Any]:
-        return await asyncio.to_thread(_spider, url)
-
-    @server.tool(
-        name="active_scan",
-        description="Run a ZAP active scan against a target and return current alerts.",
-    )
-    async def active_scan(url: str) -> dict[str, Any]:
-        return await asyncio.to_thread(_active_scan, url)
 
     return server

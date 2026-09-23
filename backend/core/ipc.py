@@ -168,11 +168,7 @@ def record_pending_flag(
             evidence_artifact, idempotency_key, created_at
         ) VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s)
         ON CONFLICT (idempotency_key) DO UPDATE
-        SET status = CASE
-                WHEN flag_submissions.status = 'verified' THEN 'verified'
-                ELSE 'pending' END,
-            error = NULL,
-            evidence_artifact = COALESCE(EXCLUDED.evidence_artifact, flag_submissions.evidence_artifact)
+        SET evidence_artifact = COALESCE(EXCLUDED.evidence_artifact, flag_submissions.evidence_artifact)
         RETURNING status
         """,
         (project_id, flag, normalized, source, evidence_artifact, key, now),
@@ -180,6 +176,7 @@ def record_pending_flag(
     return {
         "ok": True,
         "mode": "verified" if row and row["status"] == "verified" else "pending",
+        "submission_status": row["status"],
         "flag": normalized,
         "idempotency_key": key,
         "project_status": project["status"],
@@ -187,11 +184,11 @@ def record_pending_flag(
 
 
 def requires_platform_verdict(project_row) -> bool:
-    """A project solved on ret2shell must be judged by the platform, not locally."""
+    """Every externally linked platform challenge requires a real verdict."""
 
     return bool(
         project_row
-        and project_row["platform"] == "ret2shell"
+        and str(project_row["platform"] or "").strip()
         and str(project_row["external_id"] or "").strip()
     )
 

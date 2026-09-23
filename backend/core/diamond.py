@@ -37,13 +37,23 @@ class Diamond:
 
     # ---- initial deployment ----
 
-    def assign_initial(self, project_id: str) -> Assignment | None:
-        avail = self.available_member_configs()
+    def assign_initial(
+        self, project_id: str, excluded_members: set[str] | None = None,
+        preferred_member: str | None = None,
+    ) -> Assignment | None:
+        excluded = excluded_members or set()
+        avail = [
+            member for member in self.available_member_configs()
+            if member.name not in excluded
+        ]
         if not avail:
             return None
         # Aventurine is the default first worker by config convention only; all
         # Members are equal CTF solvers and reinforcements use the same class.
-        initial = next((m for m in avail if m.name == "aventurine"), avail[0])
+        initial = next(
+            (m for m in avail if preferred_member and m.name == preferred_member),
+            next((m for m in avail if m.name == "aventurine"), avail[0]),
+        )
         with self.db.connect() as conn:
             graph_store.set_agent_state(conn, project_id, "diamond", "active")
             # IPC -> Diamond (start solving)

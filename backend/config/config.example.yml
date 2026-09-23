@@ -2,39 +2,17 @@ log_enabled: true
 diamond:
   api_format: deepseek
   api_surface: auto
-  reasoning_effort: auto
+  reasoning_effort: high
   api_key: 
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
-members:
-- api_format: deepseek
+member:
+  api_format: deepseek
   api_surface: auto
-  reasoning_effort: auto
-  api_key: 
+  reasoning_effort: high
+  api_key: ''
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
-  name: aventurine
-- api_format: deepseek
-  api_surface: auto
-  reasoning_effort: auto
-  api_key: 
-  base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-  name: pearl
-- api_format: deepseek
-  api_surface: auto
-  reasoning_effort: auto
-  api_key: 
-  base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-  name: jade
-- api_format: deepseek
-  api_surface: auto
-  reasoning_effort: auto
-  api_key:
-  base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-  name: topaz
 runtime:
   eval_interval_steps: 20
   interval: 2
@@ -44,8 +22,7 @@ runtime:
   sandbox_backend: docker
   max_member_steps: 60
   max_member_actions_per_task: 20
-  zap_enabled: false
 limits:
   total_cpu: 4
-  max_concurrent_tasks: 5
+  max_concurrent_tasks: 10
   network: true

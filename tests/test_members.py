@@ -128,8 +128,12 @@ def test_initial_member_solves_to_flag(deps):
     assert flags == [pid]
     with db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
+        intent = edge_store.get_intent(conn, pid, iid)
     assert detail.project.status == "solved"
     assert detail.project.flag == "flag{test}"
+    assert intent["lease_owner"] is None
+    assert intent["lease_token"] is None
+    assert intent["lease_expires_at"] is None
     # a goal edge exists
     assert any(i.to == "goal" for i in detail.intents)
 
@@ -151,6 +155,30 @@ def test_member_interrupt_after_model_call_prevents_returned_action(deps):
 
     assert result.status == "stopped"
     assert not (d.sandbox.workspace / "should-not-exist").exists()
+
+
+def test_continuous_member_is_not_stopped_by_legacy_action_budget(deps):
+    db, d, reports, flags = deps
+    pid, iid = _project(db)
+    d.max_actions_per_task = 1
+    d.continuous = True
+    member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
+
+    class ThreeTurns:
+        calls = 0
+
+        def decide(self, context):
+            self.calls += 1
+            if self.calls < 3:
+                return MemberAction.from_obj(
+                    {"action": "bash", "command": f"echo turn-{self.calls}"}
+                )
+            return MemberAction.from_obj({"action": "done", "reason": "complete"})
+
+    member.adapter = ThreeTurns()
+    result = member.solve(pid, iid, "web", is_initial=True)
+    assert result.status == "done"
+    assert result.steps == 3
 
 
 def test_member_restores_observations_after_failed_model_call(deps):
@@ -199,6 +227,9 @@ def test_followup_member_concludes(deps):
     with db.connect() as conn:
         row = edge_store.get_intent(conn, pid, iid)
     assert row["to_fact_id"] == result.fact_id
+    assert row["lease_owner"] is None
+    assert row["lease_token"] is None
+    assert row["lease_expires_at"] is None
 
 
 def _stale_member_and_intent(db, deps):

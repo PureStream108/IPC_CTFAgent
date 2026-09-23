@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
@@ -21,7 +22,16 @@ from backend.core.logging_util import IPCLogger
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
-from backend.members.adapters import BaseAdapter, DecisionOutputError, MemberAction, ProviderError
+from backend.members.adapters import (
+    ACTION_KINDS,
+    BaseAdapter,
+    DecisionOutputError,
+    MemberAction,
+    ProviderError,
+)
+from backend.competition.runtime import SessionRunner
+from backend.competition.conversation import ConversationAdapter, ToolCall
+from backend.competition.transport import ReconSubscriber
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.sandbox import Sandbox
@@ -55,11 +65,25 @@ class MemberDeps:
     eval_interval: int = 7
     max_steps: int = 60
     max_actions_per_task: int = 4
+    continuous: bool = False
     on_report: Callable[[str, Any], None] | None = None   # (project_id, Report)
     on_flag: Callable[[str], None] | None = None           # (project_id)
     expected_flag: str | None = None
     lease_owner: str | None = None
     lease_token: str | None = None
+    # Set only for competition assignments.  The legacy graph dispatcher can
+    # then share the durable competition session/event protocol without
+    # changing standalone project behavior.
+    competition_store: Any | None = None
+    competition_assignment: dict[str, Any] | None = None
+    # Real competition assignments may opt into the provider-native streamed
+    # loop.  Standalone projects and mock adapters continue using the legacy
+    # graph dispatcher unless this explicit bridge is enabled.
+    competition_native: bool = False
+    competition_conversation_factory: Callable[[Any], Any] | None = None
+    competition_recon_endpoint: str | None = None
+    competition_recon_replay: Callable[..., list[dict[str, Any]]] | None = None
+    competition_recon_advance: Callable[[str, int], int] | None = None
 
 
 @dataclass
@@ -102,9 +126,100 @@ class BaseMember:
         self._progress_path: str | None = None
         self._progress_project_id: str | None = None
         self._progress_save_error_reported = False
+        self._session_runner: SessionRunner | None = None
+        self._recon_subscriber: ReconSubscriber | None = None
+        self._session_recording_failed = False
+
+    def _competition_session(self) -> SessionRunner | None:
+        if self._session_runner is not None:
+            return self._session_runner
+        store = self.deps.competition_store
+        assignment = self.deps.competition_assignment
+        if store is None or assignment is None:
+            return None
+        self._session_runner = SessionRunner(
+            store,
+            None,
+            None,
+            assignment=assignment,
+            system=f"Persistent competition session for Member {self.name}",
+            tools=[],
+        )
+        return self._session_runner
+
+    def _record_competition_event(self, callback) -> bool:
+        runner = self._competition_session()
+        if runner is None or self._session_recording_failed:
+            return True
+        try:
+            callback(runner)
+            return True
+        except Exception as exc:
+            self._session_recording_failed = True
+            self._stop.set()
+            self.deps.logger.project(
+                "competition_session_persistence_failed",
+                self._progress_project_id or "unknown",
+                member=self.name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return False
 
     def stop(self) -> None:
         self._stop.set()
+        if self._recon_subscriber is not None:
+            self._recon_subscriber.close()
+            self._recon_subscriber = None
+
+    def _competition_recon(self) -> ReconSubscriber | None:
+        if self._recon_subscriber is not None:
+            return self._recon_subscriber
+        d = self.deps
+        if (
+            getattr(d, "competition_assignment", None) is None
+            or getattr(d, "competition_recon_replay", None) is None
+            or getattr(d, "competition_recon_advance", None) is None
+        ):
+            return None
+        assignment = d.competition_assignment
+        self._recon_subscriber = ReconSubscriber(
+            getattr(d, "competition_recon_endpoint", None),
+            str(assignment["challenge_id"]),
+            session_id=str(assignment["session_id"]),
+            replay=d.competition_recon_replay,
+            advance=d.competition_recon_advance,
+        )
+        return self._recon_subscriber
+
+    def _drain_competition_recon(self, runner: SessionRunner | None = None) -> list[dict[str, Any]]:
+        """Persist received recon into the session before acknowledging it."""
+        subscriber = self._competition_recon()
+        if subscriber is None:
+            return []
+        messages: list[dict[str, Any]] = []
+        while True:
+            record = subscriber.receive(timeout_ms=0)
+            if record is None:
+                break
+            envelope = record.get("envelope", record)
+            payload = envelope.get("payload", {}) if isinstance(envelope, dict) else {}
+            sequence = int(record["sequence"])
+            message = {
+                "role": "user",
+                "content": (
+                    "Durable reconnaissance from a teammate. Use it as evidence and "
+                    "avoid repeating the same action:\n"
+                    + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                ),
+            }
+            if runner is not None:
+                runner.record_provider_message(
+                    message,
+                    event_key=f"recon:{sequence}",
+                )
+            messages.append(message)
+            subscriber.ack(sequence)
+        return messages
 
     def solve(self, project_id: str, intent_id: str, category: str, is_initial: bool = False) -> SolveResult:
         """Synchronous compatibility entry point for non-async callers."""
@@ -164,6 +279,35 @@ class BaseMember:
             initial=is_initial,
             restored_observations=len(self.observations),
         )
+        if self._native_competition_enabled():
+            return await self._solve_with_native_session(
+                project_id,
+                intent_id,
+                category,
+                is_initial,
+                mcp_session,
+            )
+        session_runner = self._competition_session()
+        if session_runner is not None:
+            try:
+                self._drain_competition_recon(session_runner)
+                existing = session_runner.store.events(session_runner.session_id, limit=1)
+                if not existing:
+                    session_runner.record_user_message(
+                        f"Begin the persistent {category} challenge session for intent {intent_id}."
+                    )
+            except Exception as exc:
+                self._session_recording_failed = True
+                d.logger.project(
+                    "competition_session_restore_failed",
+                    project_id,
+                    member=self.name,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return SolveResult(
+                    status="stalled", steps=0,
+                    error="competition session could not be restored",
+                )
         if not self._claim(project_id, intent_id):
             d.logger.project(
                 "intent_claim_lost",
@@ -179,8 +323,10 @@ class BaseMember:
         graph_actions: list[str] = []
         branch_intents = 0
         invalid_actions = 0
-        while step < task_budget and not self._stop.is_set():
+        while (d.continuous or step < task_budget) and not self._stop.is_set():
             step += 1
+            if session_runner is not None:
+                self._drain_competition_recon(session_runner)
             evaluate_now = step % d.eval_interval == 0
             context = self._build_context(project_id, intent_id, category, step, is_initial, evaluate_now)
             try:
@@ -303,16 +449,63 @@ class BaseMember:
                 d.logger.project("member_loop_detected", project_id, member=self.name, intent=intent_id, steps=step)
                 return SolveResult(status="stalled", steps=step)
 
+            # Persist the model action before dispatching its side effect.  A
+            # restarted worker can then distinguish a completed tool call from
+            # one that was claimed but never returned, instead of blindly
+            # issuing the same shell/MCP operation twice.
+            session_call: ToolCall | None = None
+            if session_runner is not None:
+                signature = hashlib.sha256(
+                    json.dumps(
+                        {"kind": action.kind, "args": action.args},
+                        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()[:24]
+                call_id = f"legacy:{intent_id}:{signature}"
+                session_call = ToolCall(call_id, action.kind, action.args)
+                prior = session_runner.call_state(call_id)
+                if prior == "done":
+                    self._observe("[replayed competition action result restored from durable session]")
+                    continue
+                if prior == "pending":
+                    # The previous process may have executed the side effect
+                    # immediately before crashing.  Surface uncertainty to the
+                    # model and require an explicit, new action/evidence path.
+                    unknown = {"status": "unknown", "reason": "worker restarted during tool execution"}
+                    session_runner.record_tool_result(
+                        session_call,
+                        {"role": "tool", "tool_call_id": call_id, "content": json.dumps(unknown)},
+                    )
+                    self._observe("[previous competition tool call is unknown; do not replay it]")
+                    continue
+                if not self._record_competition_event(
+                    lambda runner: runner.record_provider_message(
+                        {"role": "assistant", "content": json.dumps(
+                            {"action": action.kind, "arguments": action.args},
+                            ensure_ascii=False,
+                        )},
+                        event_key=f"provider:{call_id}",
+                        text=action.thought,
+                    )
+                ):
+                    self._release(project_id, intent_id)
+                    return SolveResult(status="stalled", steps=step, error="session lease lost")
+                if not self._record_competition_event(
+                    lambda runner: runner.record_tool_call(session_call)
+                ):
+                    self._release(project_id, intent_id)
+                    return SolveResult(status="stalled", steps=step, error="session lease lost")
+
             try:
                 dispatched = await self._dispatch(
-                    project_id,
-                    intent_id,
-                    category,
-                    action,
-                    step,
-                    mcp_session,
-                    allow_intent=branch_intents < 1,
-                )
+                        project_id,
+                        intent_id,
+                        category,
+                        action,
+                        step,
+                        mcp_session,
+                        allow_intent=branch_intents < 1,
+                    )
             except FlagConflictError as exc:
                 self._release(project_id, intent_id)
                 d.logger.project(
@@ -351,6 +544,25 @@ class BaseMember:
                     retryable=False,
                     error_kind="terminal_validation",
                 )
+            if session_runner is not None and session_call is not None:
+                result_payload = {
+                    "status": "ok",
+                    "graph_action": dispatched.graph_action,
+                    "invalid_action": dispatched.invalid_action,
+                    "terminal": dispatched.result.status if dispatched.result else None,
+                }
+                if not self._record_competition_event(
+                    lambda runner: runner.record_tool_result(
+                        session_call,
+                        {
+                            "role": "tool",
+                            "tool_call_id": session_call.id,
+                            "content": json.dumps(result_payload, ensure_ascii=False),
+                        },
+                    )
+                ):
+                    self._release(project_id, intent_id)
+                    return SolveResult(status="stalled", steps=step, error="session lease lost")
             if dispatched.graph_action is not None:
                 graph_actions.append(dispatched.graph_action)
                 if dispatched.graph_action == "intent":
@@ -379,6 +591,10 @@ class BaseMember:
             else:
                 invalid_actions = 0
             if dispatched.result is not None:
+                # Terminal graph actions (flag/conclude) may be dispatched by
+                # a custom provider bridge, so release the intent here even
+                # when the dispatcher itself did not perform the cleanup.
+                self._release(project_id, intent_id)
                 return dispatched.result
         if self._stop.is_set():
             self._release(project_id, intent_id)
@@ -399,6 +615,245 @@ class BaseMember:
             graph_actions=graph_actions,
         )
         return SolveResult(status=status, steps=step)
+
+    def _native_competition_enabled(self) -> bool:
+        config = getattr(self.adapter, "config", None)
+        return bool(
+            self.deps.competition_native
+            and self.deps.competition_store is not None
+            and self.deps.competition_assignment is not None
+            and config is not None
+            and getattr(config, "api_format", "mock") != "mock"
+        )
+
+    @staticmethod
+    def _native_action_tool() -> dict[str, Any]:
+        return {
+            "name": "member_action",
+            "description": (
+                "Execute one CTF investigation action. Return the action kind "
+                "and its fields; never claim a flag without evidence."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": list(ACTION_KINDS)},
+                    "thought": {"type": "string"},
+                    "args": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": True,
+            },
+        }
+
+    def _make_native_runner(self, tools: list[dict[str, Any]]) -> SessionRunner:
+        factory = self.deps.competition_conversation_factory
+        if factory is None:
+            adapter = ConversationAdapter(self.adapter.config)
+        else:
+            adapter = factory(self.adapter.config)
+        runner = SessionRunner(
+            self.deps.competition_store,
+            adapter,
+            None,  # installed by _solve_with_native_session below
+            assignment=self.deps.competition_assignment,
+            system=(
+                f"You are Member {self.name}, a persistent {self.role_blurb}. "
+                "Use the member_action function for every investigation step. "
+                "Continue until the challenge is solved, a real flag is verified, "
+                "or evidence is genuinely exhausted."
+            ),
+            tools=tools,
+            cancel=self._stop,
+            emit=lambda text: self.deps.logger.llm(
+                "stream", self._progress_project_id or "unknown",
+                member=self.name, text=text[:2000],
+            ),
+            before_turn=self._drain_competition_recon,
+        )
+        return runner
+
+    async def _solve_with_native_session(
+        self,
+        project_id: str,
+        intent_id: str,
+        category: str,
+        is_initial: bool,
+        mcp_session: MCPRegistrySession,
+    ) -> SolveResult:
+        """Drive a real provider tool-call stream through the durable runner.
+
+        The legacy graph dispatcher remains the side-effect implementation. A
+        provider-native call is translated into the same ``MemberAction`` and
+        passes through the same lease/flag/WP transactions, so changing the
+        conversation surface cannot bypass existing fencing rules.
+        """
+        if not self._claim(project_id, intent_id):
+            self.deps.logger.project(
+                "intent_claim_lost", project_id, member=self.name, intent=intent_id
+            )
+            return SolveResult(status="stalled", steps=0, error="intent lease unavailable")
+        self._seed_tool_inventory(project_id)
+        self._prime_tool_context(project_id, intent_id, category)
+        state: dict[str, Any] = {
+            "steps": 0,
+            "graph_actions": [],
+            "branch_intents": 0,
+            "result": None,
+            "error": None,
+        }
+        tool = self._native_action_tool()
+        try:
+            runner = self._make_native_runner([tool])
+        except Exception as exc:
+            self._release(project_id, intent_id)
+            return SolveResult(
+                status="failed", steps=0, error=str(exc),
+                retryable=False, error_kind="native_setup",
+            )
+        member = self
+
+        class Executor:
+            async def execute(_self, name, arguments, *, idempotency_key):
+                del idempotency_key
+                if name != "member_action":
+                    state["error"] = f"unsupported provider tool: {name}"
+                    runner.cancel.set()
+                    return {"status": "rejected", "error": state["error"]}
+                raw = dict(arguments or {})
+                nested = raw.pop("args", None)
+                if isinstance(nested, dict):
+                    merged = dict(nested)
+                    merged.update(raw)
+                    raw = merged
+                try:
+                    action = MemberAction.from_obj(raw)
+                except (TypeError, ValueError) as exc:
+                    state["error"] = str(exc)
+                    runner.cancel.set()
+                    return {"status": "invalid_action", "error": str(exc)}
+                state["steps"] += 1
+                step = state["steps"]
+                if not member._heartbeat(project_id, intent_id):
+                    state["error"] = "intent lease lost"
+                    runner.cancel.set()
+                    return {"status": "lease_lost"}
+                loop_status = member._record_action_signature(action)
+                if loop_status == "warn":
+                    member._observe(
+                        "[stuckness] repeated native action; switch exploit class or evidence source"
+                    )
+                if loop_status == "break":
+                    state["error"] = "repeated provider action signature"
+                    runner.cancel.set()
+                    return {"status": "loop_detected"}
+                member.deps.logger.llm(
+                    "native_action", project_id, member=member.name,
+                    intent=intent_id, step=step, action=action.kind,
+                )
+                try:
+                    dispatched = await member._dispatch(
+                        project_id,
+                        intent_id,
+                        category,
+                        action,
+                        step,
+                        mcp_session,
+                        allow_intent=state["branch_intents"] < 1,
+                    )
+                except FlagConflictError as exc:
+                    state["error"] = str(exc)
+                    state["result"] = SolveResult(
+                        status="stalled", steps=step, error=str(exc),
+                        retryable=False, error_kind="flag_conflict",
+                    )
+                    runner.cancel.set()
+                    return {"status": "flag_conflict", "error": str(exc)}
+                except ValueError as exc:
+                    state["error"] = str(exc)
+                    state["result"] = SolveResult(
+                        status="stalled", steps=step, error=str(exc),
+                        retryable=False, error_kind="terminal_validation",
+                    )
+                    runner.cancel.set()
+                    return {"status": "validation_error", "error": str(exc)}
+                if dispatched.graph_action is not None:
+                    state["graph_actions"].append(dispatched.graph_action)
+                    if dispatched.graph_action == "intent":
+                        state["branch_intents"] += 1
+                result = dispatched.result
+                if result is not None:
+                    state["result"] = result
+                    runner.cancel.set()
+                return {
+                    "status": "ok",
+                    "graph_action": dispatched.graph_action,
+                    "invalid_action": dispatched.invalid_action,
+                    "terminal": result.status if result else None,
+                }
+
+        runner.executor = Executor()
+        try:
+            context = self._build_context(
+                project_id, intent_id, category, 0, is_initial, True
+            )
+            initial = (
+                f"Begin the {category} challenge for intent {intent_id}. "
+                "Persist useful evidence and choose the next action.\n"
+                + json.dumps(context, ensure_ascii=False)
+            )
+            native_result = await runner.run_async(initial)
+        except ProviderError as exc:
+            self._release(project_id, intent_id)
+            self.deps.logger.project(
+                "member_error", project_id, member=self.name, intent=intent_id,
+                error=f"{type(exc).__name__}: {exc}", retryable=exc.retryable,
+                error_kind="provider",
+            )
+            return SolveResult(
+                status="failed", steps=state["steps"], error=str(exc),
+                retryable=exc.retryable, error_kind="provider",
+            )
+        except Exception as exc:
+            self._release(project_id, intent_id)
+            self.deps.logger.project(
+                "member_error", project_id, member=self.name, intent=intent_id,
+                error=f"{type(exc).__name__}: {exc}", retryable=True,
+                error_kind="native_runtime",
+            )
+            return SolveResult(
+                status="failed", steps=state["steps"], error=str(exc),
+                retryable=True, error_kind="native_runtime",
+            )
+        if state["result"] is not None:
+            # The provider stream cancels immediately after a terminal
+            # MemberAction.  Release the durable intent before returning the
+            # result so a replacement/helper can be scheduled safely.
+            self._release(project_id, intent_id)
+            return state["result"]
+        if state["error"]:
+            self._release(project_id, intent_id)
+            return SolveResult(
+                status="stalled", steps=state["steps"], error=state["error"],
+            )
+        if self._stop.is_set():
+            self._release(project_id, intent_id)
+            return SolveResult(status="stopped", steps=state["steps"])
+        self._release(project_id, intent_id)
+        status = "done" if state["graph_actions"] or native_result.status == "idle" else "stalled"
+        if state["error"]:
+            status = "stalled"
+        self.deps.logger.project(
+            "member_task_finished", project_id, member=self.name,
+            intent=intent_id, status=status, steps=state["steps"],
+            runtime="provider-native",
+        )
+        return SolveResult(
+            status=status, steps=state["steps"], error=state["error"]
+        )
 
     async def _dispatch(
         self,
@@ -1253,9 +1708,13 @@ class BaseMember:
             "role_blurb": self.role_blurb,
             "category": category,
             "step": step,
-            "max_steps": min(d.max_steps, d.max_actions_per_task),
-            "short_task": True,
+            "max_steps": None if d.continuous else min(d.max_steps, d.max_actions_per_task),
+            "short_task": not d.continuous,
             "task_contract": (
+                "Continue this challenge session until there is a verified result, an operator cancellation, "
+                "a lost lease, or concrete evidence that a different direction or helper is required. "
+                "There is no artificial step budget. Do not repeat previous attempts."
+                if d.continuous else
                 "This is a short exploration task. Produce one clear result quickly: "
                 "flag, conclude, a useful new intent, or a difficulty report with concrete next directions. "
                 "Evaluate difficulty every eval_interval steps, but report only when the assessed level changes "

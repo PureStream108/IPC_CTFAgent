@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from backend.api.deps import get_state
 from backend.core.config import (
+    AppConfig,
+    LLMConfig,
     ApiFormat,
     ApiSurface,
     CATEGORIES,
-    MEMBER_NAMES,
-    MemberConfig,
-    ReasoningEffort,
+    SelectedReasoningEffort,
     RuntimeConfig,
 )
 from backend.core.state import AppState
@@ -19,16 +19,17 @@ router = APIRouter(tags=["config"])
 
 
 class LLMUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     api_format: ApiFormat | None = None
     api_surface: ApiSurface | None = None
-    reasoning_effort: ReasoningEffort | None = None
+    reasoning_effort: SelectedReasoningEffort | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
 
 
 class RuntimeUpdate(BaseModel):
-    zap_enabled: bool | None = None
+    model_config = ConfigDict(extra="forbid")
     browser_event_limit: int | None = None
     browser_console_limit: int | None = None
     browser_error_limit: int | None = None
@@ -38,8 +39,12 @@ class RuntimeUpdate(BaseModel):
 
 
 class ConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     log_enabled: bool | None = None
     diamond: LLMUpdate | None = None
+    member: LLMUpdate | None = None
+    use_legacy_member: str | None = None
     members: dict[str, LLMUpdate] | None = None  # keyed by member name
     remove_members: list[str] | None = None
     runtime: RuntimeUpdate | None = None
@@ -53,7 +58,15 @@ def _redact(value: str) -> str:
 
 def _config_view(state: AppState) -> dict:
     cfg = state.config
+    shared = cfg.member or LLMConfig()
     return {
+        "member_config_conflict": cfg.member_config_conflict,
+        "member": {
+            **shared.model_dump(exclude={"api_key"}),
+            "api_key_set": bool(shared.api_key),
+            "api_key_preview": _redact(shared.api_key),
+            "configured": shared.configured,
+        },
         "log_enabled": cfg.log_enabled,
         "categories": list(CATEGORIES),
         "diamond": {
@@ -81,7 +94,6 @@ def _config_view(state: AppState) -> dict:
             for m in cfg.members
         ],
         "runtime": {
-            "zap_enabled": cfg.runtime.zap_enabled,
             "browser_event_limit": cfg.runtime.browser_event_limit,
             "browser_console_limit": cfg.runtime.browser_console_limit,
             "browser_error_limit": cfg.runtime.browser_error_limit,
@@ -149,28 +161,24 @@ def _apply(llm, upd: LLMUpdate) -> None:
 
 @router.put("/config")
 def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
-    cfg = state.config
-    remove_names: set[str] = set()
-    for raw_name in body.remove_members or []:
-        try:
-            name = MemberConfig(name=raw_name).name
-        except ValidationError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if not name:
-            raise HTTPException(400, "member name cannot be empty")
-        remove_names.add(name)
-    normalized_updates: dict[str, LLMUpdate] = {}
-    for raw_name, upd in (body.members or {}).items():
-        try:
-            name = MemberConfig(name=raw_name).name
-        except ValidationError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if not name:
-            raise HTTPException(400, "member name cannot be empty")
-        if name in normalized_updates:
-            raise HTTPException(400, f"duplicate member name: {name}")
-        normalized_updates[name] = upd
-
+    cfg = state.config.model_copy(deep=True)
+    if body.remove_members:
+        raise HTTPException(400, "The ten Member identities are fixed.")
+    if body.members:
+        raise HTTPException(400, "Use the shared member configuration instead of per-member endpoints.")
+    if body.use_legacy_member is not None:
+        if body.member is not None or not cfg.member_config_conflict:
+            raise HTTPException(400, "Select a legacy endpoint only while resolving a migration conflict.")
+        selected = next((m for m in cfg.members if m.name == body.use_legacy_member), None)
+        if selected is None:
+            raise HTTPException(400, "Legacy Member endpoint not found.")
+        cfg.member = LLMConfig.model_validate(selected.model_dump(exclude={"name"}))
+        cfg.member_config_conflict = False
+    if body.member is not None:
+        shared = cfg.member.model_copy(deep=True) if cfg.member else LLMConfig()
+        _apply(shared, body.member)
+        cfg.member = shared
+        cfg.member_config_conflict = False
     if body.log_enabled is not None:
         cfg.log_enabled = body.log_enabled
     if body.diamond is not None:
@@ -183,23 +191,14 @@ def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
         try:
             cfg.runtime = RuntimeConfig.model_validate(runtime_values)
         except ValidationError as exc:
-            raise HTTPException(400, str(exc)) from exc
-    if remove_names:
-        cfg.members = [member for member in cfg.members if member.name not in remove_names]
-    if normalized_updates:
-        by_name = {m.name: m for m in cfg.members}
-        for name, upd in normalized_updates.items():
-            member = by_name.get(name)
-            if member is None:
-                member = MemberConfig(name=name)
-                cfg.members.append(member)
-                by_name[name] = member
-            _apply(member, upd)
-    # The built-in roster is fixed; keep blank members present even when an
-    # older client sends the legacy remove_members field.
-    by_name = {member.name: member for member in cfg.members}
-    cfg.members = [by_name.pop(name, MemberConfig(name=name)) for name in MEMBER_NAMES]
-    cfg.members.extend(by_name.values())
+            # Pydantic's default string includes rejected input, which can
+            # contain credentials accidentally pasted into an origin URL.
+            detail = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_context=False, include_url=False)
+            )
+            raise HTTPException(400, detail) from exc
+    state.config = AppConfig.model_validate(cfg.model_dump())
     state.save_config()
     return _config_view(state)
 
@@ -214,9 +213,9 @@ def health_check(state: AppState = Depends(get_state)):
         results["diamond"] = adapter_health(state.config.diamond)
     else:
         results["diamond"] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
-    for m in state.config.members:
+    for m in [state.config.member] if state.config.member else []:
         if m.configured:
-            results[m.name] = adapter_health(m)
+            results["member"] = adapter_health(m)
         else:
-            results[m.name] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
+            results["member"] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
     return {"results": results, "startup_errors": state.config.startup_errors()}

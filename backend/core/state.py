@@ -95,9 +95,14 @@ class AppState:
         self.network = NetworkManager(backend=self.config.runtime.sandbox_backend)
 
         # In-process MCP servers (memory + tool_search). The container-backed
-        # servers (browser, reverse, zap) run inside each task container and are
+        # servers (browser, reverse) run inside each task container and are
         # injected per Member by the orchestrator via docker-exec stdio targets.
         self.mcps = MCPRegistry()
+        from backend.skills.store import SkillStore
+        from backend.skills.mcp import build_skills_mcp
+        self.skills = SkillStore(self.artifact_root / "skills", Path("/opt/ipc-skills"))
+        self.skills.bootstrap()
+        self.mcps.register(build_skills_mcp(self.skills))
         self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
         # The ret2shell competition MCP (dynamic instance control) is only

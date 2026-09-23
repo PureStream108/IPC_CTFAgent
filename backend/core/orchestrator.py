@@ -3,16 +3,24 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import hashlib
 import json
 import sys
 from time import monotonic
 from typing import Any
 import uuid
 
+from psycopg.errors import UndefinedColumn, UndefinedTable
+
 from backend.blackboard import edge_store, graph_store, node_store
+from backend.core.engine_lease import (
+    claim_engine_lease,
+    release_engine_lease,
+)
 from backend.core.archive import archive_completed_project
 from backend.core.diamond import Diamond
 from backend.core.ipc import (
@@ -45,6 +53,7 @@ from backend.platform.ret2shell import (
 from backend.sandbox.errors import SandboxStartupError
 from backend.sandbox.task_sandbox import member_workdir, task_container_name
 from backend.core.wp_writer import persist_validated_writeup
+from backend.competition.transport import Envelope
 
 
 @dataclass(slots=True)
@@ -95,6 +104,10 @@ class Orchestrator:
             thread_name_prefix="ipc-startup",
         )
         self._members: dict[str, dict[str, Any]] = {}
+        # Member identities are global competition seats, not per-project
+        # resources.  Startup reservations close the race between concurrent
+        # project bootstrap workers before the Member object is registered.
+        self._reserved_members: set[str] = set()
         self._futures: dict[str, list] = {}
         self._task_index: dict[tuple[str, str], Any] = {}
         self._completing: set[str] = set()
@@ -107,6 +120,12 @@ class Orchestrator:
         self._member_retry_not_before: dict[tuple[str, str], float] = {}
         self._member_stall_counts: dict[tuple[str, str], int] = {}
         self._project_leases: dict[str, str] = {}
+        # A separate scheduler fence prevents this legacy engine from racing
+        # the competition coordinator while both can still see the same
+        # durable Project row.  Competition workers use the coordinator's
+        # owner token through ``state.competition_engine_owner``.
+        self._engine_leases: dict[str, tuple[str, str]] = {}
+        self._engine_owner = f"{state.instance_id}:legacy"
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -136,6 +155,10 @@ class Orchestrator:
         self.startup_executor.shutdown(wait=True, cancel_futures=True)
         self._stop_members()
         self.executor.shutdown(wait=True, cancel_futures=True)
+        with self._lock:
+            engine_projects = list(getattr(self, "_engine_leases", {}))
+        for project_id in engine_projects:
+            self._release_project_engine_lease(project_id)
 
     def _stop_members(self) -> None:
         with self._lock:
@@ -157,6 +180,11 @@ class Orchestrator:
 
         if self._stop.is_set():
             raise RuntimeError("orchestrator is shutting down")
+
+        if self._competition_project(project_id) and not self._competition_running(project_id):
+            # A paused/blocked run owns this Project.  Its coordinator must
+            # Resume first; a direct legacy Start cannot revive solver work.
+            return self.runtime_status(project_id)
 
         status = self.lifecycle.status(project_id)
         if status is None:
@@ -218,7 +246,72 @@ class Orchestrator:
                 self._startup_project_ids.discard(project_id)
                 self._startup_futures.pop(project_id, None)
 
+    def _engine_context(self, project_id: str) -> tuple[str, str] | None:
+        """Select the scheduler identity that may own a Project.
+
+        Competition projects are executed by the legacy Member runtime for
+        compatibility, but the competition coordinator remains the scheduler
+        owner.  Reusing its owner token lets both components renew one fence
+        without allowing a standalone legacy start to steal it.
+        """
+        if self._competition_project(project_id):
+            owner = getattr(self.state, "competition_engine_owner", None)
+            if not owner:
+                # During an incremental migration the coordinator may not yet
+                # be attached.  Fail closed instead of letting the old engine
+                # claim a project that belongs to an active competition.
+                return None
+            return "competition", str(owner)
+        return "legacy", self._engine_owner
+
+    def _claim_project_engine_lease(self, project_id: str) -> bool:
+        context = self._engine_context(project_id)
+        if context is None:
+            return False
+        kind, owner = context
+        try:
+            lease = claim_engine_lease(
+                self.state.db, project_id, kind, owner,
+                seconds=max(30, self.state.config.runtime.interval * 6),
+            )
+        except (UndefinedColumn, UndefinedTable):
+            # Old databases can be opened briefly before the additive schema
+            # patch runs.  Preserve legacy startup compatibility in that
+            # narrow window; once the column exists, conflicts are fail-closed.
+            return True
+        if lease is None:
+            self.state.logger.project(
+                "engine_lease_conflict", project_id,
+                requested_kind=kind, requested_owner=owner,
+            )
+            return False
+        with self._lock:
+            if not hasattr(self, "_engine_leases"):
+                self._engine_leases = {}
+            self._engine_leases[project_id] = (kind, owner)
+        return True
+
+    def _release_project_engine_lease(self, project_id: str) -> None:
+        with self._lock:
+            context = getattr(self, "_engine_leases", {}).pop(project_id, None)
+        if context is None:
+            return
+        try:
+            release_engine_lease(
+                self.state.db, project_id, context[0], context[1]
+            )
+        except Exception:
+            # Shutdown/recovery must not mask the primary project cleanup
+            # failure.  The bounded lease expiry still fences stale work.
+            return
+
     def _ensure_project_lease(self, project_id: str) -> bool:
+        if not self._claim_project_engine_lease(project_id):
+            with self._lock:
+                had_project_lease = project_id in self._project_leases
+            if had_project_lease:
+                self._release_project_lease(project_id)
+            return False
         with self._lock:
             token = self._project_leases.get(project_id)
         with self.state.db.connect() as connection:
@@ -232,6 +325,7 @@ class Orchestrator:
         if renewed is None:
             with self._lock:
                 self._project_leases.pop(project_id, None)
+            self._release_project_engine_lease(project_id)
             return False
         with self._lock:
             self._project_leases[project_id] = renewed
@@ -255,11 +349,13 @@ class Orchestrator:
         with self._lock:
             token = self._project_leases.pop(project_id, None)
         if token is None:
+            self._release_project_engine_lease(project_id)
             return
         with self.state.db.connect() as connection:
             graph_store.release_project_lease(
                 connection, project_id, self.state.instance_id, token
             )
+        self._release_project_engine_lease(project_id)
 
     def _fence_project_after_lease_loss(self, project_id: str) -> None:
         self._remove_queued_project(project_id)
@@ -517,7 +613,15 @@ class Orchestrator:
             self._set_runtime_phase(project_id, "sandbox_preflight")
             self.resources.preflight_project(project_id)
             self._set_runtime_phase(project_id, "assigning")
-            assignment = self.diamond.assign_initial(project_id)
+            with self._lock:
+                occupied = self._global_active_members_locked() | self._reserved_members
+                assignment = self.diamond.assign_initial(
+                    project_id,
+                    occupied,
+                    preferred_member=self._competition_preferred_member(project_id),
+                )
+                if assignment is not None:
+                    self._reserved_members.add(assignment.member)
             if assignment is None:
                 self.state.logger.project("no_members_available", project_id)
                 self._mark_project_startup_failure(
@@ -533,13 +637,18 @@ class Orchestrator:
                 self.projects.teardown(project_id)
                 self._release_project_lease(project_id)
                 return
-            launched = self._launch_member(
-                project_id,
-                assignment.member,
-                assignment.intent_id,
-                self._category(project_id),
-                assignment.is_initial,
-            )
+            try:
+                launched = self._launch_member(
+                    project_id,
+                    assignment.member,
+                    assignment.intent_id,
+                    self._category(project_id),
+                    assignment.is_initial,
+                    reserved=True,
+                )
+            finally:
+                with self._lock:
+                    self._reserved_members.discard(assignment.member)
             if not launched:
                 raise RuntimeError(f"configured member is unavailable: {assignment.member}")
             if self.lifecycle.status(project_id) != "running":
@@ -653,6 +762,16 @@ class Orchestrator:
         if self.lifecycle.status(project_id) != "running":
             return
         self._broadcast_bump(project_id, report)
+        self._publish_competition_recon(
+            project_id,
+            report.member,
+            event_id=f"report:{report.id}",
+            payload={
+                "kind": "difficulty_report",
+                "report": report.model_dump(mode="json")
+                if hasattr(report, "model_dump") else str(report),
+            },
+        )
         available_slots = max(
             0,
             self.state.config.runtime.max_members_per_report - self._project_running_future_count(project_id),
@@ -707,12 +826,86 @@ class Orchestrator:
         parts.append("Use this to switch angle; avoid repeating the same action signature or exploit class.")
         return "\n\n".join(parts)
 
+    def _publish_competition_recon(
+        self,
+        project_id: str,
+        source_member: str,
+        *,
+        event_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Bridge durable Member reports into the same-challenge PUB/SUB path."""
+        competition = getattr(self.state, "competition", None)
+        if competition is None or not callable(getattr(competition, "publish_recon", None)):
+            return
+        now = datetime.now(timezone.utc)
+        try:
+            with self.state.db.connect() as connection:
+                assignments = connection.execute(
+                    """SELECT a.*
+                       FROM competition_assignments a
+                       JOIN competition_challenges c ON c.id=a.challenge_id
+                       JOIN competition_runs r ON r.id=a.run_id
+                       WHERE c.project_id=%s AND a.role<>'wp'
+                         AND a.released_at IS NULL
+                         AND r.status IN ('running','paused','draining')
+                       ORDER BY a.position,a.id""",
+                    (project_id,),
+                ).fetchall()
+            senders = [
+                item for item in assignments
+                if source_member is None or item["member"] == source_member
+            ]
+            if not senders:
+                return
+            sender = senders[0]
+            actual_source = sender["member"]
+            for receiver in assignments:
+                if receiver["member"] == actual_source:
+                    continue
+                message = Envelope(
+                    run_id=sender["run_id"],
+                    challenge_id=sender["challenge_id"],
+                    sender_member_id=actual_source,
+                    receiver_member_id=receiver["member"],
+                    sender_session_id=sender["session_id"],
+                    receiver_session_id=receiver["session_id"],
+                    request_id=f"{event_id}:{receiver['session_id']}"[:128],
+                    correlation_id=event_id,
+                    lease_epoch=sender["epoch"],
+                    created_at=now,
+                    deadline_at=now + timedelta(seconds=30),
+                    message_type="recon",
+                    payload=payload,
+                )
+                competition.publish_recon(message)
+        except Exception as exc:
+            # Collaboration is useful but must never make the primary graph
+            # report fail. The durable event/log still exposes the reason.
+            self.state.logger.project(
+                "competition_recon_publish_failed",
+                project_id,
+                member=source_member,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def _broadcast_fact(self, project_id: str, fact_id: str, source_member: str | None) -> None:
         with self.state.db.connect() as conn:
             facts = {fact.id: fact.description for fact in node_store.list_facts(conn, project_id)}
         description = facts.get(fact_id)
         if not description:
             return
+        self._publish_competition_recon(
+            project_id,
+            source_member,
+            event_id=f"fact:{fact_id}:{hashlib.sha256(description.encode()).hexdigest()[:16]}",
+            payload={
+                "kind": "confirmed_fact",
+                "fact_id": fact_id,
+                "description": description,
+                "source_member": source_member,
+            },
+        )
         insight = (
             f"Confirmed fact {fact_id}"
             + (f" from {source_member}" if source_member else "")
@@ -745,14 +938,141 @@ class Orchestrator:
                 return m
         return None
 
-    def _launch_member(self, project_id, member_name, intent_id, category, is_initial) -> bool:
+    def _competition_project(self, project_id: str) -> bool:
+        try:
+            with self.state.db.connect() as connection:
+                return bool(connection.execute(
+                    """SELECT 1 FROM competition_challenges c
+                       JOIN competition_run_challenges rc ON rc.challenge_id=c.id
+                       JOIN competition_runs r ON r.id=rc.run_id
+                       WHERE c.project_id=%s AND r.status NOT IN ('finished','stopped')
+                       LIMIT 1""",
+                    (project_id,),
+                ).fetchone())
+        except Exception:
+            # The legacy engine must remain usable during the first migration
+            # boot, before the competition tables exist.
+            return False
+
+    def _competition_running(self, project_id: str) -> bool:
+        with self.state.db.connect() as connection:
+            return bool(connection.execute(
+                """SELECT 1 FROM competition_challenges c
+                   JOIN competition_run_challenges rc ON rc.challenge_id=c.id
+                   JOIN competition_runs r ON r.id=rc.run_id
+                   WHERE c.project_id=%s AND r.status='running' LIMIT 1""",
+                (project_id,),
+            ).fetchone())
+
+    def _competition_members(self, project_id: str) -> set[str] | None:
+        """Return durable seats for a competition project, if one exists."""
+        try:
+            with self.state.db.connect() as connection:
+                rows = connection.execute(
+                    """SELECT DISTINCT a.member
+                       FROM competition_assignments a
+                       JOIN competition_challenges c ON c.id=a.challenge_id
+                       JOIN competition_runs r ON r.id=a.run_id
+                       WHERE c.project_id=%s AND a.role<>'wp'
+                         AND a.released_at IS NULL
+                         AND r.status NOT IN ('finished','stopped')""",
+                    (project_id,),
+                ).fetchall()
+            return {row["member"] for row in rows}
+        except Exception:
+            return None
+
+    def _competition_preferred_member(self, project_id: str) -> str | None:
+        """Use a persisted competition seat when bootstrapping a project."""
+        try:
+            with self.state.db.connect() as connection:
+                row = connection.execute(
+                    """SELECT a.member FROM competition_assignments a
+                       JOIN competition_challenges c ON c.id=a.challenge_id
+                       JOIN competition_runs r ON r.id=a.run_id
+                       WHERE c.project_id=%s AND a.role<>'wp'
+                         AND a.released_at IS NULL
+                         AND r.status IN ('running','paused','draining')
+                       ORDER BY a.position,a.id LIMIT 1""",
+                    (project_id,),
+                ).fetchone()
+            return row["member"] if row else None
+        except Exception:
+            # Keep the standalone project engine compatible with pre-competition
+            # databases during an incremental migration.
+            return None
+
+    def _competition_assignment(self, project_id: str, member_name: str) -> dict | None:
+        """Load the active durable assignment for a Member/project pair."""
+        try:
+            with self.state.db.connect() as connection:
+                return connection.execute(
+                    """SELECT a.* FROM competition_assignments a
+                       JOIN competition_challenges c ON c.id=a.challenge_id
+                       JOIN competition_runs r ON r.id=a.run_id
+                       WHERE c.project_id=%s AND a.member=%s AND a.role<>'wp'
+                         AND a.released_at IS NULL AND r.status='running'
+                       ORDER BY a.position,a.id LIMIT 1""",
+                    (project_id, member_name),
+                ).fetchone()
+        except Exception:
+            return None
+
+    def _global_active_members_locked(self) -> set[str]:
+        return {
+            name for project_members in self._members.values()
+            for name in project_members
+        }
+
+    def active_member_owners(self) -> dict[str, str]:
+        """Return a stable Member -> project snapshot for competition sync."""
+        with self._lock:
+            return {
+                name: project_id
+                for project_id, project_members in self._members.items()
+                for name in project_members
+            }
+
+    def _launch_member(
+        self, project_id, member_name, intent_id, category, is_initial,
+        *, reserved: bool = False,
+    ) -> bool:
         if self._stop.is_set():
             return False
+        if self._competition_project(project_id):
+            seats = self._competition_members(project_id)
+            if seats is not None and member_name not in seats:
+                self.state.logger.project(
+                    "legacy_member_blocked_by_competition",
+                    project_id,
+                    member=member_name,
+                    intent=intent_id,
+                )
+                return False
         cfg = self._member_config(member_name)
         if cfg is None:
             return False
-        assignment = self._record_member_assignment(project_id, member_name, intent_id)
+        with self._lock:
+            occupied = self._global_active_members_locked()
+            if member_name in occupied:
+                return False
+            if not reserved:
+                if member_name in self._reserved_members:
+                    return False
+                self._reserved_members.add(member_name)
+        try:
+            assignment = self._record_member_assignment(
+                project_id, member_name, intent_id
+            )
+        except Exception:
+            if not reserved:
+                with self._lock:
+                    self._reserved_members.discard(member_name)
+            raise
         if assignment is None:
+            if not reserved:
+                with self._lock:
+                    self._reserved_members.discard(member_name)
             return False
         lease_owner, lease_token = assignment
         with self._lock:
@@ -764,6 +1084,16 @@ class Orchestrator:
         member = None
         try:
             sandbox = self.resources.sandbox_for(project_id, member_name)
+            competition_assignment = (
+                self._competition_assignment(project_id, member_name)
+                if self._competition_project(project_id) else None
+            )
+            competition_store = None
+            competition_service = getattr(self.state, "competition", None)
+            if competition_assignment is not None:
+                from backend.competition.store import CompetitionStore
+
+                competition_store = CompetitionStore(self.state.db)
             deps = MemberDeps(
                 db=self.state.db,
                 logger=self.state.logger,
@@ -775,10 +1105,26 @@ class Orchestrator:
                 eval_interval=self.state.config.runtime.eval_interval_steps,
                 max_steps=self.state.config.runtime.max_member_steps,
                 max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
+                continuous=self._competition_project(project_id),
                 on_report=self.handle_report,
                 on_flag=self.on_flag_found,
                 lease_owner=lease_owner,
                 lease_token=lease_token,
+                competition_store=competition_store,
+                competition_assignment=competition_assignment,
+                competition_native=competition_assignment is not None,
+                competition_recon_endpoint=(
+                    competition_service.recon_endpoint
+                    if competition_service is not None else None
+                ),
+                competition_recon_replay=(
+                    competition_store.replay_messages
+                    if competition_store is not None else None
+                ),
+                competition_recon_advance=(
+                    competition_store.advance_message_cursor
+                    if competition_store is not None else None
+                ),
             )
             script = self.scripts.get((project_id, member_name)) or self.scripts.get(member_name)
             member = create_member(cfg, deps, script=script)
@@ -786,6 +1132,8 @@ class Orchestrator:
                 stopping = self._stop.is_set()
                 if not stopping:
                     self._members.setdefault(project_id, {})[member_name] = member
+                if not reserved:
+                    self._reserved_members.discard(member_name)
             if stopping:
                 member.stop()
                 self._release_member_assignment(
@@ -804,6 +1152,9 @@ class Orchestrator:
                 is_initial,
             )
         except Exception:
+            with self._lock:
+                if not reserved:
+                    self._reserved_members.discard(member_name)
             if member is not None:
                 member.stop()
                 with self._lock:
@@ -862,10 +1213,6 @@ class Orchestrator:
             "browser": target("browser", env=browser_env),
             "reverse": target("reverse"),
         }
-        if self.state.config.runtime.zap_enabled:
-            targets["zap"] = target(
-                "zap", env={"ZAP_API_URL": "http://ipc-zap:8080"}
-            )
         return targets
 
     def _record_member_assignment(
@@ -972,6 +1319,13 @@ class Orchestrator:
     # ---- flag found -> close pipeline ----
 
     def on_flag_found(self, project_id: str) -> None:
+        if self._competition_project(project_id):
+            # The competition coordinator ingests this durable candidate and
+            # waits for a platform verdict before stopping either solver.
+            competition = getattr(self.state, "competition", None)
+            if competition is not None:
+                competition.wake()
+            return
         with self._lock:
             if project_id in self._completing:
                 return
@@ -1057,7 +1411,9 @@ class Orchestrator:
         return requires_platform_verdict(row)
 
     def _dispatch_platform_verdict(self, project_id: str) -> bool:
-        if getattr(self.state, "ret2shell_client", None) is None:
+        with self.state.db.connect() as connection:
+            project = graph_store.get_project_row(connection, project_id)
+        if not project or project["platform"] != "ret2shell" or getattr(self.state, "ret2shell_client", None) is None:
             # Without credentials the candidate cannot be judged.  Stay in
             # flag_found: the scheduler tick re-arms verification, so the
             # project completes as soon as credentials appear.  Log once —
@@ -1069,7 +1425,7 @@ class Orchestrator:
                 self.state.logger.project(
                     "platform_verdict_deferred",
                     project_id,
-                    reason="ret2shell credentials are not configured",
+                    reason="platform verdict adapter or credentials are not configured",
                 )
             return False
         with self._lock:
@@ -1090,7 +1446,7 @@ class Orchestrator:
             with suppress(Exception):
                 with self.state.db.connect() as conn:
                     conn.execute(
-                        "UPDATE flag_submissions SET status = 'pending' "
+                        "UPDATE flag_submissions SET status = 'unknown' "
                         "WHERE project_id = %s AND status = 'judging'",
                         (project_id,),
                     )
@@ -1102,12 +1458,18 @@ class Orchestrator:
         client = self.state.ret2shell_client
         while not self._stop.is_set():
             with self.state.db.connect() as conn:
-                # A crashed judge leaves rows stuck in ``judging``; reclaim them.
+                # A crashed judge may already have sent the external request.
                 conn.execute(
-                    "UPDATE flag_submissions SET status = 'pending' "
+                    "UPDATE flag_submissions SET status = 'unknown' "
                     "WHERE project_id = %s AND status = 'judging'",
                     (project_id,),
                 )
+                if conn.execute(
+                    "SELECT 1 FROM flag_submissions WHERE project_id=%s AND status='unknown' LIMIT 1",
+                    (project_id,),
+                ).fetchone():
+                    self.state.logger.project("platform_verdict_needs_reconciliation", project_id)
+                    return
                 submission = conn.execute(
                     """
                     UPDATE flag_submissions SET status = 'judging'
@@ -1141,26 +1503,29 @@ class Orchestrator:
                 self._verdict_unknown_attempts.pop(project_id, None)
                 self._reject_submission(project_id, row, submission, detail)
                 continue
-            attempts = self._verdict_unknown_attempts.get(project_id, 0) + 1
-            self._verdict_unknown_attempts[project_id] = attempts
-            exhausted = attempts >= self._VERDICT_MAX_UNKNOWN_ATTEMPTS
             with self.state.db.connect() as conn:
-                conn.execute(
-                    "UPDATE flag_submissions SET status = %s, error = %s WHERE id = %s",
-                    ("error" if exhausted else "pending", detail, submission["id"]),
+                attempts = self._verdict_unknown_attempts.get(project_id, 0) + 1
+                self._verdict_unknown_attempts[project_id] = attempts
+                if attempts < self._VERDICT_MAX_UNKNOWN_ATTEMPTS:
+                    conn.execute(
+                        "UPDATE flag_submissions SET status='pending',error=%s WHERE id=%s",
+                        (detail, submission["id"]),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE flag_submissions SET status='error',error=%s WHERE id=%s",
+                        (detail, submission["id"]),
+                    )
+            if attempts < self._VERDICT_MAX_UNKNOWN_ATTEMPTS:
+                self.state.logger.project(
+                    "platform_verdict_retry_deferred", project_id,
+                    error=detail, attempt=attempts,
                 )
-            self.state.logger.project(
-                "platform_verdict_unknown",
-                project_id,
-                flag=submission["normalized_flag"],
-                attempt=attempts,
-                error=detail,
-            )
-            if not exhausted:
-                # Back to pending; the scheduler tick re-arms verification.
-                return
-            self._verdict_unknown_attempts.pop(project_id, None)
-            self._resume_after_verdict(project_id, reason=detail)
+            else:
+                self._verdict_unknown_attempts.pop(project_id, None)
+                self._resume_after_verdict(
+                    project_id, reason="platform verdict retries exhausted"
+                )
             return
 
     def _submit_to_platform(self, client, external_id: str, flag: str) -> tuple[str, str]:
@@ -1178,8 +1543,9 @@ class Orchestrator:
             submission = client.submit_flag(challenge_id, flag)
         except Ret2ShellPreflightError as exc:
             if "already solved" in str(exc):
-                # The platform already credits our team: accept locally.
-                return "correct", "platform already marks the challenge solved"
+                # Team credit does not prove that this particular candidate
+                # was correct (another teammate may have solved the challenge).
+                return "unknown", "platform already solved externally; candidate remains unverified"
             return "unknown", f"submit preflight failed: {exc}"
         except Ret2ShellRateLimitError as exc:
             return "unknown", str(exc)
@@ -1203,7 +1569,6 @@ class Orchestrator:
         self.state.logger.project(
             "platform_flag_rejected",
             project_id,
-            flag=submission["normalized_flag"],
             external_id=project_row["external_id"] if project_row else None,
             verdict=detail,
         )
@@ -1471,8 +1836,22 @@ class Orchestrator:
         self._reap_finished_futures()
         with self.state.db.connect() as conn:
             summaries = graph_store.project_summaries(conn)
+            try:
+                competition_projects = {
+                    row["project_id"] for row in conn.execute(
+                        """SELECT DISTINCT c.project_id FROM competition_challenges c
+                           JOIN competition_run_challenges rc ON rc.challenge_id=c.id
+                           JOIN competition_runs r ON r.id=rc.run_id
+                           WHERE c.project_id IS NOT NULL
+                             AND r.status NOT IN ('finished','stopped')"""
+                    ).fetchall()
+                }
+            except Exception:
+                competition_projects = set()
         self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
+            if summary.id in competition_projects:
+                continue
             if summary.status == "flag_found":
                 # ``flag_found`` is a durable commit-in-progress state. If an
                 # instance died between recording evidence and atomically
@@ -1579,7 +1958,7 @@ class Orchestrator:
         with self._lock:
             project_tasks = {k: f for k, f in self._task_index.items() if k[0] == project_id and not f.done()}
             active_members = set(self._members.get(project_id, {}).keys())
-        max_running = self.state.config.runtime.max_members_per_report
+        max_running = min(2, self.state.config.runtime.max_members_per_report)
         available_slots = max_running - len(project_tasks)
         if available_slots <= 0:
             return
@@ -1813,7 +2192,12 @@ class Orchestrator:
         if active is None:
             with self._lock:
                 active = set(self._members.get(project_id, {}).keys())
-        idle = [member.name for member in self.state.config.available_members() if member.name not in active]
+        with self._lock:
+            globally_occupied = self._global_active_members_locked() | self._reserved_members
+        idle = [
+            member.name for member in self.state.config.available_members()
+            if member.name not in active and member.name not in globally_occupied
+        ]
         if not idle:
             return None
         preferred = preferred or []
@@ -1827,7 +2211,15 @@ class Orchestrator:
             return idle[0]
         project_members = {agent.name for agent in detail.agents if agent.role == "member"}
         candidates = [name for name in idle if name in project_members] or idle
-        config_order = {member.name: idx for idx, member in enumerate(self.state.config.available_members())}
+        configured = {member.name for member in self.state.config.available_members()}
+        allocation_order = [
+            name for name in ("aventurine", "pearl") if name in configured
+        ]
+        allocation_order.extend(
+            member.name for member in self.state.config.available_members()
+            if member.name not in allocation_order
+        )
+        config_order = {name: idx for idx, name in enumerate(allocation_order)}
         return min(candidates, key=lambda name: self._member_dispatch_score(detail, name, config_order.get(name, 10_000)))
 
     def _member_dispatch_score(self, detail, name: str, config_index: int) -> tuple[int, int, int]:
