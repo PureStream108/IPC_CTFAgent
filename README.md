@@ -1,6 +1,11 @@
 <h1 align="center">IPC CTF Agent</h1>
 
+<div align="center">
+
 <img src="frontend/ipc.png" alt="IPC CTF Agent logo" width="160" />
+
+</div>
+
 
 <div align="center">
 
@@ -13,31 +18,33 @@
 </div>
 
 <div align="center">
-
 [🚀 快速开始](#quick-start) • [✨ 核心设计](#core-innovations) • [🖥️ 控制台](#agent-workbench) • [🏗️ 系统架构](#system-architecture) • [🧰 工具运行时](#tool-runtime) • [🧪 开发](#development)
 
 </div>
 
+## Current Reward
+
+- 第九届西湖论剑·中国杭州网络安全技能大赛 Agent 17th
+- 第二届 “湾区杯” 网络安全大赛 Agent 解出 9/10
+
 ## 📖 Introduction
 
-IPC CTF Agent 是用于**合法授权的 CTF、靶场、教学与安全研究**的多智能体解题系统。操作者通过 Web UI 或 IPC 行动代理创建项目；Diamond 按题目进展分解意图、派发与增援 Member；Member 在隔离题目容器中调用工具并把事实、报告和检查点写回共享黑板。
+IPC CTF Agent 是用于 **CTF** 的多智能体解题系统，包含两条运行路径：面向单题 Project 的 Diamond–Member 解题流程，以及面向平台比赛的 Workflow–CompetitionRun 协调流程。操作者通过 Web UI 或 IPC 行动代理创建项目、确认平台工作流并控制运行；Member 在隔离题目容器中调用工具，把事实、报告和检查点写回共享黑板。
 
 系统将“解出 Flag”与“生成产物”拆开处理：验证后的 Flag 在数据库事务中立即提交为 `solved`，Writeup、Memory 和归档则作为可重试的异步后处理。这样即使生成文档或导出暂时失败，也不会丢失已经确认的解题结果。
 
-IPC 的运行时状态以 PostgreSQL 为唯一事实库；workspace、附件、大型工具输出、实时日志、Writeup 与导出快照使用共享 Artifact 文件树。每个重要结论都可以回溯到项目事实、报告、日志或产物。
-
-> [!WARNING]
-> 本项目会管理 Docker 容器，并可在启用 IPC 行动代理时通过 Docker Socket 执行宿主机级操作。请仅部署在可信、隔离且获得明确授权的环境中；绝不能直接暴露到公网。
+IPC 的运行时状态以 PostgreSQL 为唯一事实库；workspace、附件、大型工具输出、实时日志、Writeup 与导出快照使用共享 Artifact 文件树。比赛的 run、题目状态、assignment、session、提交、远端实例、WP job 和事件也持久化在 PostgreSQL 中。每个重要结论都可以回溯到项目事实、报告、日志或产物。
 
 ---
 
 ## <a id="showcase"></a>🖥️ Showcase
 
-IPC 的 Web 控制台将一个项目的解题过程集中在同一视图中：题目与附件、Member 状态、共享图谱、事实、报告、事件、实时日志和 Writeup 都可直接查看。通过 **Config** 面板配置 Diamond、四个内置 Member 与可选 IPC 行动代理；未配置密钥的端点会被跳过，不会阻塞界面启动。
+IPC 的 Web 控制台将单题解题和比赛运行集中在同一界面：题目与附件、Member 状态、共享图谱、事实、报告、运行事件、实时日志、Writeup，以及比赛的席位、题目状态和提交状态都可查看。通过 **Config** 面板配置 Diamond、十个全局 Member 席位与可选 IPC 行动代理；未配置密钥的席位会被跳过，不会阻塞界面启动。
 
 控制台提供三类工作面：
 
-- **Project**：创建、启动、停止和恢复题目；查看图谱、事实、Member 和求解状态。
+- **Project**：创建、启动、停止和恢复单题；查看图谱、事实、Member 和求解状态。
+- **Competition**：确认 Workflow，Start/Refresh/Pause/Resume/Stop 比赛，查看十席位、题目同步、实例、提交、WP 和运行事件。
 - **Logs / WP / Memory**：查看实时输出，并以 **Derive** 生成只增不覆盖的导出快照。
 - **IPC**：持续对话、运行环境诊断、题目沙箱辅助操作，以及经人工确认的平台工作流。
 
@@ -53,7 +60,7 @@ IPC 将面向操作者的控制层与项目内的解题层分离：
 - **Diamond** 负责解释项目进展、创建差异化 Intent、避免重复方向，并在新报告出现后按需增援。
 - **Member** 在题目沙箱中独立探索、执行工具、验证假设，并把事实、报告和进度提交给共享黑板。
 
-系统固定提供 `aventurine`、`pearl`、`jade`、`topaz` 四个 Member 配置槽。Diamond 只调度已配置可用的 Member，并以项目资源上限控制并发。
+系统固定提供 `amber`、`agate`、`topaz`、`sugilite`、`aventurine`、`pearl`、`sapphire`、`jade`、`obsidian`、`opal` 十个全局 Member 席位。单题 Diamond 和比赛 CompetitionService 都只调度已配置可用的席位，并以项目/比赛资源上限控制并发；WP 任务复用原作者 session 对应的席位。
 
 ### 2️⃣ **共享黑板与证据化协作** ⭐⭐⭐
 
@@ -62,18 +69,27 @@ IPC 将面向操作者的控制层与项目内的解题层分离：
 - Intent 按方向去重；每个项目最多有一个终局 `goal` Intent。
 - 报告会回写事实和图谱边，Diamond 据此选择新的探索方向或终止无效分支。
 - 大型内容保存在 Artifact 文件树，黑板和模型上下文保留摘要、相对路径、哈希或 artifact ID。
-- PostgreSQL 的事务和约束确保多实例同时操作时不会产生相互矛盾的终局状态。
+- PostgreSQL 的事务和约束为多实例协调提供基础；比赛 run/平台边界仍需通过服务级 fencing 和对账保证，当前未完成项见下方架构边界。
 
 ### 3️⃣ **先确认解题结果，再产出文档** ⭐⭐⭐
 
-找到候选 Flag 后，IPC 会在同一数据库事务内进行预检、写入 Verified Flag、设置 `solved`、记录完成边并投递后处理任务。重复提交相同 Flag 是幂等的；提交不同 Flag 会明确报告冲突。
+单题 Project 找到候选 Flag 后，IPC 会在同一数据库事务内进行预检、写入 Verified Flag、设置 `solved`、记录完成边并投递后处理任务。比赛运行则先把候选交给平台适配器判题，只有 `correct` 才结束同题解题并创建原作者 WP job；两条路径都要求重复提交幂等、错误提交可对账。
 
 - `solved` 是终局状态，Writeup、Memory、Archive 失败不会把项目降级回运行中。
 - 后处理使用 PostgreSQL 持久队列和 lease；进程重启或执行器异常后可以安全重试。
 - Writeup 先写入同目录临时文件并原子替换；数据库登记或后续步骤失败时会恢复旧文件。
 - 项目、Intent 与后处理任务使用 lease/token fencing，过期执行者不能覆盖新执行者的结果。
 
-### 4️⃣ PostgreSQL + Artifact ⭐⭐⭐
+### 4️⃣ **Workflow–CompetitionRun 比赛协调**
+
+比赛配置以确认过的 `WorkflowProfile` 为入口。每次 Start 创建一个不可变配置快照和 `CompetitionRun`；`CompetitionService` 负责同步平台题目、导入 Project、计算席位、管理远端实例、恢复 assignment/session、提交候选 Flag、轮询异步 verdict，并在正确判题后调度 WP。
+
+- 平台通过统一适配器接入 HTTP JSON、GZCTF 和 ret2shell；适配器声明题目、提交/查询 verdict、实例生命周期和附件能力。
+- `CompetitionStore` 将 run、challenge、assignment、session event、submission、instance、WP job 和 run event 写入 PostgreSQL；网络、模型和容器操作在事务外执行。
+- 单题协作使用持久 SessionRunner、共享黑板和本地 sandbox；同题 Member 通过 gRPC over UDS 控制通道与 ZeroMQ recon 通道协作，消息先落库再发布。
+- 比赛 SSE 从持久 run event 读取，浏览器可用 event id 断线补流；Artifact 文件树保存附件、日志、脚本、截图和 Writeup。
+
+### 5️⃣ PostgreSQL + Artifact ⭐⭐⭐
 
 PostgreSQL 只保存运行时事实、协调状态和可查询元数据；文件系统只保存适合文件存储的工作区与产物。这个边界既让多实例协调有一致的事务语义，也避免把附件和大日志塞进数据库。
 
@@ -95,15 +111,22 @@ PostgreSQL 只保存运行时事实、协调状态和可查询元数据；文件
 - Flag 提交、goal 完成和后处理任务均有幂等、冲突检查与 lease fencing。
 - IPC 可查询状态、暂停、恢复、归档项目，并保留操作历史。
 
+### Competition Control
+
+- Workflow 必须在当前 revision 确认后才能 Start；运行时冻结平台配置、队伍标识、提交规则和 Member 配置快照。
+- CompetitionRun 状态为 `preflight`、`importing`、`running`、`paused`、`blocked`、`draining`、`finished` 或 `stopped`。
+- 题目状态为 `discovered`、`preparing`、`ready`、`assigned`、`solving`、`solved`、`expired`、`withdrawn` 或 `cancelled`；提交状态独立记录 `queued`、`pending`、`correct`、`wrong`、`unknown` 等结果。
+- 每个题目最多分配两个解题席位；WP 任务使用原作者 Member/session，远端实例与本地 sandbox 分开计量。
+- `POST /api/workflows/{id}/preflight`、`POST /api/workflows/{id}/start` 和 `/api/runs/{id}/...` 提供平台预检、启动、同步、暂停、恢复、停止与事件查询。
+
 ### <a id="tool-runtime"></a>MCP
 
 Member 在题目容器中使用按分类注册的 CTF 工具，并可通过 MCP 访问：
 
 - `memory`：项目经验检索与工具目录。
 - `tool_search` / `tools`：跨分类检索或暴露指定题目分类的工具。
-- `browser`：基于 Chromium 的浏览器自动化、下载与截图 Artifact。
+- `browser`：基于 Playwright 的浏览器自动化、下载与截图 Artifact；任务镜像只提供 Python 包，浏览器运行时由部署环境按需提供。
 - `reverse`：PyGhidra 与 radare2 逆向分析。
-- `zap`：可选 OWASP ZAP 服务，必须同时开启运行配置和 Compose profile。
 - `ret2shell`：ret2shell 平台的动态实例控制（`instance_start` / `instance_status` / `instance_renew` / `instance_stop` / `challenge_status`），仅在配置 `IPC_R2S_USERNAME` 或 `IPC_R2S_TOKEN` 后注册；ws:// 隧道由镜像内置的 wsrx 转发到本地端口。
 
 分类覆盖 `web`、`pwn`、`reverse`、`crypto`、`misc`、`ai`、`osint`。浏览器下载、截图等内容以 Artifact 保存，避免将大型输出直接放入模型上下文。
@@ -111,8 +134,8 @@ Member 在题目容器中使用按分类注册的 CTF 工具，并可通过 MCP 
 ### Sandbox Isolation
 
 - 每个项目使用一个 Docker 题目容器，并在共享项目 workspace 中保留附件和分析产物。
-- 容器工具运行时包含 Web、Pwn、Reverse、Crypto、Misc、AI、OSINT 常用依赖；首次构建会下载 Ghidra、Chromium、SageMath、PyTorch 等较大组件。
-- Browser 与 Reverse MCP 运行在任务容器内；ZAP 是可选的共享服务，不会在默认部署中启用。
+- 容器工具运行时包含 Web、Pwn、Reverse、Crypto、Misc、AI、OSINT 常用依赖；首次构建会下载 Ghidra、SageMath、PyTorch 等较大组件。Playwright 浏览器二进制不在任务镜像内安装。
+- Browser 与 Reverse MCP 运行在任务容器内。
 - Docker 路径与网络边界由题目沙箱管理；IPC 行动代理的宿主机能力仅应授予可信操作者。
 
 ### <a id="durable-runtime-state"></a>Durable Runtime State
@@ -137,12 +160,12 @@ Docker Compose 将数据库放入命名卷，将需要人工访问或跨容器�
 
 | 组件 | 要求 | 说明 |
 | --- | --- | --- |
-| Docker Engine | 必需 | 用于 IPC App、PostgreSQL、题目工具镜像和可选服务 |
+| Docker Engine | 必需 | 用于 IPC App、PostgreSQL 和题目工具镜像 |
 | Docker Compose v2 | 必需 | 标准部署与服务编排 |
 | Docker Socket | 必需 | App 需要创建题目容器；IPC Runner 同样依赖 Socket |
 | Linux Docker 主机 | 推荐/已验证 | Compose 会挂载 Docker Socket 与 Compose 插件 |
 | LLM 端点 | 开始解题时需要 | Diamond 与已启用 Member 使用 OpenAI、Anthropic、Claude Code、DeepSeek、Pi 或 Mock 适配器 |
-| 浏览器 | 可选 | 用于打开本地浏览器 |
+| 浏览器 | 可选 | 只保留 Playwright Python 包；浏览器二进制不在任务镜像内，由部署环境显式提供路径 |
 
 > [!WARNING]
 > 沙箱降低风险，但不能替代隔离主机或虚拟机。请只将题目、附件、模型密钥和 Docker Socket 放入可信环境。
@@ -179,7 +202,7 @@ docker compose down
 
 ### 2. Configure the LLM runtime
 
-推荐在 Web UI 的 **Config** 面板配置 Diamond、四个内置 Member 和可选 IPC 行动代理。也可以从 [config.example.yml](backend/config/config.example.yml) 复制配置：
+推荐在 Web UI 的 **Config** 面板配置 Diamond、十个共享 Member 席位和可选 IPC 行动代理。也可以从 [config.example.yml](backend/config/config.example.yml) 复制配置：
 
 ```yaml
 diamond:
@@ -218,15 +241,7 @@ ipc health                   # 检查 Diamond 和 Member 模型端点
 ipc serve --port 8000        # 直接启动 API 与 Web UI
 ```
 
-### 4. Enable optional ZAP
 
-先在 Web UI 运行配置中启用 **Optional OWASP ZAP**，再启动 Compose profile：
-
-```bash
-docker compose --profile zap up -d
-```
-
-两个条件必须同时满足，ZAP 才会注入到 Member 可用的 MCP 工具中。
 
 ---
 
@@ -248,9 +263,9 @@ IPC 是面向操作者的持续对话代理，可诊断运行环境、辅助题�
 
 ## <a id="system-architecture"></a>🏗️ System Architecture
 
-### IPC、Diamond 与 Member 的关系
+### 两条运行路径
 
-IPC 和 Diamond 是两个协作层：IPC 负责面向操作者的持续对话、环境诊断与平台工作流；Diamond 负责一个 CTF 项目内的任务分派和 Member 调度。IPC 通过内部 MCP 创建、启动、观察或停止项目，而不会直接替代 Diamond 的调度职责。
+IPC 是面向操作者的控制层，负责持续对话、环境诊断、Workflow 管理和项目生命周期；它通过内部 MCP 调用后端服务。单题 Project 由 Diamond 负责意图分解和 Member 调度；比赛 Workflow 由 CompetitionService 负责平台同步、席位分配、提交判题和 WP 生命周期。两条路径共享 PostgreSQL、Artifact 和 Member/tool runtime，但不共享各自的调度状态机。
 
 ```mermaid
 flowchart TB
@@ -289,8 +304,40 @@ flowchart TB
     STATE --> DIAMOND
     STATE --> MEMORY["Memory、工具目录与导出"]
     SANDBOX --> CMCP["Browser / Reverse MCP"]
-    STATE -. "可选" .-> ZAP["OWASP ZAP"]
 ```
+
+### 比赛运行时
+
+```mermaid
+flowchart TB
+    OP["操作者 / Web UI"] --> API["FastAPI"]
+    API --> WF["WorkflowProfile\n确认后的平台配置"]
+    WF --> CS["CompetitionService\nrun lease + tick"]
+    CS --> ADAPTER["CompetitionPlatform\nHTTP JSON / GZCTF / ret2shell"]
+    ADAPTER <--> PLATFORM["外部比赛平台"]
+    CS --> STORE["CompetitionStore"]
+    STORE --> DB[("PostgreSQL")]
+    CS --> IMPORT["题目导入 / Project 绑定"]
+    CS --> POLICY["十席位调度\n远端实例容量"]
+    POLICY --> ASSIGN["Assignment + lease epoch"]
+    ASSIGN --> SESSION["持久 AgentSession\nSessionRunner"]
+    SESSION --> MEMBER["Member runtime"]
+    MEMBER --> SANDBOX["题目 sandbox / SharedWorkspace"]
+    SESSION --> RECON["gRPC UDS + ZeroMQ\ndurable replay"]
+    CS --> SUB["候选 Flag\nsubmission / verdict 对账"]
+    SUB --> ADAPTER
+    CS --> WP["原作者 session WP job"]
+    STORE --> EVENTS["Run events / SSE after"]
+    EVENTS --> OP
+```
+
+一次比赛运行的持久化边界如下：
+
+- `WorkflowProfile` 保存平台映射、队伍/比赛标识、提交判定规则、附件限制和能力声明；Start 时写入 `CompetitionRun.config_snapshot`。
+- `CompetitionRun` 保存状态、revision、同步时间、run lease 和错误；`competition_run_challenges` 将本次运行与平台题目关联。
+- `CompetitionService` 在 tick 中完成同步、deadline、assignment 回收、实例续期、提交查询、WP dispatch 和观测；外部调用不放在数据库事务内。
+- `CompetitionStore` 是 competition schema 的唯一写入口；`SessionRunner` 和 transport 层通过 assignment id、owner、epoch 校验写入权限。
+- 当前实现仍有未完成的 run 隔离、平台队伍作用域、外部实例配额和 Flag 脱敏问题，详见 [`plan-progress.md`](plan-progress.md) 的 P1/P2 复审清单。
 
 ### 一次解题任务的工作流
 
@@ -317,32 +364,14 @@ flowchart LR
 ### Runtime invariants
 
 - PostgreSQL 是唯一的运行时事实库；Artifact 文件树不是并发协调的真相源。
-- 已验证 Flag 与 `solved` 在同一事务中提交；`solved` 项目必须有 Verified Flag。
+- 单题 Project 的 Verified Flag 与 `solved` 在同一事务中提交；比赛候选只有平台 `correct` verdict 才能生成本地 Verified Flag，平台明确报告的 external solved 则单独记录，不伪造本地 Flag/WP。
 - 每个项目只有一个终局 `goal` Intent；历史重复记录会在迁移中归并并保存审计快照。
 - 过期的项目、Intent 或后处理 lease 持有者不能写入新一代执行结果。
 - Writeup、Memory、Archive 后处理可失败、可重试，但不撤销已提交的 `solved`。
 
-### Legacy data migration
+### 当前架构边界
 
-旧版本的 SQLite graph/memory/Ops 数据库、JSONL 日志、Markdown Memory 和 workspace 可以离线导入 PostgreSQL。SQLite 仅作为迁移器的只读输入，不是运行时依赖；每次导入都会在 `migration_runs` 记录源清单、导入数量、冲突数量和错误。
-
-迁移器会先升级到基础 PostgreSQL schema，导入历史数据，再升级到最新 revision。若旧库包含同一项目的多个 `goal` Intent，最终升级会保留最早记录作为 canonical Intent，归并来源、图谱链接和报告标签，并在 `audit_events` 保存被移除记录的完整快照。导入期间请停止 IPC 应用，避免与在线写入竞争。
-
-```bash
-python scripts/migrate_legacy_data.py \
-  --legacy-root /path/to/old/IPC_CTFAgent \
-  --artifact-root ./data/artifacts \
-  --database-url "$IPC_DATABASE_URL"
-```
-
-先使用 `--dry-run` 检查源清单。旧 `completed` 项目会导入为 `flag_found`，需要通过当前 Verified Flag 流程重新确认；没有 Flag 的项目不会被标记为已解决。
-
-直接在主机运行服务时，请先升级数据库。Docker 镜像会在启动时自动完成这一步：
-
-```bash
-alembic upgrade head
-ipc serve
-```
+README 描述的是当前代码结构，不等同于全部计划验收已完成。比赛运行仍需补齐同一平台题目的 run 隔离、GZCTF 队伍作用域、完整 engine epoch fencing、远端实例配额/停止失败补偿、统一 Flag 脱敏和 Refresh/Stop 竞态处理；这些问题及复验条件记录在 [`plan-progress.md`](plan-progress.md) 中。
 
 ### Repository layout
 
@@ -357,6 +386,7 @@ IPC_CTFAgent/
 │   ├── members/      # Member 与模型适配器
 │   ├── memory/       # 经验记忆与工具目录
 │   ├── ops/          # IPC 行动代理与平台工作流
+│   ├── competition/  # Workflow/Run、调度、session、传输与比赛存储
 │   ├── persistence/  # PostgreSQL schema 与 Alembic migrations
 │   ├── platform/     # 平台适配层（HTTP JSON / GZCTF / ret2shell 客户端）
 │   ├── sandbox/      # Docker/本地任务沙箱
@@ -374,8 +404,10 @@ IPC_CTFAgent/
 
 - [x] Diamond–Member 共享黑板协作与题目容器运行时
 - [x] PostgreSQL 运行时事实库与 Artifact 文件存储边界
-- [x] Flag 原子提交、lease fencing、幂等后处理队列
+- [x] 单题 Flag 原子提交与幂等后处理队列
 - [x] SQLite 历史数据只读迁移与审计归并
+- [ ] 比赛题目/提交/WP 的 run 隔离与完整 epoch fencing
+- [ ] 平台队伍身份、外部实例配额、停止失败补偿和 Flag 脱敏闭环
 - [ ] 基于固定题集的持续稳定性回归与故障注入基准
 - [ ] 更细粒度的操作者访问控制与部署安全配置示例
 
@@ -427,9 +459,10 @@ docker run --rm \
     <img src="https://github.com/ecxwxz.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
   </a>
   <a href="https://github.com/springbot2025">
-    <img src="https://github.com/springbot2025.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="xz w" title="xz w" />
+    <img src="https://github.com/springbot2025.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="springbot" title="springbot" />
   </a>
 </p>
+
 
 ## 🤝 Contribution
 
