@@ -15,6 +15,7 @@ from backend.core.state import AppState
 from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient, Ret2ShellError
+from backend.platform.gzctf import GZCTFAdapter, GZCTFClient, GZCTFError
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
@@ -41,6 +42,8 @@ def _build_adapter(mapping: FieldMapping) -> PlatformAdapter:
             game_id=mapping.game_id or None,
             category_map=mapping.category_map,
         )
+    if mapping.platform == "gzctf":
+        return GZCTFAdapter(GZCTFClient(), mapping)
     return HttpJsonAdapter(mapping)
 
 
@@ -52,6 +55,8 @@ def _fetch(mapping: FieldMapping) -> tuple[PlatformAdapter, list[PlatformChallen
         raise HTTPException(502, f"platform request failed: {exc}") from exc
     except Ret2ShellError as exc:
         raise HTTPException(502, f"ret2shell request failed: {exc}") from exc
+    except GZCTFError as exc:
+        raise HTTPException(502, f"GZCTF request failed: {exc}") from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -92,6 +97,9 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
     except Ret2ShellError as exc:
         shutil.rmtree(staging_root, ignore_errors=True)
         raise HTTPException(502, f"ret2shell attachment download failed: {exc}") from exc
+    except GZCTFError as exc:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise HTTPException(502, f"GZCTF attachment download failed: {exc}") from exc
     except (OSError, TypeError, ValueError) as exc:
         shutil.rmtree(staging_root, ignore_errors=True)
         raise HTTPException(400, str(exc)) from exc

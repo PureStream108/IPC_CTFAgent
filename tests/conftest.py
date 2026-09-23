@@ -55,6 +55,7 @@ TRUNCATE_TABLES = (
     "facts",
     "projects",
     "settings",
+    "competition_run_observations",
 )
 
 

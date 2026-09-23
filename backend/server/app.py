@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api import auth as auth_router
 from backend.api import config as config_router
+from backend.api import competition as competition_router
 from backend.api import flags as flags_router
 from backend.api import graph as graph_router
 from backend.api import logs as logs_router
@@ -18,6 +19,8 @@ from backend.api import ops_agent as ops_agent_router
 from backend.api import platform as platform_router
 from backend.api import project as project_router
 from backend.api import solve as solve_router
+from backend.api import skills as skills_router
+from backend.api import questions as questions_router
 from backend.api import wp as wp_router
 from backend.auth import AuthManager
 from backend.auth.middleware import AuthenticationMiddleware
@@ -71,6 +74,13 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         except Exception as exc:  # orchestrator optional during early bring-up
             app.state.orchestrator_error = str(exc)
         try:
+            from backend.competition.service import CompetitionService
+
+            state.competition = CompetitionService(state)
+            state.competition.start_worker()
+        except Exception as exc:
+            app.state.competition_error = str(exc)
+        try:
             # Mounted Starlette applications do not automatically receive a
             # lifespan. FastMCP's streamable HTTP session manager needs one to
             # create its task group, so enter it explicitly before accepting
@@ -79,19 +89,24 @@ def create_app(root: str | Path | None = None) -> FastAPI:
                 yield
         finally:
             try:
-                if state.orchestrator is not None:
-                    state.orchestrator.shutdown()
+                competition = getattr(state, "competition", None)
+                if competition is not None:
+                    competition.shutdown()
             finally:
                 try:
-                    state.pool.stop_all()
+                    if state.orchestrator is not None:
+                        state.orchestrator.shutdown()
                 finally:
                     try:
-                        webui_proxy_manager.close_all()
+                        state.pool.stop_all()
                     finally:
                         try:
-                            state.close()
+                            webui_proxy_manager.close_all()
                         finally:
-                            auth_manager.close()
+                            try:
+                                state.close()
+                            finally:
+                                auth_manager.close()
 
     app = FastAPI(title="IPC_CTFAgent", description="Multi-agent CTF solver", lifespan=lifespan)
     app.state.auth = auth_manager
@@ -104,11 +119,14 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     app.include_router(graph_router.router)
     app.include_router(memory_router.router)
     app.include_router(config_router.router)
+    app.include_router(competition_router.router)
     app.include_router(logs_router.router)
     app.include_router(wp_router.router)
     app.include_router(platform_router.router)
     app.include_router(flags_router.router)
     app.include_router(ops_agent_router.router)
+    app.include_router(skills_router.router)
+    app.include_router(questions_router.router)
 
     # Claude Code receives IPC capabilities through this internal MCP mount;
     # AuthenticationMiddleware permits it only with IPC_RUNNER_TOKEN.  Keeping

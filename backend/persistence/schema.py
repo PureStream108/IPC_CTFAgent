@@ -26,6 +26,10 @@ SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS lease_version BIGINT NOT NULL DEFAULT 0",
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS engine_kind TEXT",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS engine_owner TEXT",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS engine_epoch BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS engine_lease_expires_at TIMESTAMPTZ",
     "ALTER TABLE IF EXISTS intents ADD COLUMN IF NOT EXISTS worker TEXT",
     "ALTER TABLE IF EXISTS intents ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ",
     "ALTER TABLE IF EXISTS intents ADD COLUMN IF NOT EXISTS concluded_at TIMESTAMPTZ",
@@ -86,11 +90,16 @@ SCHEMA_STATEMENTS = (
         lease_token TEXT,
         lease_version BIGINT NOT NULL DEFAULT 0,
         lease_expires_at TIMESTAMPTZ,
-        last_heartbeat_at TIMESTAMPTZ
+        last_heartbeat_at TIMESTAMPTZ,
+        engine_kind TEXT,
+        engine_owner TEXT,
+        engine_epoch BIGINT NOT NULL DEFAULT 0,
+        engine_lease_expires_at TIMESTAMPTZ
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_projects_lease ON projects(lease_expires_at) WHERE lease_owner IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_projects_engine_lease ON projects(engine_lease_expires_at) WHERE engine_owner IS NOT NULL",
     # Existing databases created before the platform column keep working:
     # configure() runs these statements on every startup, so the idempotent
     # ALTER upgrades them in place.
@@ -359,6 +368,10 @@ SCHEMA_STATEMENTS = (
     """,
 )
 
+
+from backend.competition.schema import COMPETITION_SCHEMA
+
+SCHEMA_STATEMENTS = (*SCHEMA_STATEMENTS, *COMPETITION_SCHEMA)
 
 # One ordered contract is consumed by both runtime bootstrap and Alembic.
 SCHEMA_CONTRACT_STATEMENTS = (*SCHEMA_COMPATIBILITY_STATEMENTS, *SCHEMA_STATEMENTS)

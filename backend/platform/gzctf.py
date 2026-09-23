@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit, unquote
 
 import requests
+
+from backend.core.config import CATEGORIES
+from backend.filename_util import numbered_filename, safe_stem
+from backend.platform.adapter import PlatformAdapter
+from backend.platform.mapping import FieldMapping, PlatformChallenge
 
 
 class GZCTFError(RuntimeError):
@@ -330,6 +337,60 @@ class GZCTFClient:
     def get_game_check(self, game_id: int) -> dict[str, Any]:
         return self._authorized_get(f"/api/Game/{game_id}/Check")
 
+    @staticmethod
+    def _items(payload: Any) -> list[dict[str, Any]]:
+        """Extract challenge objects from the list shapes used by GZCTF.
+
+        Deployments have returned a bare array, an ``items``/``data`` object,
+        and a paginated ``{data: {items: [...]}}`` object over time.  Keeping
+        the normalization here means the adapter never guesses from HTML or
+        treats a successful envelope as a challenge.
+        """
+        candidates: list[Any] = [payload]
+        if isinstance(payload, dict):
+            for key in ("challenges", "items", "data", "results"):
+                if key in payload:
+                    candidates.append(payload[key])
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                for key in ("items", "challenges", "results"):
+                    if isinstance(candidate.get(key), list):
+                        candidate = candidate[key]
+                        break
+            if isinstance(candidate, list):
+                return [item for item in candidate if isinstance(item, dict)]
+        return []
+
+    def list_challenges(self, game_id: int | None = None) -> list[dict[str, Any]]:
+        """Return visible challenges without silently selecting a game.
+
+        The public endpoint is preferred.  A few older GZCTF versions only
+        expose challenges inside ``Game/Details``; that shape is accepted as a
+        compatibility fallback, while an empty/malformed response remains an
+        empty list instead of fabricating challenge rows.
+        """
+        selected = int(game_id or 0)
+        if selected <= 0:
+            raise GZCTFError("a positive game_id is required to list challenges")
+        try:
+            payload = self._authorized_get(f"/api/Game/{selected}/Challenges")
+            items = self._items(payload)
+            if items or isinstance(payload, list) or (
+                isinstance(payload, dict)
+                and any(key in payload for key in ("challenges", "items", "data", "results"))
+            ):
+                return items
+        except requests.HTTPError:
+            pass
+        details = self.get_game_details(selected)
+        items = self._items(details)
+        if items or isinstance(details, list) or (
+            isinstance(details, dict)
+            and any(key in details for key in ("challenges", "items", "data", "results"))
+        ):
+            return items
+        raise GZCTFError("GZCTF challenge response did not contain a challenge list")
+
     def get_game_participation(self, game_id: int) -> Any:
         return self._authorized_get(f"/api/game/{game_id}/participations")
 
@@ -446,3 +507,296 @@ class GZCTFClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _mapping_value(item: dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = item
+    if not path:
+        return default
+    for segment in path.split("."):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+        elif isinstance(current, list) and segment.isdigit() and int(segment) < len(current):
+            current = current[int(segment)]
+        else:
+            return default
+    return current
+
+
+def _first_value(item: dict[str, Any], *names: str, default: Any = None) -> Any:
+    for name in names:
+        value = _mapping_value(item, name, None)
+        if value is not None:
+            return value
+    return default
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "solved", "complete", "completed", "accepted", "correct"}
+    return False
+
+
+def _normalise_gz_verdict(payload: Any, *, submission_id: str | None = None) -> dict[str, Any]:
+    """Convert GZCTF's version-dependent result object to the competition contract."""
+    if not isinstance(payload, dict):
+        return {"verdict": "unknown", "submission_id": submission_id}
+    identifier = submission_id
+    for key in ("submissionId", "submission_id", "id", "ticketId"):
+        if payload.get(key) is not None:
+            identifier = str(payload[key])
+            break
+    for key in ("solved", "isSolved", "correct", "isCorrect", "accepted", "success"):
+        if key in payload and isinstance(payload[key], bool):
+            return {"verdict": "correct" if payload[key] else "wrong", "submission_id": identifier}
+    raw = _first_value(payload, "verdict", "status", "state", "result", default="")
+    status = str(raw).strip().lower()
+    if status in {"correct", "accepted", "solved", "success", "complete", "completed"}:
+        verdict = "correct"
+    elif status in {"wrong", "incorrect", "failed", "rejected", "fail"}:
+        verdict = "wrong"
+    elif status in {"pending", "queued", "judging", "processing", "running"}:
+        verdict = "pending"
+    else:
+        verdict = "pending" if identifier and any(key in payload for key in ("createdAt", "submittedAt")) else "unknown"
+    return {"verdict": verdict, "submission_id": identifier}
+
+
+class GZCTFAdapter(PlatformAdapter):
+    """Unified challenge/submit adapter for a participant GZCTF session."""
+
+    def __init__(
+        self,
+        client: GZCTFClient,
+        mapping: FieldMapping,
+        *,
+        max_attachment_bytes: int | None = None,
+    ) -> None:
+        if mapping.platform != "gzctf":
+            raise ValueError("GZCTFAdapter requires a gzctf FieldMapping")
+        if mapping.game_id is None:
+            raise ValueError("gzctf mapping requires game_id")
+        self.client = client
+        self.mapping = mapping
+        self.game_id = int(mapping.game_id)
+        self.max_attachment_bytes = max_attachment_bytes
+        self._by_id: dict[str, PlatformChallenge] = {}
+
+    @property
+    def identity(self) -> str:
+        return f"{self.client.base_url}/game/{self.game_id}"
+
+    def _normalise_files(self, raw: Any) -> tuple[list[str], list[dict[str, Any]]]:
+        if raw is None:
+            return [], []
+        values = raw if isinstance(raw, list) else [raw]
+        urls: list[str] = []
+        descriptors: list[dict[str, Any]] = []
+        for value in values:
+            if isinstance(value, str):
+                urls.append(value)
+                descriptors.append({"url": value})
+                continue
+            if not isinstance(value, dict):
+                continue
+            descriptor = {
+                key: value[key]
+                for key in ("url", "downloadUrl", "href", "folder", "file", "name")
+                if value.get(key) is not None
+            }
+            url = descriptor.get("url") or descriptor.get("downloadUrl") or descriptor.get("href")
+            if url:
+                urls.append(str(url))
+            descriptors.append(descriptor)
+        return urls, descriptors
+
+    def _normalise(self, raw: dict[str, Any]) -> PlatformChallenge | None:
+        external = _first_value(raw, self.mapping.id_field, "id", "challengeId", "challenge_id")
+        title = _first_value(raw, self.mapping.title_field, "name", "title")
+        if external is None or title is None:
+            return None
+        category_raw = str(_first_value(raw, self.mapping.category_field, "category", "type", default="misc"))
+        category = self.mapping.category_map.get(category_raw, category_raw).strip().lower()
+        if category not in CATEGORIES:
+            category = "misc"
+        files, descriptors = self._normalise_files(
+            _first_value(raw, self.mapping.attachments_field, "files", "attachments", default=[])
+        )
+        level_raw = _mapping_value(raw, self.mapping.level_field, self.mapping.level) if self.mapping.level_field else self.mapping.level
+        try:
+            level = max(1, int(level_raw))
+        except (TypeError, ValueError):
+            level = self.mapping.level
+        track = _mapping_value(raw, self.mapping.track_id_field, self.mapping.track_id) if self.mapping.track_id_field else self.mapping.track_id
+        solved = _as_bool(_first_value(raw, self.mapping.solved_field, "solved", "isSolved", "isCompleted", default=False))
+        platform_data = {"level": level, "track_id": str(track or ""), "files": descriptors}
+        return PlatformChallenge(
+            external_id=str(external),
+            title=str(title),
+            category=category,
+            description=str(_first_value(raw, self.mapping.description_field, "description", "content", default="") or ""),
+            attachment_urls=[str(value) for value in files],
+            remote=False,
+            solved=solved,
+            hints=[],
+            platform_data=platform_data,
+        )
+
+    def fetch_challenges(self) -> list[PlatformChallenge]:
+        result: list[PlatformChallenge] = []
+        seen: set[str] = set()
+        for raw in self.client.list_challenges(self.game_id):
+            challenge = self._normalise(raw)
+            if challenge is None:
+                continue
+            if challenge.external_id in seen:
+                raise GZCTFError(f"duplicate GZCTF challenge id: {challenge.external_id}")
+            seen.add(challenge.external_id)
+            self._by_id[challenge.external_id] = challenge
+            result.append(challenge)
+        return result
+
+    def _challenge(self, external_id: str) -> PlatformChallenge:
+        if external_id not in self._by_id:
+            self.fetch_challenges()
+        challenge = self._by_id.get(str(external_id))
+        if challenge is None:
+            raise GZCTFError(f"unknown GZCTF challenge: {external_id}")
+        return challenge
+
+    def preflight(self) -> list[PlatformChallenge]:
+        self.client.get_profile()
+        self.client.get_game(self.game_id)
+        return self.fetch_challenges()
+
+    def challenges(self) -> list[PlatformChallenge]:
+        self.fetch_challenges()
+        challenges = list(self._by_id.values())
+        for challenge in challenges:
+            try:
+                state = self.client.get_challenge(self.game_id, int(challenge.external_id))
+            except (GZCTFError, requests.RequestException, ValueError):
+                continue
+            challenge.solved = _as_bool(_first_value(state, "solved", "isSolved", "isCompleted"))
+            challenge.platform_data = {
+                **challenge.platform_data,
+                "live_state": str(_first_value(state, "status", "state", default="")),
+            }
+        return [item.model_copy(deep=True) for item in self._by_id.values()]
+
+    def download_attachments(self, challenge: PlatformChallenge, dest_dir: str | Path) -> list[Path]:
+        destination = Path(dest_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        descriptors = challenge.platform_data.get("files", [])
+        if not isinstance(descriptors, list):
+            descriptors = []
+        downloaded: list[Path] = []
+        for index, descriptor in enumerate(descriptors, start=1):
+            if not isinstance(descriptor, dict):
+                continue
+            url = descriptor.get("url") or descriptor.get("downloadUrl") or descriptor.get("href")
+            params: dict[str, Any] | None = None
+            if not url and descriptor.get("file"):
+                url = f"/api/Game/{self.game_id}/Challenges/{challenge.external_id}/Files"
+                params = {"folder": descriptor.get("folder", "static"), "file": descriptor["file"]}
+            if not url:
+                continue
+            if not getattr(self.client, "logged_in", True):
+                self.client.login()
+            absolute = str(url) if str(url).startswith(("http://", "https://")) else urljoin(self.client.base_url + "/", str(url).lstrip("/"))
+            parsed = urlsplit(absolute)
+            base = urlsplit(self.client.base_url)
+            if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != base.netloc.lower():
+                raise ValueError("GZCTF attachment URL must stay on the configured platform origin")
+            source = Path(unquote(parsed.path)).name or str(descriptor.get("name") or f"attachment-{index}")
+            target = destination / numbered_filename(
+                safe_stem(Path(source).stem, fallback=f"attachment-{index}"),
+                Path(source).suffix[:20] or ".bin",
+                [path.name for path in destination.iterdir()],
+                fallback=f"attachment-{index}",
+            )
+            response = self.client.session.get(absolute, params=params, timeout=self.client.timeout, stream=True)
+            if response.status_code >= 400:
+                response.raise_for_status()
+            written = 0
+            try:
+                with target.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if self.max_attachment_bytes is not None and written > self.max_attachment_bytes:
+                            raise ValueError(f"attachment exceeds {self.max_attachment_bytes} byte limit: {absolute}")
+                        handle.write(chunk)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+            downloaded.append(target)
+        return downloaded
+
+    def submit(self, external_id: str, flag: str) -> dict[str, Any]:
+        challenge = self._challenge(external_id)
+        data = challenge.platform_data
+        level = int(data.get("level", self.mapping.level))
+        track_id = str(data.get("track_id") or "") or None
+        try:
+            result = self.client.submit_level(
+                self.game_id, int(external_id), flag, level=level, track_id=track_id
+            )
+        except GZCTFLoginError:
+            return {"verdict": "auth_required"}
+        except requests.HTTPError as exc:
+            code = getattr(exc.response, "status_code", 0)
+            if code == 429:
+                headers = getattr(exc.response, "headers", {}) or {}
+                try:
+                    retry_after = max(1, int(headers.get("Retry-After", "60")))
+                except (TypeError, ValueError):
+                    retry_after = 60
+                return {"verdict": "rate_limited", "retry_after": retry_after}
+            return {"verdict": "auth_required" if code in (401, 403) else "unknown"}
+        except GZCTFPreflightError as exc:
+            reason = str(exc)
+            if any(token in reason.lower() for token in ("cooldown", "wait", "rate limit")):
+                return {"verdict": "rate_limited", "retry_after": 60, "reason": reason}
+            return {"verdict": "rejected", "reason": reason}
+        return _normalise_gz_verdict(result)
+
+    def query(self, external_id: str, submission_id: str) -> dict[str, Any]:
+        try:
+            result = self.client.get_submission_status(
+                self.game_id, int(external_id), int(submission_id)
+            )
+        except GZCTFLoginError:
+            return {"verdict": "auth_required", "submission_id": submission_id}
+        except requests.HTTPError as exc:
+            code = getattr(exc.response, "status_code", 0)
+            if code == 429:
+                headers = getattr(exc.response, "headers", {}) or {}
+                try:
+                    retry_after = max(1, int(headers.get("Retry-After", "60")))
+                except (TypeError, ValueError):
+                    retry_after = 60
+                return {"verdict": "rate_limited", "retry_after": retry_after, "submission_id": submission_id}
+            return {"verdict": "auth_required" if code in (401, 403) else "unknown", "submission_id": submission_id}
+        return _normalise_gz_verdict(result, submission_id=submission_id)
+
+    def instances(self) -> list[dict[str, Any]]:
+        # GZCTF's participant API does not expose a portable lifecycle
+        # contract.  Never pretend that a challenge instance was started.
+        return []
+
+    def start_instance(self, _external_id: str) -> dict[str, Any]:
+        raise ValueError("GZCTF adapter does not expose a managed instance lifecycle")
+
+    def stop_instance(self, _external_id: str) -> None:
+        return None
+
+    def renew_instance(self, _external_id: str) -> None:
+        return None

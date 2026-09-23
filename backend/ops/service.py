@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -27,6 +28,7 @@ from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor, tool_prompt
 from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient
+from backend.platform.gzctf import GZCTFAdapter, GZCTFClient
 
 _JSON_DECODER = json.JSONDecoder()
 _MAX_TOOL_ROUNDS = 8
@@ -367,7 +369,10 @@ class OpsAgentService:
                     },
                 )
             try:
-                tool_result = self.tools.execute(tool_name, tool_arguments)
+                if tool_name == "question":
+                    tool_result = self.tools.execute(tool_name, tool_arguments, session_id=session_id)
+                else:
+                    tool_result = self.tools.execute(tool_name, tool_arguments)
             except OpsToolError as exc:
                 tool_result = {"ok": False, "error": str(exc)}
             self.state.logger.tool(
@@ -423,6 +428,9 @@ class OpsAgentService:
                     ),
                 }
             )
+            if tool_name == "question" and tool_result.get("state") == "pending":
+                parsed = {"reply": "Please answer the pending question to continue this operation.", "workflow": None}
+                break
         else:
             parsed = {
                 "reply": f"I stopped after {_MAX_TOOL_ROUNDS} tool calls; summarize the evidence gathered so far.",
@@ -1197,6 +1205,15 @@ class OpsAgentService:
             "category_field": challenge.category_field,
             "description_field": challenge.description_field,
             "attachments_field": challenge.attachments_field,
+            "remote_field": challenge.remote_field,
+            "solved_field": challenge.solved_field,
+            "hints_field": challenge.hints_field,
+            "level": challenge.level,
+            "track_id": challenge.track_id,
+            "level_field": challenge.level_field,
+            "track_id_field": challenge.track_id_field,
+            "pagination_path": challenge.pagination_path,
+            "max_pages": challenge.max_pages,
             "category_map": challenge.category_map,
             "attachment_base_url": challenge.attachment_base_url,
             "headers": _header_view(challenge.headers, configured),
@@ -1213,6 +1230,10 @@ class OpsAgentService:
                 "success_statuses": spec.submit.success_statuses,
                 "success_path": spec.submit.success_path,
                 "success_values": spec.submit.success_values,
+                "wrong_values": spec.submit.wrong_values,
+                "pending_values": spec.submit.pending_values,
+                "submission_id_path": spec.submit.submission_id_path,
+                "query_url": spec.submit.query_url,
             }
         required = sorted(spec.required_secret_names())
         return {
@@ -1226,6 +1247,10 @@ class OpsAgentService:
             "updated_at": workflow["updated_at"],
             "spec": {
                 "name": spec.name,
+                "competition_id": spec.competition_id,
+                "team_id": spec.team_id,
+                "ends_at": spec.ends_at,
+                "remote_instance_limit": spec.remote_instance_limit,
                 "challenges": challenge_view,
                 "submit": submit_view,
                 "allow_private_networks": spec.allow_private_networks,
@@ -1251,6 +1276,15 @@ class OpsAgentService:
                 category_map=mapping.category_map,
                 max_attachment_bytes=spec.max_attachment_bytes,
             )
+        if mapping.platform == "gzctf":
+            # GZCTF uses the participant cookie session.  The username and
+            # password are deployment secrets (IPC_GZ_*) and are never part
+            # of the workflow spec or competition run snapshot.
+            return GZCTFAdapter(
+                GZCTFClient(),
+                mapping,
+                max_attachment_bytes=spec.max_attachment_bytes,
+            )
         return HttpJsonAdapter(
             mapping,
             request_get=self._http_client(spec).get,
@@ -1263,6 +1297,8 @@ class OpsAgentService:
             spec.challenges.attachment_base_url or spec.challenges.list_url,
         ]
         if spec.submit is not None:
+            if spec.submit.query_url:
+                allowed_urls.append(spec.submit.query_url.replace("{{external_id}}", "id").replace("{{submission_id}}", "id"))
             allowed_urls.append(spec.submit.url)
         return WorkflowHttpClient(
             allowed_urls,
@@ -1301,69 +1337,54 @@ class OpsAgentService:
             if missing:
                 raise ValueError(f"unknown external_id values: {missing}")
             selected = [by_id[external_id] for external_id in select]
+        from tempfile import TemporaryDirectory
+        from backend.platform.downloads import stage_challenges
+
         imported: list[dict[str, Any]] = []
         created: list[str] = []
-        try:
-            with self.state.db.connect() as connection:
-                for challenge in selected:
-                    existing = connection.execute(
-                        """
-                        SELECT p.id, p.title, p.category
-                        FROM projects p
-                        JOIN facts f ON f.project_id = p.id AND f.id = 'origin'
-                        WHERE p.external_id = %s
-                          AND (f.description = %s OR strpos(f.description, %s || chr(10) || chr(10)) = 1)
-                        ORDER BY p.created_at
-                        LIMIT 1
-                        """,
-                        (
-                            challenge.external_id,
-                            spec.challenges.list_url,
-                            spec.challenges.list_url,
-                        ),
-                    ).fetchone()
-                    if existing is not None:
-                        imported.append(
-                            {
-                                "external_id": challenge.external_id,
-                                "project_id": existing["id"],
-                                "title": existing["title"],
-                                "category": existing["category"],
-                                "created": False,
-                            }
+        # Staging is on the same filesystem as the final attachment tree.
+        self.state.projects_dir.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".import-", dir=self.state.projects_dir) as temporary:
+            staged = stage_challenges(
+                lambda: self._adapter(workflow_id, spec), selected, Path(temporary),
+            )
+            try:
+                with self.state.db.connect() as connection:
+                    connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("workflow-import:" + workflow_id,))
+                    for challenge in selected:
+                        existing = connection.execute(
+                            """SELECT p.id,p.title,p.category FROM projects p
+                               JOIN workflow_challenges w ON w.project_id=p.id
+                               WHERE w.workflow_id=%s AND w.external_id=%s""",
+                            (workflow_id, challenge.external_id),
+                        ).fetchone()
+                        if existing is not None:
+                            imported.append({"external_id": challenge.external_id, "project_id": existing["id"],
+                                             "title": existing["title"], "category": existing["category"], "created": False})
+                            continue
+                        origin = spec.challenges.list_url
+                        if challenge.description:
+                            origin = f"{origin}\n\n{challenge.description}"
+                        project_id = graph_store.create_project(
+                            connection, challenge.title, origin, "capture the flag", challenge.category,
+                            external_id=challenge.external_id, platform=spec.challenges.platform,
                         )
-                        continue
-                    origin = spec.challenges.list_url
-                    if challenge.description:
-                        origin = f"{origin}\n\n{challenge.description}"
-                    project_id = graph_store.create_project(
-                        connection,
-                        challenge.title,
-                        origin,
-                        "capture the flag",
-                        challenge.category,
-                        external_id=challenge.external_id,
-                        platform=spec.challenges.platform,
-                    )
-                    created.append(project_id)
-                    for path in adapter.download_attachments(
-                        challenge,
-                        self.state.attachments_dir(project_id),
-                    ):
-                        graph_store.create_attachment(connection, project_id, path.name, str(path))
-                    imported.append(
-                        {
-                            "external_id": challenge.external_id,
-                            "project_id": project_id,
-                            "title": challenge.title,
-                            "category": challenge.category,
-                            "created": True,
-                        }
-                    )
-        except Exception:
-            for project_id in created:
-                shutil.rmtree(self.state.projects_dir / project_id, ignore_errors=True)
-            raise
+                        created.append(project_id)
+                        destination = self.state.attachments_dir(project_id)
+                        for path in staged[challenge.external_id]:
+                            target = destination / path.name
+                            path.replace(target)
+                            graph_store.create_attachment(connection, project_id, target.name, str(target))
+                        connection.execute(
+                            "INSERT INTO workflow_challenges (workflow_id,external_id,project_id) VALUES (%s,%s,%s)",
+                            (workflow_id, challenge.external_id, project_id),
+                        )
+                        imported.append({"external_id": challenge.external_id, "project_id": project_id,
+                                         "title": challenge.title, "category": challenge.category, "created": True})
+            except Exception:
+                for project_id in created:
+                    shutil.rmtree(self.state.projects_dir / project_id, ignore_errors=True)
+                raise
         for item in imported:
             if not item["created"]:
                 continue
@@ -1383,6 +1404,7 @@ class OpsAgentService:
         flag: str,
         *,
         project_id: str | None = None,
+        include_verdict: bool = False,
     ) -> dict[str, Any]:
         submit = spec.submit
         if submit is None:
@@ -1403,22 +1425,23 @@ class OpsAgentService:
                 secrets=secrets_values,
             ),
         )
-        status_code = int(getattr(response, "status_code", 0))
-        accepted = status_code in submit.success_statuses
-        if accepted and submit.success_path:
-            try:
-                value = _json_path(response.json(), submit.success_path)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                accepted = False
-            else:
-                if submit.success_values:
-                    accepted = any(value == expected for expected in submit.success_values)
+        from backend.platform.verdict import interpret_response
+
+        verdict = interpret_response(response, submit)
+        status_code = verdict.status_code
+        accepted = verdict.correct
         result = {
             "operation": "submit",
             "external_id": external_id,
             "status_code": status_code,
             "accepted": accepted,
         }
+        if include_verdict:
+            result.update(
+                verdict=verdict.status,
+                submission_id=verdict.submission_id,
+                retry_after=verdict.retry_after,
+            )
         if project_id:
             result["project_id"] = project_id
             self.state.logger.project(

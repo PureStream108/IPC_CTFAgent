@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlparse
 
@@ -82,7 +83,7 @@ class SecretHeader(BaseModel):
 class ChallengeMappingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["http_json", "ret2shell"] = "http_json"
+    platform: Literal["http_json", "ret2shell", "gzctf"] = "http_json"
     game_id: int | None = None
     list_url: str = ""
     list_path: str = "data"
@@ -91,6 +92,15 @@ class ChallengeMappingSpec(BaseModel):
     category_field: str = "category"
     description_field: str = "description"
     attachments_field: str = "files"
+    remote_field: str = ""
+    solved_field: str = ""
+    hints_field: str = ""
+    level: int = Field(default=1, ge=1, le=1000)
+    track_id: str = ""
+    level_field: str = ""
+    track_id_field: str = ""
+    pagination_path: str = ""
+    max_pages: int = Field(default=100, ge=1, le=1000)
     category_map: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
     headers: list[SecretHeader] = Field(default_factory=list)
@@ -104,6 +114,8 @@ class ChallengeMappingSpec(BaseModel):
     def require_list_url_for_http_json(self) -> ChallengeMappingSpec:
         if self.platform == "http_json" and not self.list_url.strip():
             raise ValueError("list_url is required for the http_json platform")
+        if self.platform == "gzctf" and self.game_id is None:
+            raise ValueError("game_id is required for the gzctf platform")
         return self
 
     @field_validator("attachment_base_url")
@@ -118,6 +130,12 @@ class ChallengeMappingSpec(BaseModel):
         "category_field",
         "description_field",
         "attachments_field",
+        "remote_field",
+        "solved_field",
+        "hints_field",
+        "level_field",
+        "track_id_field",
+        "pagination_path",
     )
     @classmethod
     def validate_json_path(cls, value: str) -> str:
@@ -144,6 +162,15 @@ class ChallengeMappingSpec(BaseModel):
             category_field=self.category_field,
             description_field=self.description_field,
             attachments_field=self.attachments_field,
+            remote_field=self.remote_field,
+            solved_field=self.solved_field,
+            hints_field=self.hints_field,
+            level=self.level,
+            track_id=self.track_id,
+            level_field=self.level_field,
+            track_id_field=self.track_id_field,
+            pagination_path=self.pagination_path,
+            max_pages=self.max_pages,
             category_map=self.category_map,
             headers=headers,
             attachment_base_url=self.attachment_base_url,
@@ -165,11 +192,23 @@ class FlagSubmitSpec(BaseModel):
     success_statuses: list[int] = Field(default_factory=lambda: [200, 201, 202, 204])
     success_path: str = ""
     success_values: list[Any] = Field(default_factory=list)
+    wrong_values: list[Any] = Field(default_factory=list)
+    pending_values: list[Any] = Field(default_factory=list)
+    submission_id_path: str = ""
+    query_url: str = ""
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
         return _validate_http_url(value, allow_external_id=True)
+
+    @field_validator("query_url")
+    @classmethod
+    def validate_query_url(cls, value: str) -> str:
+        if not value:
+            return ""
+        _validate_http_url(value.replace("{{submission_id}}", "id"), allow_external_id=True)
+        return value
 
     @field_validator("success_statuses")
     @classmethod
@@ -186,6 +225,12 @@ class FlagSubmitSpec(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("submit header names must be unique")
         _validate_template_value(self.json_template)
+        groups = (self.success_values, self.wrong_values, self.pending_values)
+        from backend.platform.verdict import matches
+        for index, group in enumerate(groups):
+            for value in group:
+                if any(matches(value, other) for other in groups[index + 1:]):
+                    raise ValueError("correct, wrong and pending verdict values must be disjoint")
         return self
 
 
@@ -193,6 +238,10 @@ class PlatformWorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120)
+    competition_id: str = Field(default="", max_length=256)
+    team_id: str = Field(default="", max_length=256)
+    ends_at: str = ""
+    remote_instance_limit: int = Field(default=0, ge=0, le=100)
     challenges: ChallengeMappingSpec
     submit: FlagSubmitSpec | None = None
     allow_private_networks: bool = False
@@ -202,6 +251,20 @@ class PlatformWorkflowSpec(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("ends_at")
+    @classmethod
+    def validate_ends_at(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("ends_at must be an ISO 8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("ends_at must include a timezone")
+        return parsed.isoformat()
 
     def required_secret_names(self) -> set[str]:
         names = {header.secret_name for header in self.challenges.headers}

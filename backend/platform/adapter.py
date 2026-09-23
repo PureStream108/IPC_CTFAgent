@@ -62,17 +62,46 @@ class HttpJsonAdapter(PlatformAdapter):
         self.max_attachment_bytes = max_attachment_bytes
 
     def fetch_challenges(self) -> list[PlatformChallenge]:
-        response = self._request_get(
-            self.mapping.list_url,
-            headers=self.mapping.headers,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        items = _json_path(payload, self.mapping.list_path)
-        if not isinstance(items, list):
-            raise ValueError(f"list_path '{self.mapping.list_path}' did not resolve to a list")
-        return [self._normalize(item) for item in items]
+        url = self.mapping.list_url
+        params: dict[str, Any] | None = None
+        pages: list[PlatformChallenge] = []
+        seen_urls: set[str] = set()
+        for _page in range(self.mapping.max_pages):
+            if not url or url in seen_urls:
+                break
+            seen_urls.add(url)
+            request_kwargs: dict[str, Any] = {
+                "headers": self.mapping.headers,
+                "timeout": self.timeout,
+            }
+            if params:
+                request_kwargs["params"] = params
+            response = self._request_get(url, **request_kwargs)
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except (ValueError, TypeError) as exc:
+                raise ValueError("challenge list endpoint did not return JSON") from exc
+            items = _json_path(payload, self.mapping.list_path)
+            if not isinstance(items, list):
+                raise ValueError(f"list_path '{self.mapping.list_path}' did not resolve to a list")
+            pages.extend(self._normalize(item) for item in items)
+            if not self.mapping.pagination_path:
+                break
+            next_url = _json_path(payload, self.mapping.pagination_path)
+            if next_url in (None, ""):
+                break
+            if not isinstance(next_url, str):
+                raise ValueError("pagination_path must resolve to a URL or null")
+            next_url = urljoin(url, next_url)
+            parsed = urlparse(next_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("pagination URL must use http or https")
+            url = next_url
+            params = None
+        else:
+            raise ValueError(f"challenge pagination exceeded max_pages={self.mapping.max_pages}")
+        return pages
 
     def _normalize(self, item: Any) -> PlatformChallenge:
         if not isinstance(item, dict):
@@ -97,6 +126,10 @@ class HttpJsonAdapter(PlatformAdapter):
             category=category,
             description=str(_field(item, self.mapping.description_field, "") or ""),
             attachment_urls=attachment_urls,
+            remote=bool(self.mapping.remote_field and _field(item, self.mapping.remote_field, False) is True),
+            solved=bool(self.mapping.solved_field and _field(item, self.mapping.solved_field, False) is True),
+            hints=([str(h) for h in _field(item, self.mapping.hints_field, [])]
+                   if self.mapping.hints_field and isinstance(_field(item, self.mapping.hints_field, []), list) else []),
         )
 
     def download_attachments(
@@ -135,6 +168,11 @@ class HttpJsonAdapter(PlatformAdapter):
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if not chunk:
                             continue
+                        if written == 0:
+                            content_type = str(getattr(response, "headers", {}).get("Content-Type", "")).lower()
+                            sample = bytes(chunk[:256]).lstrip().lower()
+                            if "text/html" in content_type or sample.startswith((b"<!doctype html", b"<html", b"<head")):
+                                raise ValueError("attachment endpoint returned an HTML/authentication page")
                         written += len(chunk)
                         if self.max_attachment_bytes is not None and written > self.max_attachment_bytes:
                             raise ValueError(
@@ -144,5 +182,9 @@ class HttpJsonAdapter(PlatformAdapter):
             except Exception:
                 target.unlink(missing_ok=True)
                 raise
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
             downloaded.append(target)
         return downloaded

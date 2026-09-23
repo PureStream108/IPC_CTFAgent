@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package ipc.competition.v1;
+
+message Envelope {
+  uint32 protocol_version = 1;
+  string run_id = 2;
+  string challenge_id = 3;
+  string sender_member_id = 4;
+  string receiver_member_id = 5;
+  string sender_session_id = 6;
+  string receiver_session_id = 7;
+  string request_id = 8;
+  string correlation_id = 9;
+  uint64 sequence = 10;
+  uint64 lease_epoch = 11;
+  string created_at = 12;
+  string deadline_at = 13;
+  string message_type = 14;
+  bytes payload_json = 15;
+}
+
+message Result {
+  string status = 1;
+  string request_id = 2;
+  bytes payload_json = 3;
+}
+
+service Pair {
+  rpc Call(Envelope) returns (Result);
+}
