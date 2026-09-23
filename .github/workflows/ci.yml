@@ -50,3 +50,35 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+      - name: Static and deployment checks
+        run: |
+          python -m compileall -q backend scripts tests
+          python -m alembic upgrade head --sql > /tmp/ipc-migration.sql
+          docker compose config --quiet
+
+  task-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build task image
+        run: docker build -f docker/member/Dockerfile -t ipc-task:ci .
+
+      - name: Run CTF tool acceptance
+        run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci bash /acceptance/c5_task_acceptance.sh
+
+      - name: Verify Playwright-only browser policy
+        run: |
+          docker run --rm ipc-task:ci bash -ceu '
+            for browser in google-chrome google-chrome-stable chromium chromium-browser chrome; do
+              ! command -v "$browser"
+            done
+            test ! -d /ms-playwright
+            python3 -m pip show playwright >/dev/null
+          '
+
+      - name: Run AI CPU smoke
+        run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci python3 /acceptance/ai_smoke.py

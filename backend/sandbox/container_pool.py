@@ -99,7 +99,7 @@ class ContainerPool:
                 task = self._new_task(project_id, env)
                 self._tasks[project_id] = task
             return task.member_view(member)
-        ws = self.workspace_root / project_id / "sandbox" / member
+        ws = self.workspace_root / project_id / "sandbox" / "shared"
         return LocalSandbox(name=f"{project_id}-{member}", workspace=ws, env=env)
 
     def _new_task(self, project_id: str, env: dict[str, str] | None):

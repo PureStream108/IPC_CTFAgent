@@ -10,16 +10,15 @@ but this file lists the broader base image so agents know what to reach for.
 Execution model
 ---------------
 - Use action "bash" to run commands in the current Member sandbox.
-- In Docker mode each Member works in /workspace/<member>.
+- In Docker mode each Member works in /workspace/shared.
 - Extra cloned tools are under /workspace/tools, which points to
   /opt/ipc-tools/tools.
-- Prefer creating private scripts and temporary output in the current Member
-  directory; use /workspace/shared only for cross-Member exchange.
+- Coordinate writes to shared scripts; use a Member-specific scratch directory
+  for temporary output.
 - Use action "tool" only for helpers listed in the current `available_mcps`:
-  memory, tool_search, browser, reverse, the optional zap service, or the
+  memory, tool_search, browser, reverse, or the
   virtual "tools" server with list_tools/get_tool.
-- Browser and reverse run inside the shared task container. ZAP is disabled by
-  default and is reached over the Compose network only when explicitly enabled.
+- Browser and reverse run inside the shared task container.
   Browser tools are navigate, click,
   fill, press, eval_js, get_content, screenshot, cookies, and set_cookie.
 - Reverse tools are decompile, decompile_all, list_functions, strings,

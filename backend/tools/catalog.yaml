@@ -139,8 +139,8 @@ entries:
     kind: mcp
     group: mcps
     title: browser MCP
-    summary: 在独立 Playwright Chromium 会话中进行结构化页面交互、有界脱敏诊断，以及截图和下载产物留存。
-    tags: [mcp, browser, playwright, chromium]
+    summary: 在外部提供浏览器运行时的 Playwright 会话中进行结构化页面交互、有界脱敏诊断，以及截图和下载产物留存；任务镜像只提供 Playwright 包。
+    tags: [mcp, browser, playwright]
     command: ipc-mcp-server browser
     install_path: backend/mcp/shared.py
     workflow: 优先使用 wait_for、click、fill 等结构化工具；先开始有界网络记录，再交互并按 after_id 增量读取诊断事件，最后用 artifact ID 留存证据。
@@ -156,16 +156,6 @@ entries:
     workflow: 优先调用 file_info/list_functions，再按函数调用 decompile；超时会自动降级到 r2。
     example: "ipc-mcp-server reverse --transport stdio"
     related: [lib_pyghidra, tool_radare2]
-  - id: mcp_zap
-    kind: mcp
-    group: mcps
-    title: zap MCP
-    summary: 调用共享 OWASP ZAP 服务进行爬取和授权范围内的主动扫描。
-    tags: [mcp, zap, web]
-    command: ipc-mcp-server zap
-    install_path: backend/mcp/shared.py
-    example: "ZAP_API_URL=http://ipc-zap:8080 ipc-mcp-server zap"
-
   - id: core_ripgrep
     kind: tool
     group: tools/core
@@ -436,12 +426,12 @@ entries:
   - id: lib_playwright
     kind: library
     group: libraries/python
-    title: Playwright / Chromium
-    summary: 自动化真实 Chromium 页面、JavaScript、Cookie、截图和前端交互。
-    tags: [python, browser, playwright, chromium]
+    title: Playwright browser automation
+    summary: 使用 Playwright 包自动化页面、JavaScript、Cookie、截图和前端交互；浏览器可执行文件由部署环境显式提供。
+    tags: [python, browser, playwright]
     command: "python3 -c \"import playwright; print(playwright)\""
     install_path: Python site-packages/playwright
-    example: "python3 -c \"from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()\""
+    example: "IPC_PLAYWRIGHT_EXECUTABLE=/path/to/browser python3 -c \"import os; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, executable_path=os.environ['IPC_PLAYWRIGHT_EXECUTABLE']); print(b.version); b.close(); p.stop()\""
     official: https://playwright.dev/python/
   - id: lib_typhonbreaker
     kind: library

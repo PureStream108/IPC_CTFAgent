@@ -17,7 +17,13 @@ if [[ -d "$ysoserial_dir" ]]; then
   ysoserial_jar="$(find "$ysoserial_dir" -type f -name 'ysoserial-*-all.jar' -print -quit)"
   if [[ -z "$ysoserial_jar" ]]; then
     # Upstream still targets Java 6, which modern JDKs no longer accept. The
-    # task image uses JDK 21, so build the unchanged sources as Java 8 bytecode.
+    # task image uses JDK 21, which also removed the RMI Activation API used by
+    # these optional listener helpers. Keep the payload generators and exclude
+    # only the obsolete listener entry points from this compatibility build.
+    rm -f \
+      "$ysoserial_dir/src/main/java/ysoserial/payloads/JRMPListener.java" \
+      "$ysoserial_dir/src/main/java/ysoserial/exploit/JenkinsListener.java" \
+      "$ysoserial_dir/src/main/java/ysoserial/exploit/JenkinsReverse.java"
     sed -i \
       -e 's|<source>1\.6</source>|<source>1.8</source>|' \
       -e 's|<target>1\.6</target>|<target>1.8</target>|' \
@@ -59,6 +65,7 @@ int main(int argc, char **argv) {
 EOF
 run "Compile reverse fixture" gcc -O0 -g -fno-pie -no-pie -o /tmp/c5_reverse /tmp/c5_reverse.c
 
+mkdir -p /tmp/c5-headless
 run "Ghidra headless analysis" timeout 120 \
   "${IPC_GHIDRA_HEADLESS:-/opt/ghidra/support/analyzeHeadless}" \
   /tmp/c5-headless C5 -import /tmp/c5_reverse \
@@ -87,13 +94,24 @@ run "sqlmap" sqlmap --version
 run "SageMath" sage --version
 run "CTF Python imports" python3 -c "import angr, pwn, volatility3; print('angr/pwn/volatility3 ready')"
 run "ripgrep" rg --version
-run "Playwright Chromium" python3 - <<'PY'
+run "Playwright package" python3 - <<'PY'
+import importlib.metadata
+print(importlib.metadata.version("playwright"))
+PY
+
+if [[ -n "${IPC_PLAYWRIGHT_EXECUTABLE:-}" ]]; then
+  run "Playwright external browser" python3 - <<'PY'
+import os
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as playwright:
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(
+        headless=True,
+        executable_path=os.environ["IPC_PLAYWRIGHT_EXECUTABLE"],
+    )
     print(browser.version)
     browser.close()
 PY
+fi
 
 printf '\n[C5] all task-image checks passed\n'

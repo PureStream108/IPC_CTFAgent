@@ -47,7 +47,9 @@ def test_task_image_contains_ctf_and_container_mcp_runtimes():
 
     assert "ripgrep" in task_dockerfile
     assert "pyghidra" in task_dockerfile
-    assert "playwright install --with-deps chromium" in task_dockerfile
+    assert "pip3 install --no-cache-dir playwright" in task_dockerfile
+    assert "playwright install" not in task_dockerfile
+    assert "IPC_CHROME_BIN" not in task_dockerfile
     assert "GHIDRA_DIRECT_URL=https://github.com/NationalSecurityAgency/ghidra" in task_dockerfile
     assert 'for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"' in task_dockerfile
     assert "COPY backend /opt/ipc/backend" in task_dockerfile
@@ -66,13 +68,7 @@ def test_compose_builds_task_image_and_app_depends_on_it():
     assert compose["services"]["ipc-app"]["ports"] == ["8000:8000"]
 
 
-def test_zap_is_an_opt_in_compose_service():
+def test_zap_is_not_deployed():
     compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
-    zap = compose["services"]["ipc-zap"]
-    app = compose["services"]["ipc-app"]
-
-    assert zap["profiles"] == ["zap"]
-    assert "ipc-zap" not in app.get("depends_on", [])
-    assert any(
-        value.startswith("IPC_ZAP_ENABLED=") for value in app["environment"]
-    )
+    assert "ipc-zap" not in compose["services"]
+    assert not any("ZAP" in value for value in compose["services"]["ipc-app"]["environment"])

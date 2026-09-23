@@ -1,5 +1,17 @@
 category: ai
 tools:
+  - name: scikit-learn
+    description: Classical machine learning training, inference, and model inspection with scikit-learn and joblib.
+    path: system
+    exec: python
+    tags: [ml, sklearn, joblib, ai]
+    when_to_use: Inspect serialized estimators, feature preprocessing, decision boundaries, or classifier behavior.
+  - name: onnxruntime
+    description: ONNX graph inspection and CPU inference with onnx and onnxruntime.
+    path: system
+    exec: python
+    tags: [ml, onnx, inference, ai]
+    when_to_use: Inspect model graphs and weights or evaluate controlled model inputs.
   - name: pytorch
     description: PyTorch (CPU) for model loading/inference.
     path: system

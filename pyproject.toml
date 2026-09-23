@@ -18,6 +18,9 @@ dependencies = [
     "psycopg[binary,pool]>=3.2,<4",
     "sqlalchemy>=2.0,<3",
     "alembic>=1.13,<2",
+    "grpcio>=1.68,<2",
+    "protobuf>=6.33.5,<7",
+    "pyzmq>=26,<28",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +41,7 @@ where = ["."]
 include = ["backend*"]
 
 [tool.setuptools.package-data]
-"backend" = ["config/prompts/*.md", "config/*.yaml", "tools/registry/*.yaml", "tools/member_tools.txt", "tools/catalog.yaml", "tools/catalog_docs/*.md"]
+"backend" = ["config/prompts/*.md", "config/*.yaml", "competition/proto/*.proto", "tools/registry/*.yaml", "tools/member_tools.txt", "tools/catalog.yaml", "tools/catalog_docs/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

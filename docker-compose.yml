@@ -19,31 +19,12 @@ services:
       context: .
       dockerfile: docker/member/Dockerfile
       args:
+        IPC_TASK_BASE: ${IPC_TASK_BASE:-ubuntu:22.04}
         GITHUB_MIRROR: ${IPC_GITHUB_MIRROR:-https://github.com}
         TEMURIN_JDK_URL: ${IPC_TEMURIN_JDK_URL:-https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse}
     image: ipc-task:latest
     command: ["true"]
     restart: "no"
-
-  ipc-zap:
-    profiles: ["zap"]
-    image: ghcr.io/zaproxy/zaproxy:stable
-    command:
-      - zap.sh
-      - -daemon
-      - -host
-      - 0.0.0.0
-      - -port
-      - "8080"
-      - -config
-      - api.disablekey=true
-      - -config
-      - api.addrs.addr.name=.*
-      - -config
-      - api.addrs.addr.regex=true
-    expose:
-      - "8080"
-    restart: unless-stopped
 
   ipc-claude-runner:
     build:
@@ -94,7 +75,6 @@ services:
       - IPC_ROOT=/app
       - IPC_ARTIFACT_ROOT=/app/data/artifacts
       - IPC_LOG_ENABLED=true
-      - IPC_ZAP_ENABLED=${IPC_ZAP_ENABLED:-}
       - IPC_CLAUDE_RUNNER_URL=${IPC_CLAUDE_RUNNER_URL:-http://ipc-claude-runner:8600}
       - IPC_RUNNER_TOKEN=${IPC_RUNNER_TOKEN:-}
       - IPC_DATABASE_URL=${IPC_DATABASE_URL:-postgresql://ipc:ipc@ipc-postgres:5432/ipc}
@@ -105,6 +85,12 @@ services:
       - IPC_R2S_USERNAME=${IPC_R2S_USERNAME:-}
       - IPC_R2S_PASSWORD=${IPC_R2S_PASSWORD:-}
       - IPC_R2S_TOKEN=${IPC_R2S_TOKEN:-}
+      # GZCTF participant cookie credentials are deployment secrets.  They are
+      # read only by the backend adapter and are never copied into run specs.
+      - IPC_GZ_BASE_URL=${IPC_GZ_BASE_URL:-}
+      - IPC_GZ_USERNAME=${IPC_GZ_USERNAME:-}
+      - IPC_GZ_PASSWORD=${IPC_GZ_PASSWORD:-}
+      - IPC_GZ_GAME_ID=${IPC_GZ_GAME_ID:-}
     volumes:
       # PostgreSQL owns runtime facts. ./data holds deployment-owned secrets,
       # IPC conversation files and the shared Artifact tree (workspaces,
@@ -121,8 +107,7 @@ services:
       ipc-claude-runner:
         condition: service_started
 
-# Browser and reverse MCP servers run inside each task container. ZAP is an
-# optional shared service enabled with the `zap` Compose profile.
+# Browser and reverse MCP servers run inside each task container.
 
 volumes:
   ipc_claude_home:

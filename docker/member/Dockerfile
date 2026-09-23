@@ -1,4 +1,5 @@
-FROM ubuntu:22.04
+ARG IPC_TASK_BASE=ubuntu:22.04
+FROM ${IPC_TASK_BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ARG GITHUB_MIRROR=https://github.com
@@ -118,7 +119,7 @@ RUN pip3 install --no-cache-dir \
         fpylll volatility3 || true
 
 RUN pip3 install --no-cache-dir \
-        filelock fsspec jinja2 networkx sympy typing-extensions \
+        filelock fsspec jinja2 "networkx>=3.2,<4" sympy typing-extensions \
     && pip3 install --no-cache-dir --no-deps \
         --index-url https://download.pytorch.org/whl/cpu \
         torch \
@@ -160,10 +161,14 @@ RUN sed -i 's/from fractions import gcd/from math import gcd/' /opt/cado-nfs/scr
 # Container-backed MCP runtimes live beside the CTF tools so paths seen by a
 # Member are the same paths used by browser and reverse analysis.
 ARG TEMURIN_JDK_URL=https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse
-RUN mkdir -p /opt/java21 \
-    && wget -qO /tmp/jdk21.tar.gz "$TEMURIN_JDK_URL" \
-    && tar -xzf /tmp/jdk21.tar.gz -C /opt/java21 --strip-components=1 \
-    && rm -f /tmp/jdk21.tar.gz
+RUN if [ -x /opt/java21/bin/java ]; then \
+      echo "reusing the Java 21 runtime from the task base image"; \
+    else \
+      mkdir -p /opt/java21 \
+      && wget -qO /tmp/jdk21.tar.gz "$TEMURIN_JDK_URL" \
+      && tar -xzf /tmp/jdk21.tar.gz -C /opt/java21 --strip-components=1 \
+      && rm -f /tmp/jdk21.tar.gz; \
+    fi
 ENV GHIDRA_JAVA_HOME=/opt/java21
 ENV JAVA_HOME=/opt/java21
 ENV PATH="/opt/java21/bin:${PATH}"
@@ -174,22 +179,26 @@ ARG GHIDRA_TAG=Ghidra_12.1.2_build
 ARG GHIDRA_URL=${GITHUB_MIRROR}/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
 ARG GHIDRA_DIRECT_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip
 ARG GHIDRA_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
-RUN set -eux; \
-    downloaded=0; \
-    for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"; do \
-        rm -f /tmp/ghidra.zip; \
-        if wget --timeout=30 --tries=3 -O /tmp/ghidra.zip "${url}"; then downloaded=1; break; fi; \
-    done; \
-    test "${downloaded}" = 1; \
-    test -s /tmp/ghidra.zip; \
-    echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
-    && unzip -q /tmp/ghidra.zip -d /opt \
-    && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
-    && rm -f /tmp/ghidra.zip \
-    && rm -rf /opt/ghidra/docs \
-    && find /opt/ghidra -type d \( -name mac_arm_64 -o -name mac_x86_64 -o -name win_x86_64 \) \
-        -prune -exec rm -rf {} + \
-    && pip3 install --no-cache-dir /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-*.whl
+RUN if [ -x /opt/ghidra/support/analyzeHeadless ]; then \
+      echo "reusing Ghidra from the task base image"; \
+    else \
+      set -eux; \
+      downloaded=0; \
+      for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"; do \
+          rm -f /tmp/ghidra.zip; \
+          if wget --timeout=30 --tries=3 -O /tmp/ghidra.zip "${url}"; then downloaded=1; break; fi; \
+      done; \
+      test "${downloaded}" = 1; \
+      test -s /tmp/ghidra.zip; \
+      echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
+      && unzip -q /tmp/ghidra.zip -d /opt \
+      && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
+      && rm -f /tmp/ghidra.zip \
+      && rm -rf /opt/ghidra/docs \
+      && find /opt/ghidra -type d \( -name mac_arm_64 -o -name mac_x86_64 -o -name win_x86_64 \) \
+          -prune -exec rm -rf {} + \
+      && pip3 install --no-cache-dir /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-*.whl; \
+    fi
 
 # Ubuntu's system packaging library is too old for current setuptools and can
 # silently produce empty UNKNOWN wheels, so use an explicit build toolchain.
@@ -199,17 +208,21 @@ RUN pip3 install --no-cache-dir --upgrade "setuptools>=68" "packaging>=24" wheel
 ENV GHIDRA_INSTALL_DIR=/opt/ghidra
 ENV IPC_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
 
-# `--with-deps` runs apt, so strip the docs it reinstates afterwards.
-ARG PLAYWRIGHT_DOWNLOAD_HOST=
-RUN pip3 install --no-cache-dir playwright \
-    && if [ -n "${PLAYWRIGHT_DOWNLOAD_HOST}" ]; then export PLAYWRIGHT_DOWNLOAD_HOST; fi \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
-ENV IPC_CHROME_BIN=/usr/bin/chromium
+# Keep the Playwright Python API available to browser-capable deployments.
+# Browser binaries are intentionally provisioned outside this task image so
+# the image remains small and does not silently download or run Chrome.
+RUN pip3 install --no-cache-dir playwright
 
 COPY pyproject.toml /opt/ipc/pyproject.toml
 COPY backend /opt/ipc/backend
 RUN pip3 install --no-cache-dir --no-build-isolation /opt/ipc
+
+# Keep the frequently adjusted AI compatibility lock at the end so updating
+# it does not invalidate the large CTF/JDK/Ghidra layers above.
+COPY docker/member/ai-requirements.txt /opt/ipc-ai-requirements.txt
+COPY scripts/ai_smoke.py /opt/ipc-ai-smoke.py
+RUN pip3 install --no-cache-dir -r /opt/ipc-ai-requirements.txt \
+    && python3 /opt/ipc-ai-smoke.py
 
 WORKDIR /workspace
 

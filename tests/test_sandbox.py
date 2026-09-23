@@ -116,12 +116,13 @@ def test_resource_manager_reclaims_orphaned_projects():
     assert rl.active_tasks() == ["proj_002"]
 
 
-def test_container_pool_isolated_workspaces(tmp_path):
+def test_container_pool_shares_workspace_within_project(tmp_path):
     pool = ContainerPool(backend="local", workspace_root=tmp_path)
     sb1 = pool.get("proj_001", "aventurine")
     sb2 = pool.get("proj_001", "pearl")
     sb1.write_file("a.txt", "from aventurine")
-    assert sb2.read_file("a.txt") is None  # separate workspaces
+    assert sb2.read_file("a.txt") == "from aventurine"
+    assert pool.get("proj_002", "agate").read_file("a.txt") is None
     # same member returns same sandbox
     assert pool.get("proj_001", "aventurine") is sb1
 
@@ -133,7 +134,7 @@ def test_container_pool_docker_shares_one_task_container_between_members(tmp_pat
         def __init__(self, task, member):
             self.task = task
             self.name = f"{task.project_id}-{member}"
-            self.workdir = f"/workspace/{member}"
+            self.workdir = "/workspace/shared"
             self.started = False
 
         def start(self):
@@ -172,8 +173,8 @@ def test_container_pool_docker_shares_one_task_container_between_members(tmp_pat
     assert sb1 is not sb2
     assert sb1.name == "proj_001-aventurine"
     assert sb2.name == "proj_001-pearl"
-    assert sb1.workdir == "/workspace/aventurine"
-    assert sb2.workdir == "/workspace/pearl"
+    assert sb1.workdir == "/workspace/shared"
+    assert sb2.workdir == "/workspace/shared"
     assert sb1.task is sb2.task
     assert sb1.task.attachments_dir == tmp_path / "projects" / "proj_001" / "attachments"
     assert sb1.started is True
@@ -347,5 +348,5 @@ def test_task_sandbox_initializes_shared_workspace_and_copies_attachments(tmp_pa
     assert "mem_limit" not in containers.run_kwargs
     assert container.archives and container.archives[0][0] == "/workspace/attachments"
     assert aventurine._task is pearl._task is sandbox
-    assert aventurine.workdir == "/workspace/aventurine"
-    assert pearl.workdir == "/workspace/pearl"
+    assert aventurine.workdir == "/workspace/shared"
+    assert pearl.workdir == "/workspace/shared"

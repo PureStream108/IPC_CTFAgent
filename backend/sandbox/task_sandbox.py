@@ -36,15 +36,14 @@ def task_container_name(project_id: str) -> str:
 
 
 def member_workdir(member: str) -> str:
-    return f"{WORKSPACE}/{_safe_segment(member)}"
+    return SHARED_DIR
 
 
 class TaskSandbox:
     """One Docker container per CTF task (project), shared by all its Members.
 
-    Members are isolated by working directory (/workspace/<member>) rather than
-    by container. Files under /workspace are visible to every Member so they can
-    exchange artifacts (e.g. via /workspace/shared). The container is not
+    Members use the same /workspace/shared working directory. The complete
+    workspace lives on a named volume that survives container removal. The container is not
     memory-capped; concurrency is bounded by the task-slot limiter instead.
     """
 
@@ -66,6 +65,9 @@ class TaskSandbox:
         self._sdk = None
         self._preflight_complete = False
         self._container_name = task_container_name(project_id)
+        # Named Linux volumes also work when the backend uses the host Docker
+        # socket: no incorrect backend-to-host bind path translation is needed.
+        self._volume_name = f"{self._container_name}-workspace"
         self._shared_network: str | None = None
         self._lock = threading.RLock()
         self._member_dirs: set[str] = set()
@@ -130,10 +132,17 @@ class TaskSandbox:
             client = self._docker()
             from docker.errors import ImageNotFound, NotFound
 
+            created = False
             try:
                 try:
                     container = client.containers.get(self._container_name)
                     container.reload()
+                    mounts = getattr(container, "attrs", {}).get("Mounts")
+                    if mounts is not None and not any(m.get("Destination") == WORKSPACE for m in mounts):
+                        raise DockerConfigurationError(
+                            "legacy task container has no persistent workspace; export /workspace before recreating it",
+                            operation="validate workspace persistence",
+                        )
                     if getattr(container, "status", "running") != "running":
                         container.start()
                 except NotFound:
@@ -144,6 +153,7 @@ class TaskSandbox:
                         "name": self._container_name,
                         "working_dir": "/",
                         "extra_hosts": {"host.docker.internal": "host-gateway"},
+                        "volumes": {self._volume_name: {"bind": WORKSPACE, "mode": "rw"}},
                     }
                     if self.network:
                         self._shared_network = self._shared_network_name()
@@ -155,6 +165,7 @@ class TaskSandbox:
                         run_kwargs["network_mode"] = "none"
                     try:
                         container = client.containers.run(**run_kwargs)
+                        created = True
                     except ImageNotFound as exc:
                         raise DockerImageError(
                             f"task image '{self.image}' is unavailable; "
@@ -184,7 +195,7 @@ class TaskSandbox:
                 self._copy_attachments()
             except Exception as exc:
                 with suppress(Exception):
-                    if "container" in locals():
+                    if created and "container" in locals():
                         container.remove(force=True)
                 self._container = None
                 if isinstance(exc, SandboxStartupError):

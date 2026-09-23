@@ -23,6 +23,9 @@ COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
+# Pin skills at build time. Normal startup only reads/copies this package.
+RUN python -c "from pathlib import Path; from backend.skills.store import SkillStore, DEFAULT_REPOSITORY, DEFAULT_REVISION; SkillStore(Path('/opt/ipc-skills')).install(DEFAULT_REPOSITORY, DEFAULT_REVISION)"
+
 # wsrx (WebSocket Reflector X CLI from XDSEC, static musl build) tunnels the
 # ret2shell platform's ws://-proxied challenge ports to local TCP ports so
 # Members can reach dynamic instances over the docker network. The ret2shell

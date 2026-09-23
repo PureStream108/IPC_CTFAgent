@@ -13,7 +13,7 @@ from backend.mcp import reverse_mcp, reverse_worker
 from backend.mcp.mcp_client import MCPClient
 from backend.mcp.mcp_server import SERVER_NAMES, build_mcp_server
 from backend.mcp.reverse_mcp import build_reverse_mcp
-from backend.mcp.shared import _BrowserSession, build_browser_mcp, build_zap_mcp
+from backend.mcp.shared import _BrowserSession, build_browser_mcp
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
 
@@ -49,7 +49,7 @@ def test_registry_loads_all_categories(registry):
 def test_exposed_for_category(registry):
     web = registry.exposed_for("web")
     names = {tool.name for tool in web}
-    assert {"browser", "zap", "sqlmap", "typhonbreaker"} <= names
+    assert {"browser", "sqlmap", "typhonbreaker"} <= names
     assert all(tool.category == "web" for tool in web)
     assert all(tool.description and tool.exec and tool.when_to_use for tool in web)
     assert "ghidra" not in names
@@ -289,6 +289,44 @@ def test_browser_session_event_buffers_are_bounded_incremental_and_redacted(tmp_
     ))["events"] == []
 
 
+def test_browser_start_failure_stops_playwright_driver(monkeypatch, tmp_path):
+    stopped = []
+
+    class FakeChromium:
+        async def launch(self, **_kwargs):
+            raise RuntimeError("browser executable is not installed")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        async def stop(self):
+            stopped.append(True)
+
+    class FakeStarter:
+        async def start(self):
+            return FakePlaywright()
+
+    playwright_async_api = pytest.importorskip("playwright.async_api")
+
+    monkeypatch.setattr(playwright_async_api, "async_playwright", lambda: FakeStarter())
+    session = _BrowserSession(
+        workdir=tmp_path / "member",
+        shared_dir=tmp_path / "shared",
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    async def run():
+        with pytest.raises(RuntimeError, match="not installed"):
+            await session.page()
+        assert session._playwright is None
+        assert session._browser is None
+        assert session._context is None
+        await session.close()
+
+    asyncio.run(run())
+    assert stopped == [True]
+
+
 def test_browser_session_enforces_boundaries_and_records_artifacts(tmp_path):
     member = tmp_path / "member"
     shared = tmp_path / "shared"
@@ -490,7 +528,7 @@ def test_browser_phase_one_tools_wait_upload_download_and_artifacts(tmp_path):
     assert len((member / "browser-artifacts" / "metadata.jsonl").read_text(encoding="utf-8").splitlines()) == 2
 
 
-def test_reverse_mcp_and_zap_contracts(monkeypatch, tmp_path):
+def test_reverse_mcp_contracts(monkeypatch, tmp_path):
     reverse = build_reverse_mcp()
     assert {
         "decompile", "decompile_all", "list_functions", "strings",
@@ -499,18 +537,6 @@ def test_reverse_mcp_and_zap_contracts(monkeypatch, tmp_path):
     missing = call_tool(reverse, "decompile", binary=str(tmp_path / "missing.bin"))
     assert missing["available"] is False
     assert "binary not found" in missing["error"]
-
-    class FakeZapResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"scan": "1", "alerts": [{"risk": "Low"}], "urls": ["http://x/a"]}
-
-    monkeypatch.setattr("backend.mcp.shared.requests.get", lambda url, **kwargs: FakeZapResponse())
-    scan = call_tool(build_zap_mcp(), "active_scan", url="http://x")
-    assert scan["available"] is True
-    assert scan["alerts"] == [{"risk": "Low"}]
 
 
 def test_reverse_decompile_falls_back_to_r2(monkeypatch, tmp_path):

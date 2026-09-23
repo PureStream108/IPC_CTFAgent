@@ -106,7 +106,7 @@ def test_real_browser_phase_one_flow(tmp_path: Path, browser_test_origin: str):
         except Exception as exc:
             detail = str(exc).lower()
             if "executable doesn't exist" in detail or "playwright install" in detail:
-                pytest.skip("Playwright Chromium is not installed")
+                pytest.skip("Playwright browser executable is not installed")
             raise
 
         async with MCPClient.in_process(server) as client:
