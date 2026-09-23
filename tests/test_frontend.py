@@ -39,8 +39,8 @@ def test_index_served(client):
     assert "First-time setup" not in body
     assert 'await this.authRequest("POST","/auth/setup"' not in body
     assert 'await this.authRequest("POST","/auth/login"' not in body
-    assert "Claude Code action agent with native session context" in body
-    assert "OpenAI-compatible action agent with durable IPC history" in body
+    assert "Claude Code action agent with native session context" not in body
+    assert "OpenAI-compatible action agent with durable IPC history" not in body
     assert "Claude Code (native)" in body
     assert "OpenAI-compatible API" in body
     assert "IPC live log" in body
@@ -59,7 +59,7 @@ def test_index_served(client):
     assert "API surface" in body
     assert "chat_completions" in body
     assert "anthropic" in body
-    assert "cfg.runtime.zap_enabled" in body
+    assert "cfg.runtime.zap_enabled" not in body
     assert "工具目录" in body
     assert "经验记忆" in body
     assert "catalogRows" in body

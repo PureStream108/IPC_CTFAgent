@@ -91,10 +91,12 @@
         <span class="font-semibold text-slate-600 tabular-nums" x-text="countBy('solved')"></span>
       </span>
     </div>
-    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalLogs()">Logs</button>
-    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openGlobalWP()">WP</button>
-    <button class="h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition inline-flex items-center" @click="openOpsAgent()">IPC</button>
-    <button class="h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition inline-flex items-center" @click="openIPCConfig()">Config</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalLogs()">Logs</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalWP()">WP</button>
+    <button class="h-7 px-2.5 rounded-lg border border-teal-200 bg-teal-50 text-xs text-teal-700 hover:bg-teal-100 transition inline-flex items-center" @click="openCompetition()">Competition</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition items-center" @click="openOpsAgent()">IPC</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openIPCConfig()">Config</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500" @click="openSkills()">Skill</button>
   </header>
 
   <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
@@ -443,6 +445,111 @@
     </div>
   </footer>
 
+  <div class="fixed inset-0 z-30 bg-slate-50 flex flex-col overflow-x-hidden" x-show="showCompetition" x-cloak>
+    <header class="min-h-14 shrink-0 border-b border-slate-200 bg-white px-3 sm:px-4 py-2 flex flex-wrap items-center gap-2 sm:gap-3">
+      <div class="min-w-0 flex-1 sm:flex-none sm:w-56">
+        <h2 class="font-semibold text-slate-800 leading-tight">Competition</h2>
+        <p class="text-[11px] text-slate-400 truncate" x-text="competitionRun?.run?.identity_key || 'Select a confirmed workflow to begin'"></p>
+      </div>
+      <div class="hidden sm:block flex-1"></div>
+      <div class="order-3 w-full sm:order-none sm:w-auto flex items-center gap-2 min-w-0">
+        <select class="h-8 flex-1 sm:flex-none sm:w-56 min-w-0 rounded-lg px-2 text-xs" x-model="competitionWorkflowId" :disabled="competitionBusy || !!competitionRun">
+          <option value="">Select workflow</option>
+          <template x-for="workflow in opsWorkflows" :key="workflow.id">
+            <option :value="workflow.id" :disabled="workflow.status!=='confirmed'" x-text="workflow.name+' ('+workflow.status+')'"></option>
+          </template>
+        </select>
+        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="preflightCompetition()">Preflight</button>
+        <button class="btn h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="startCompetition()">Start</button>
+      </div>
+      <button class="h-8 w-8 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100" title="Close competition view" @click="closeCompetition()">&times;</button>
+    </header>
+
+    <div class="shrink-0 border-b border-slate-200 bg-white px-4 py-2 flex items-center gap-2" x-show="competitionRun">
+      <span class="rounded-lg px-2 py-1 text-xs font-semibold uppercase" :class="competitionStatusClass()" x-text="competitionRun?.run?.status"></span>
+      <span class="text-xs text-slate-400">Revision <b class="text-slate-600 tabular-nums" x-text="competitionRun?.run?.revision"></b></span>
+      <span class="text-xs text-rose-600 truncate" x-show="competitionRun?.run?.last_error" x-text="competitionRun?.run?.last_error"></span>
+      <div class="flex-1"></div>
+      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" :disabled="competitionBusy" @click="controlCompetition('refresh')">Refresh</button>
+      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" x-show="competitionRun?.run?.status==='running'" :disabled="competitionBusy" @click="controlCompetition('pause')">Pause</button>
+      <button class="btn h-7 rounded-lg px-2.5 text-xs" x-show="['paused','blocked'].includes(competitionRun?.run?.status)" :disabled="competitionBusy" @click="controlCompetition('resume')">Resume</button>
+      <button class="btn-ghost btn-danger h-7 rounded-lg px-2.5 text-xs" :disabled="competitionBusy||['stopped','finished'].includes(competitionRun?.run?.status)" @click="controlCompetition('stop')">Stop</button>
+    </div>
+
+    <main class="flex-1 min-h-0 overflow-auto">
+      <div class="mx-auto max-w-[1500px] px-4 py-4 space-y-4">
+        <div x-show="competitionPreflight" class="border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 text-xs text-teal-800">
+          <span x-text="competitionPreflight?.challenge_count+' challenges, '+competitionPreflight?.remote_count+' remote'"></span>
+          <span class="ml-3 text-teal-600" x-text="competitionPreflight?.identity_key"></span>
+        </div>
+        <div x-show="competitionError" class="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-700" x-text="competitionError"></div>
+
+        <template x-if="competitionRun">
+          <div class="space-y-4">
+            <section>
+              <div class="flex items-center justify-between mb-2">
+                <h3 class="text-xs font-semibold uppercase text-slate-500">Member seats</h3>
+                <div class="text-xs text-slate-400">
+                  <span class="text-teal-700" x-text="competitionRun.capacity.solving+' solving'"></span>
+                  <span class="mx-2 text-amber-700" x-text="competitionRun.capacity.writing+' WP'"></span>
+                  <span x-text="competitionRun.capacity.idle+' idle'"></span>
+                </div>
+              </div>
+              <div class="grid grid-cols-2 sm:grid-cols-5 xl:grid-cols-10 gap-2">
+                <template x-for="item in competitionMembers" :key="item.member">
+                  <article class="h-24 rounded-lg border bg-white p-2 flex flex-col justify-between" :class="competitionMemberClass(item.state)">
+                    <div class="font-semibold text-xs text-slate-700 truncate" x-text="displayMember(item.member)"></div>
+                    <div>
+                      <div class="text-[10px] uppercase font-semibold" x-text="item.state"></div>
+                      <div class="text-[10px] text-slate-400 truncate mt-0.5" x-text="competitionChallengeTitle(item.assignment?.challenge_id)"></div>
+                    </div>
+                  </article>
+                </template>
+              </div>
+            </section>
+
+            <section class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4 items-start">
+              <div class="border border-slate-200 bg-white rounded-lg overflow-hidden">
+                <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
+                  <h3 class="text-xs font-semibold uppercase text-slate-500">Challenges</h3>
+                  <span class="text-[11px] text-slate-400" x-text="competitionRun.challenges.length+' total'"></span>
+                </div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-xs">
+                    <thead class="bg-slate-50 text-slate-400 uppercase text-[10px]"><tr><th class="text-left px-3 py-2">Challenge</th><th class="text-left px-3 py-2">Category</th><th class="text-left px-3 py-2">State</th><th class="text-left px-3 py-2">Members</th><th class="text-left px-3 py-2">Deadline</th><th class="text-right px-3 py-2">Wrong</th></tr></thead>
+                    <tbody class="divide-y divide-slate-100">
+                      <template x-for="challenge in competitionRun.challenges" :key="challenge.id">
+                        <tr class="hover:bg-slate-50">
+                          <td class="px-3 py-2"><div class="font-medium text-slate-700" x-text="challenge.metadata.title||challenge.external_id"></div><div class="text-[10px] text-slate-400" x-text="challenge.external_id"></div></td>
+                          <td class="px-3 py-2 text-slate-500" x-text="challenge.metadata.category||'misc'"></td>
+                          <td class="px-3 py-2"><span class="rounded px-1.5 py-0.5" :class="competitionChallengeClass(challenge.state)" x-text="challenge.state"></span></td>
+                          <td class="px-3 py-2 text-slate-500" x-text="challenge.assignments.map(a=>displayMember(a.member)).join(', ')||'-'"></td>
+                          <td class="px-3 py-2 text-slate-500 tabular-nums" x-text="competitionDeadline(challenge.deadline_at)"></td>
+                          <td class="px-3 py-2 text-right tabular-nums" x-text="challenge.wrong_count"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <aside class="border border-slate-200 bg-white rounded-lg overflow-hidden">
+                <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between"><h3 class="text-xs font-semibold uppercase text-slate-500">Live events</h3><span class="h-2 w-2 rounded-full bg-teal-500" x-show="competitionEventSource"></span></div>
+                <div class="h-[420px] overflow-y-auto divide-y divide-slate-100">
+                  <template x-for="event in competitionEvents" :key="event.event_id">
+                    <div class="px-3 py-2"><div class="flex justify-between gap-2"><span class="text-[11px] font-medium text-slate-700" x-text="event.kind"></span><span class="text-[10px] text-slate-400" x-text="formatTime(event.created_at)"></span></div><div class="text-[10px] text-slate-400 mt-1 break-words" x-text="competitionEventSummary(event)"></div></div>
+                  </template>
+                  <div class="p-6 text-center text-xs text-slate-400" x-show="competitionEvents.length===0">Waiting for events</div>
+                </div>
+              </aside>
+            </section>
+          </div>
+        </template>
+
+        <div x-show="!competitionRun" class="py-24 text-center text-sm text-slate-400">No active or historical competition run.</div>
+      </div>
+    </main>
+  </div>
+
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showNewProject" x-cloak>
     <div class="panel rounded-2xl w-[520px] max-h-[90vh] overflow-y-auto p-5">
       <div class="text-lg font-semibold text-slate-700 mb-4">New Project</div>
@@ -475,10 +582,44 @@
     </div>
   </div>
 
+  <div class="fixed inset-0 overlay flex items-center justify-center z-50 p-4" x-show="pendingQuestions.length" x-cloak>
+    <div class="panel rounded-2xl w-[560px] p-5">
+      <template x-if="pendingQuestions.length">
+        <div>
+          <h2 class="font-semibold mb-3" x-text="pendingQuestions[0].title"></h2>
+          <div class="flex flex-wrap gap-2 mb-3">
+            <template x-for="option in pendingQuestions[0].options" :key="option"><button class="btn-ghost rounded-lg p-2 text-sm" @click="questionAnswer=option" x-text="option"></button></template>
+          </div>
+          <input class="w-full rounded-lg p-2" :type="pendingQuestions[0].sensitive?'password':'text'" x-model="questionAnswer" placeholder="Your answer" @keydown.enter="answerQuestion()">
+          <div class="text-xs text-rose-600 mt-2" x-text="questionError"></div>
+          <button class="btn rounded-lg px-3 py-2 mt-3 disabled:opacity-50" :disabled="questionBusy||!questionAnswer.trim()" @click="answerQuestion()">Answer</button>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-40 p-4" x-show="showSkills" x-cloak>
+    <div class="panel rounded-2xl w-[680px] max-h-[85vh] overflow-y-auto p-5">
+      <div class="flex justify-between mb-4"><h2 class="text-lg font-semibold">Skill</h2><button @click="showSkills=false">Close</button></div>
+      <p class="text-xs text-slate-500 mb-3">Shared CTF skills. Updates use a fixed commit; existing versions remain available.</p>
+      <template x-for="pkg in skillPackages" :key="pkg.repository">
+        <div class="border rounded-xl p-3 mb-2">
+          <div class="flex justify-between"><strong x-text="pkg.repository"></strong><button class="text-xs text-brand-600" @click="toggleSkill(pkg)" x-text="pkg.enabled?'Disable':'Enable'"></button></div>
+          <div class="text-xs break-all text-slate-500" x-text="pkg.revision"></div>
+          <div class="text-xs mt-2" x-text="pkg.skills.join(', ')"></div>
+        </div>
+      </template>
+      <label class="block text-xs mt-4">GitHub owner/repository<input class="w-full rounded-lg p-2 mt-1" x-model="skillRepository"></label>
+      <label class="block text-xs mt-2">Commit (40 characters)<input class="w-full rounded-lg p-2 mt-1" x-model="skillRevision" maxlength="40"></label>
+      <p class="text-xs text-rose-600 mt-2" x-show="skillError" x-text="skillError"></p>
+      <button class="btn rounded-lg px-3 py-2 mt-3 text-sm disabled:opacity-50" :disabled="skillBusy" @click="installSkill()" x-text="skillBusy?'Downloading and validating…':'Install / Update'"></button>
+    </div>
+  </div>
+
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showIPC" x-cloak>
     <div class="panel rounded-2xl w-[720px] max-h-[90vh] overflow-y-auto p-5">
       <div class="flex items-center justify-between mb-4">
-        <div class="text-lg font-semibold text-slate-700">Config - Agent Endpoints</div>
+        <div class="text-lg font-semibold text-slate-700">Config</div>
         <button class="btn-ghost px-2.5 py-1 rounded-lg text-xs" @click="runHealth()">Health check</button>
       </div>
       <template x-if="cfg">
@@ -490,27 +631,15 @@
             <div class="text-sm font-semibold text-slate-700 mb-2">Diamond <span class="text-[10px]" :class="health.diamond?(health.diamond.skipped?'text-slate-400':(health.diamond.ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health.diamond?(health.diamond.skipped?'skipped':(health.diamond.ok?'healthy':'unreachable')):''"></span></div>
             <div x-html="llmFields('diamond', cfg.diamond)"></div>
           </div>
-          <template x-for="m in cfg.members" :key="m.name">
-            <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-2">
-              <div class="flex items-center justify-between mb-2">
-                <div class="text-sm font-semibold text-slate-700 capitalize">
-                  <span x-text="m.name"></span>
-                  <span class="text-[10px] ml-1" :class="health[m.name]?(health[m.name].skipped?'text-slate-400':(health[m.name].ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health[m.name]?(health[m.name].skipped?'skipped':(health[m.name].ok?'healthy':'unreachable')):''"></span>
-                </div>
-              </div>
-              <div x-html="llmFields(m.name, m)"></div>
+          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3">
+            <div class="text-sm font-semibold text-slate-700 mb-2">Member ? 10 shared workers</div>
+            <div class="text-xs text-amber-600 mb-2" x-show="cfg.member_config_conflict">Legacy endpoints differ. Enter the complete shared configuration to continue.</div>
+            <div x-show="cfg.member_config_conflict" class="flex flex-wrap gap-2 mb-2">
+              <template x-for="legacy in cfg.members" :key="legacy.name">
+                <button class="btn-ghost text-xs px-2 py-1 rounded" @click="selectLegacyMember(legacy.name)" x-text="'Use '+legacy.name+' · '+legacy.model"></button>
+              </template>
             </div>
-          </template>
-          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3" x-show="cfg.runtime">
-            <div class="flex items-start justify-between gap-4">
-              <div>
-                <div class="text-sm font-semibold text-slate-700">Optional OWASP ZAP</div>
-                <div class="mt-1 text-[11px] leading-relaxed text-slate-400">Disabled by default, so normal startup does not pull the large ZAP image. Enable the Compose <code>zap</code> profile before turning this on.</div>
-              </div>
-              <label class="inline-flex items-center gap-2 text-xs text-slate-500 shrink-0">
-                <input type="checkbox" x-model="cfg.runtime.zap_enabled"> Enabled
-              </label>
-            </div>
+            <div x-html="llmFields('member', cfg.member)"></div>
           </div>
           <template x-if="opsCfg">
             <div class="rounded-2xl border border-brand-100 bg-brand-50/30 p-3 mb-3">
@@ -714,7 +843,6 @@
       <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
         <div>
           <div class="text-lg font-semibold text-slate-700">IPC</div>
-          <div class="text-[11px] text-slate-400" x-text="opsCfg?.api_format==='claudecode'?'Claude Code action agent with native session context, live logs, and host-root maintenance access.':opsCfg?.api_format==='openai'?'OpenAI-compatible action agent with durable IPC history, live tool logs, and host-root maintenance access.':'API-backed action agent with durable IPC history and host-root maintenance access.'"></div>
         </div>
         <div class="flex items-center gap-2">
           <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in Config'"></span>
@@ -868,7 +996,7 @@
       categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
-      showGlobalLogs: false, showGlobalWP: false, showOps: false,
+      showGlobalLogs: false, showGlobalWP: false, showOps: false, showCompetition: false,
       _appStarted: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       newHint: { content:"", creator:"human" },
@@ -880,6 +1008,9 @@
       opsBusy: false, opsStreaming: false, opsInterrupting: false, opsRunId: null, opsQueuedMessage: null, opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAtBottom: true,
       opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
       opsConfirmInput: "", opsResult: null,
+      competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
+      competitionWorkflowId: "", competitionBusy: false, competitionPreflight: null, competitionError: "", competitionEventSource: null, competitionEventSourceToken: 0,
+      competitionEventCursor: 0, competitionEventRunId: "", competitionReconnectTimer: null,
       nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
 
       async init() {
@@ -891,6 +1022,8 @@
         this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
         this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
         this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
+        this.competitionRuns=[]; this.competitionRun=null; this.competitionMembers=[]; this.competitionEvents=[];
+        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
         if(this.cy){ this.cy.destroy(); this.cy=null; }
       },
       async startApp(){
@@ -921,6 +1054,8 @@
           if (this.selectedId) { await this.loadProject(this.selectedId); this.renderGraph(false); }
           if (this.selectedId && this.sideTab==='log') await this.loadLog();
           if(this.showOps && this.opsRunId && !this.opsStreaming) await this.pollOpsRun();
+          if(this.showOps && this.opsSessionId) await this.loadQuestions();
+          if(this.showCompetition && this.competitionRun) await this.loadCompetitionRun(this.competitionRun.run.id,false);
         }catch(error){}
       },
       async api(method, path, body) {
@@ -1584,6 +1719,125 @@
         if(!this.opsWorkflowId&&this.opsWorkflows.length) this.opsWorkflowId=this.opsWorkflows[0].id;
       },
       selectedOpsWorkflow(){ return this.opsWorkflows.find(workflow=>workflow.id===this.opsWorkflowId)||null; },
+      async openCompetition(){
+        this.showCompetition=true; this.competitionError="";
+        try{
+          await Promise.all([this.loadOpsWorkflows(),this.loadCompetitionRuns()]);
+          if(!this.competitionWorkflowId){
+            const confirmed=this.opsWorkflows.find(workflow=>workflow.status==="confirmed");
+            this.competitionWorkflowId=confirmed?.id||"";
+          }
+        }catch(error){ this.competitionError=error.message||"Could not load competition state"; }
+      },
+      closeCompetition(){
+        this.showCompetition=false;
+        this.competitionEventSourceToken++;
+        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
+        if(this.competitionReconnectTimer){ clearTimeout(this.competitionReconnectTimer); this.competitionReconnectTimer=null; }
+      },
+      async loadCompetitionRuns(){
+        const data=await this.api("GET","/api/runs?limit=50");
+        this.competitionRuns=data.runs||[];
+        const active=this.competitionRuns.find(run=>!["finished","stopped"].includes(run.status));
+        const selected=active||this.competitionRuns[0];
+        if(selected) await this.loadCompetitionRun(selected.id,true);
+        else{ this.competitionRun=null; this.competitionMembers=[]; }
+      },
+      async loadCompetitionRun(runId,connectEvents=true){
+        const [snapshot,members]=await Promise.all([
+          this.api("GET","/api/runs/"+encodeURIComponent(runId)),
+          this.api("GET","/api/runs/"+encodeURIComponent(runId)+"/members")
+        ]);
+        const changed=this.competitionRun?.run?.id!==runId;
+        this.competitionRun=snapshot; this.competitionMembers=members.members||[];
+        if(connectEvents||changed) this.connectCompetitionEvents(runId);
+      },
+      connectCompetitionEvents(runId){
+        const sourceToken=++this.competitionEventSourceToken;
+        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
+        if(this.competitionEventRunId!==runId){ this.competitionEvents=[]; this.competitionEventCursor=0; }
+        this.competitionEventRunId=runId;
+        if(this.competitionReconnectTimer){ clearTimeout(this.competitionReconnectTimer); this.competitionReconnectTimer=null; }
+        const after=this.competitionEventCursor>0?"?after="+encodeURIComponent(this.competitionEventCursor):"";
+        const source=new EventSource("/api/runs/"+encodeURIComponent(runId)+"/events"+after);
+        source.onmessage=(event)=>{
+          try{
+            const item=JSON.parse(event.data);
+            const eventId=Number(item.event_id||event.lastEventId||0);
+            if(eventId>this.competitionEventCursor) this.competitionEventCursor=eventId;
+            if(!this.competitionEvents.some(existing=>existing.event_id===item.event_id)){
+              this.competitionEvents=[...this.competitionEvents,item].slice(-150);
+            }
+          }catch(error){}
+        };
+        source.addEventListener("run.created",source.onmessage);
+        for(const name of ["run.started","run.synchronized","run.paused","run.running","run.stopped","run.blocked","assignment.started","assignment.start_failed","submission.queued","submission.verdict","instance.start_failed","instance.stop_failed","instance.renew_failed","wp.started","wp.completed","wp.deferred","coordinator.error","run.sync_failed"]){ source.addEventListener(name,source.onmessage); }
+        source.onerror=()=>{
+          if(this.competitionEventSourceToken!==sourceToken) return;
+          source.close(); this.competitionEventSource=null;
+          if(!this.showCompetition || this.competitionEventRunId!==runId) return;
+          this.competitionReconnectTimer=setTimeout(()=>{
+            this.competitionReconnectTimer=null;
+            this.connectCompetitionEvents(runId);
+          },1000);
+        };
+        this.competitionEventSource=source;
+      },
+      async preflightCompetition(){
+        if(!this.competitionWorkflowId) return;
+        this.competitionBusy=true; this.competitionError="";
+        try{ this.competitionPreflight=await this.api("POST","/api/workflows/"+encodeURIComponent(this.competitionWorkflowId)+"/preflight"); }
+        catch(error){ this.competitionError=error.message||"Preflight failed"; }
+        finally{ this.competitionBusy=false; }
+      },
+      async startCompetition(){
+        if(!this.competitionWorkflowId) return;
+        this.competitionBusy=true; this.competitionError="";
+        try{
+          await this.preflightCompetition();
+          if(this.competitionError) return;
+          const random=(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+Math.random().toString(36).slice(2));
+          this.competitionRun=await this.api("POST","/api/workflows/"+encodeURIComponent(this.competitionWorkflowId)+"/start",{idempotency_key:"ui-"+random});
+          await this.loadCompetitionRuns();
+        }catch(error){ this.competitionError=error.message||"Competition start failed"; }
+        finally{ this.competitionBusy=false; }
+      },
+      async controlCompetition(action){
+        if(!this.competitionRun) return;
+        this.competitionBusy=true; this.competitionError="";
+        const run=this.competitionRun.run;
+        try{
+          this.competitionRun=await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/"+action,{revision:run.revision});
+          await this.loadCompetitionRun(run.id,false);
+        }catch(error){ this.competitionError=error.message||("Could not "+action+" competition"); }
+        finally{ this.competitionBusy=false; }
+      },
+      displayMember(name){ return name ? name.charAt(0).toUpperCase()+name.slice(1) : ""; },
+      competitionChallengeTitle(challengeId){
+        const challenge=this.competitionRun?.challenges?.find(item=>item.id===challengeId);
+        return challenge?.metadata?.title||"";
+      },
+      competitionStatusClass(){
+        const status=this.competitionRun?.run?.status;
+        return status==="running"?"bg-teal-50 text-teal-700":status==="paused"?"bg-amber-50 text-amber-700":status==="blocked"?"bg-rose-50 text-rose-700":"bg-slate-100 text-slate-600";
+      },
+      competitionMemberClass(state){
+        return state==="primary"?"border-teal-300":state==="helper"?"border-sky-300":state==="wp"?"border-amber-300":"border-slate-200";
+      },
+      competitionChallengeClass(state){
+        return state==="solved"?"bg-emerald-50 text-emerald-700":state==="solving"?"bg-teal-50 text-teal-700":state==="expired"?"bg-rose-50 text-rose-700":state==="blocked"?"bg-amber-50 text-amber-700":"bg-slate-100 text-slate-600";
+      },
+      competitionDeadline(value){
+        if(!value) return "Not started";
+        const remaining=Date.parse(value)-this.nowMs;
+        if(remaining<=0) return "Expired";
+        const hours=Math.floor(remaining/3600000), minutes=Math.floor((remaining%3600000)/60000);
+        return hours+"h "+minutes+"m";
+      },
+      competitionEventSummary(event){
+        const payload=event?.payload||{};
+        return Object.entries(payload).map(([key,value])=>key+": "+String(value)).join(" | ");
+      },
       selectOpsWorkflow(workflowId){ this.opsWorkflowId=workflowId; this.opsConfirmInput=""; this.opsResult=null; this.workflowSecret={name:"",value:""}; },
       async saveWorkflowSecret(){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
@@ -1640,7 +1894,7 @@
           : [["mock","mock"],["openai","openai"],["anthropic","anthropic"],["claudecode","claudecode"],["deepseek","deepseek"],["pi","pi"]];
         const fmt=formats.map(([value,label])=>`<option value="${value}" ${obj.api_format===value?"selected":""}>${label}</option>`).join("");
         const surface=["auto","chat_completions","responses"].map(f=>`<option value="${f}" ${(obj.api_surface||"auto")===f?"selected":""}>${f}</option>`).join("");
-        const reasoning=["auto","none","minimal","low","medium","high","xhigh","max"].map(f=>`<option value="${f}" ${(obj.reasoning_effort||"auto")===f?"selected":""}>${f}</option>`).join("");
+        const reasoning=(obj.reasoning_effort && !["auto","none","minimal"].includes(obj.reasoning_effort)?"":"<option value='' selected disabled>Select effort</option>")+["low","medium","high","xhigh","max"].map(f=>`<option value="${f}" ${(obj.reasoning_effort||"auto")===f?"selected":""}>${f}</option>`).join("");
         return `<div class="grid grid-cols-2 gap-2 text-xs text-slate-500">
           <label>Format<select class="w-full rounded-lg px-2 py-1 mt-0.5" oninput="window._ipc.setField('${name}','api_format',this.value)">${fmt}</select></label>
           <label>Model<input class="w-full rounded-lg px-2 py-1 mt-0.5" value="${this.escapeAttr(obj.model||'')}" oninput="window._ipc.setField('${name}','model',this.value)"/></label>
@@ -1652,13 +1906,49 @@
         </div>`;
       },
       _edits: {},
+      pendingQuestions: [], questionAnswer: "", questionBusy: false, questionError: "",
+      async loadQuestions(){
+        const result=await this.api("GET","/questions?session_id="+encodeURIComponent(this.opsSessionId));
+        this.pendingQuestions=result.questions;
+      },
+      async answerQuestion(){
+        if(this.questionBusy||!this.pendingQuestions.length||!this.questionAnswer.trim()) return;
+        const question=this.pendingQuestions[0];
+        this.questionBusy=true; this.questionError="";
+        try{
+          await this.api("POST","/questions/"+question.id+"/answer",{session_id:this.opsSessionId,value:this.questionAnswer});
+          this.questionAnswer=""; await this.loadQuestions();
+          this.opsInput="Question "+question.id+" has been answered. Resume the dependent operation by reading the answer with its original operation key.";
+          await this.sendOpsMessage();
+        }catch(error){ this.questionError=error.message; }
+        finally{ this.questionBusy=false; }
+      },
+      showSkills: false, skillPackages: [], skillBusy: false, skillError: "", skillRepository: "", skillRevision: "",
+      async openSkills(){
+        const result=await this.api("GET","/skills");
+        this.skillPackages=result.packages; this.skillRepository=result.default_repository; this.skillRevision=result.default_revision;
+        this.skillError=""; this.showSkills=true;
+      },
+      async installSkill(){
+        if(this.skillBusy) return;
+        this.skillBusy=true; this.skillError="";
+        try{ await this.api("POST","/skills",{repository:this.skillRepository,revision:this.skillRevision}); this.skillPackages=(await this.api("GET","/skills")).packages; }
+        catch(error){ this.skillError=error.message; }
+        finally{ this.skillBusy=false; }
+      },
+      async toggleSkill(pkg){
+        try{ const result=await this.api("PATCH","/skills",{repository:pkg.repository,enabled:!pkg.enabled}); this.skillPackages=result.packages; }
+        catch(error){ this.skillError=error.message; }
+      },
+      async selectLegacyMember(name){
+        this.cfg=await this.api("PUT","/config",{use_legacy_member:name});
+        delete this._edits.member;
+        this.flash("Shared Member configuration selected");
+      },
       setField(name, field, value){ (this._edits[name]=this._edits[name]||{})[field]=value; },
       async saveIPC(){
         const body={}; if(this._edits.diamond) body.diamond=this._edits.diamond;
-        const members={}; for(const k in this._edits){ if(!["diamond","ops_agent"].includes(k)) members[k]=this._edits[k]; }
-        if(Object.keys(members).length) body.members=members;
-        if(this._removedMembers.length) body.remove_members=[...this._removedMembers];
-        if(this.cfg.runtime) body.runtime={zap_enabled:!!this.cfg.runtime.zap_enabled};
+        if(this._edits.member) body.member=this._edits.member;
         this.cfg=await this.api("PUT","/config",body);
         if(this._edits.ops_agent) this.opsCfg=await this.api("PUT","/api/ops/config",this._edits.ops_agent);
         this._edits={}; this._removedMembers=[]; this.flash("config saved");
