@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -62,6 +63,28 @@ def _windows_paths_for_bash(command: str) -> str:
     )
 
 
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Kill the process and every descendant that shares its pipes.
+
+    Killing only the direct child leaves grandchildren that inherited the
+    stdout/stderr handles alive; the follow-up pipe read then blocks until the
+    grandchild exits (observed with shell loops and interactive ``unzip`` on
+    Windows).  Kill the whole tree so the read terminates.
+    """
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.kill()
+
+
 @dataclass(slots=True)
 class ExecResult:
     exit_code: int
@@ -117,27 +140,33 @@ class LocalSandbox:
         if bash is not None:
             args = [str(bash), "-lc", _windows_paths_for_bash(command)]
             use_shell = False
+        popen_kwargs: dict[str, object] = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            args,
+            shell=use_shell,
+            cwd=str(self.workspace),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=full_env,
+            **popen_kwargs,
+        )
         try:
-            proc = subprocess.run(
-                args,
-                shell=use_shell,
-                cwd=str(self.workspace),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env=full_env,
-            )
-            return ExecResult(proc.returncode, proc.stdout, proc.stderr)
-        except subprocess.TimeoutExpired as exc:
-            out = exc.stdout or ""
-            err = exc.stderr or ""
-            if isinstance(out, bytes):
-                out = out.decode(errors="replace")
-            if isinstance(err, bytes):
-                err = err.decode(errors="replace")
-            return ExecResult(124, out, err, timed_out=True)
+            out, err = proc.communicate(timeout=timeout)
+            return ExecResult(int(proc.returncode or 0), out or "", err or "")
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            return ExecResult(124, out or "", err or "", timed_out=True)
 
     def write_file(self, rel_path: str, content: str) -> None:
         target = self._safe_path(rel_path)
