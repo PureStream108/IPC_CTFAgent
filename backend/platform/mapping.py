@@ -9,8 +9,9 @@ class FieldMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # ``http_json`` fetches any JSON list endpoint with static headers.
-    # ``ret2shell`` and ``gzctf`` use authenticated clients (credentials come
-    # from deployment environment variables, never from a workflow snapshot).
+    # ``ret2shell`` and ``gzctf`` use authenticated clients. Their credentials
+    # come from the deployment environment or the separate workflow secret
+    # store, never from a run snapshot.
     platform: Literal["http_json", "ret2shell", "gzctf"] = "http_json"
     game_id: int | None = None
     list_url: str = ""
@@ -36,6 +37,7 @@ class FieldMapping(BaseModel):
     # single-request behavior.
     pagination_path: str = ""
     max_pages: int = 100
+    max_challenges: int = 0
     category_map: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
@@ -68,6 +70,13 @@ class FieldMapping(BaseModel):
     def validate_max_pages(cls, value: int) -> int:
         if value < 1 or value > 1000:
             raise ValueError("max_pages must be between 1 and 1000")
+        return value
+
+    @field_validator("max_challenges")
+    @classmethod
+    def validate_max_challenges(cls, value: int) -> int:
+        if value < 0 or value > 1000:
+            raise ValueError("max_challenges must be between 0 and 1000")
         return value
 
     @field_validator("level_field", "track_id_field", "pagination_path")

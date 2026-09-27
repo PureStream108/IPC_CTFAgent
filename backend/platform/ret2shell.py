@@ -9,8 +9,7 @@ from typing import Any, Callable
 
 import requests
 
-from backend.core.config import CATEGORIES
-from backend.filename_util import numbered_filename, safe_stem
+from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.mapping import PlatformChallenge
 
@@ -522,7 +521,7 @@ def primary_tag(challenge: dict[str, Any]) -> str:
 
 def normalize_category(raw: str) -> str:
     lowered = raw.strip().lower()
-    return lowered if lowered in CATEGORIES else "misc"
+    return lowered if lowered in PLATFORM_CATEGORIES else "misc"
 
 
 class Ret2ShellAdapter(PlatformAdapter):
@@ -540,6 +539,23 @@ class Ret2ShellAdapter(PlatformAdapter):
         self.game_id = game_id or client.game_id
         self.category_map = category_map or {}
         self.max_attachment_bytes = max_attachment_bytes
+
+    @property
+    def identity(self) -> str:
+        return f"{self.client.base_url}/game/{self.game_id}"
+
+    @property
+    def supports_submit(self) -> bool:
+        return True
+
+    @property
+    def supports_instances(self) -> bool:
+        return True
+
+    def preflight(self) -> list[PlatformChallenge]:
+        self.client.get_profile()
+        self.client.get_game(self.game_id)
+        return self.fetch_challenges()
 
     def fetch_challenges(self) -> list[PlatformChallenge]:
         challenges: list[PlatformChallenge] = []
@@ -567,6 +583,60 @@ class Ret2ShellAdapter(PlatformAdapter):
                 )
             )
         return challenges
+
+    def challenges(self) -> list[PlatformChallenge]:
+        challenges = self.fetch_challenges()
+        for challenge in challenges:
+            challenge.remote = self.client.has_environment(
+                int(challenge.external_id), self.game_id
+            )
+            status = self.client.challenge_status(
+                int(challenge.external_id), self.game_id
+            )
+            challenge.solved = isinstance(status, dict) and status.get("solved") is True
+        return challenges
+
+    @staticmethod
+    def _verdict(value: dict[str, Any]) -> dict[str, Any]:
+        solved = value.get("solved")
+        return {
+            "verdict": "correct" if solved is True else "wrong" if solved is False else "pending",
+            "submission_id": str(value["id"]) if value.get("id") is not None else None,
+        }
+
+    def submit(self, external_id: str, flag: str) -> dict[str, Any]:
+        try:
+            result = self.client.submit_flag(int(external_id), flag)
+        except Ret2ShellRateLimitError:
+            return {"verdict": "rate_limited", "retry_after": 300}
+        except Ret2ShellPreflightError as exc:
+            return {"verdict": "rejected", "reason": str(exc)}
+        return self._verdict(result)
+
+    def query(self, external_id: str, submission_id: str) -> dict[str, Any]:
+        return self._verdict(
+            self.client.get_submission(int(external_id), int(submission_id))
+        )
+
+    def instances(self) -> list[dict[str, Any]]:
+        return self.client.list_instances(self.game_id)
+
+    def start_instance(self, external_id: str) -> dict[str, Any]:
+        challenge_id = int(external_id)
+        self.client.start_instance(challenge_id, self.game_id)
+        return self.client.wait_for_instance(challenge_id, self.game_id, timeout=60)
+
+    def stop_instance(self, external_id: str) -> None:
+        self.client.destroy_instance(int(external_id), self.game_id)
+
+    def renew_instance(self, external_id: str) -> None:
+        self.client.renew_instance(int(external_id), self.game_id)
+
+    def rebuild_instance(self, external_id: str) -> dict[str, Any]:
+        challenge_id = int(external_id)
+        self.client.destroy_instance(challenge_id, self.game_id)
+        self.client.start_instance(challenge_id, self.game_id)
+        return self.client.wait_for_instance(challenge_id, self.game_id, timeout=60)
 
     def download_attachments(
         self,

@@ -8,8 +8,7 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
-from backend.core.config import CATEGORIES
-from backend.filename_util import numbered_filename, safe_stem
+from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
 
@@ -36,6 +35,33 @@ def _field(item: dict[str, Any], path: str, default: Any = None) -> Any:
 
 
 class PlatformAdapter(ABC):
+    """The small contract consumed by the competition coordinator.
+
+    Concrete adapters may expose optional operations such as ``submit`` or
+    ``start_instance``.  The coordinator discovers those capabilities through
+    this contract and never imports a platform implementation.
+    """
+
+    @property
+    def identity(self) -> str:
+        # Generic HTTP workflows add competition/team scope in the coordinator
+        # because the mapping itself intentionally contains no team identity.
+        return ""
+
+    @property
+    def supports_submit(self) -> bool:
+        return callable(getattr(self, "submit", None))
+
+    @property
+    def supports_instances(self) -> bool:
+        return callable(getattr(self, "instances", None))
+
+    def preflight(self) -> list[PlatformChallenge]:
+        return self.fetch_challenges()
+
+    def challenges(self) -> list[PlatformChallenge]:
+        return self.fetch_challenges()
+
     @abstractmethod
     def fetch_challenges(self) -> list[PlatformChallenge]: ...
 
@@ -112,7 +138,7 @@ class HttpJsonAdapter(PlatformAdapter):
             raise ValueError("challenge is missing its configured id or title field")
         raw_category = str(_field(item, self.mapping.category_field, "misc"))
         mapped_category = self.mapping.category_map.get(raw_category, raw_category).lower()
-        category = mapped_category if mapped_category in CATEGORIES else "misc"
+        category = mapped_category if mapped_category in PLATFORM_CATEGORIES else "misc"
         raw_attachments = _field(item, self.mapping.attachments_field, []) or []
         if isinstance(raw_attachments, str):
             raw_attachments = [raw_attachments]
