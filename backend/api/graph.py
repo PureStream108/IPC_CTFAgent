@@ -8,6 +8,7 @@ from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.state import AppState
 from backend.core.replay import build_timeline, export_yaml
+from backend.core.redaction import redact_object
 
 router = APIRouter(tags=["graph"])
 
@@ -20,7 +21,10 @@ def export_project(project_id: str, format: str = "yaml", state: AppState = Depe
         detail = graph_store.project_detail(conn, project_id)
     if detail is None:
         raise HTTPException(404, "Project not found")
-    text = export_yaml(detail) if format == "yaml" else _timeline_text(detail)
+    public_detail = detail.__class__.model_validate(
+        redact_object(detail.model_dump(mode="json"), detail.project.flag)
+    )
+    text = export_yaml(public_detail) if format == "yaml" else _timeline_text(public_detail)
     return Response(content=text, media_type="text/plain")
 
 
@@ -41,4 +45,7 @@ def replay_timeline(project_id: str, state: AppState = Depends(get_state)):
         detail = graph_store.project_detail(conn, project_id)
     if detail is None:
         raise HTTPException(404, "Project not found")
-    return {"events": build_timeline(detail)}
+    public_detail = detail.__class__.model_validate(
+        redact_object(detail.model_dump(mode="json"), detail.project.flag)
+    )
+    return {"events": build_timeline(public_detail)}

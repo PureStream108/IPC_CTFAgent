@@ -12,6 +12,7 @@ from backend.blackboard.models import (
     ReportRequest,
 )
 from backend.core.state import AppState
+from backend.core.redaction import redact_flag
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 
@@ -173,4 +174,5 @@ def complete_project(project_id: str, body: CompleteRequest, state: AppState = D
 @router.get("/broadcasts", response_model=list[Broadcast])
 def list_broadcasts(state: AppState = Depends(get_state)):
     with state.db.connect() as conn:
-        return graph_store.list_broadcasts(conn)
+        rows = graph_store.list_broadcasts(conn)
+    return [item.model_copy(update={"flag": redact_flag(item.flag) or ""}) for item in rows]

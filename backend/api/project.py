@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pathlib import Path
 
 from backend.api.deps import get_state
 from backend.blackboard import edge_store, graph_store, node_store
@@ -19,14 +20,23 @@ from backend.blackboard.models import (
 )
 from backend.core.config import CATEGORIES
 from backend.core.state import AppState
+from backend.core.redaction import redact_object
 
 router = APIRouter(tags=["projects"])
+MAX_PROJECT_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
 
 def _expire(state: AppState, conn, project_id: str | None = None) -> None:
     it, rt = graph_store.get_timeouts(conn)
     edge_store.expire_workers(conn, it, project_id)
     graph_store.expire_reason_leases(conn, rt, project_id)
+
+
+def _public_detail(detail):
+    if detail is None:
+        return None
+    secret = detail.project.flag
+    return detail.__class__.model_validate(redact_object(detail.model_dump(mode="json"), secret))
 
 
 @router.get("/projects", response_model=list[ProjectSummary])
@@ -45,7 +55,7 @@ def create_project(body: CreateProjectRequest, state: AppState = Depends(get_sta
         pid = graph_store.create_project(conn, body.title, body.origin, body.goal, body.category, hints)
     state.logger.project("project_created", pid, title=body.title, category=body.category)
     with state.db.connect() as conn:
-        return graph_store.project_detail(conn, pid)
+        return _public_detail(graph_store.project_detail(conn, pid))
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
@@ -55,7 +65,7 @@ def get_project(project_id: str, state: AppState = Depends(get_state)):
         detail = graph_store.project_detail(conn, project_id)
     if detail is None:
         raise HTTPException(404, "Project not found")
-    return detail
+    return _public_detail(detail)
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -78,12 +88,34 @@ async def upload_attachment(
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
             raise HTTPException(404, "Project not found")
-    dest = state.attachments_dir(project_id) / file.filename
-    data = await file.read()
-    dest.write_bytes(data)
+    filename = Path(file.filename or "").name
+    if not filename or filename in {".", ".."}:
+        raise HTTPException(400, "attachment filename is required")
+    if file.size is not None and file.size > MAX_PROJECT_ATTACHMENT_BYTES:
+        raise HTTPException(413, "attachment exceeds the size limit")
+    destination = state.attachments_dir(project_id)
+    destination.mkdir(parents=True, exist_ok=True)
+    dest = destination / filename
+    written = 0
+    try:
+        with dest.open("wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_PROJECT_ATTACHMENT_BYTES:
+                    raise HTTPException(413, "attachment exceeds the size limit")
+                handle.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     with state.db.connect() as conn:
-        att = graph_store.create_attachment(conn, project_id, file.filename, str(dest))
-    state.logger.project("attachment_uploaded", project_id, filename=file.filename, size=len(data))
+        att = graph_store.create_attachment(conn, project_id, filename, str(dest))
+    state.logger.project("attachment_uploaded", project_id, filename=filename, size=written)
     return att
 
 

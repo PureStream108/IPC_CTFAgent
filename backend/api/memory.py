@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 
 from backend.api.deps import get_state
 from backend.core.state import AppState
+from backend.blackboard import graph_store
+from backend.core.redaction import redact_object
 from backend.memory.exporter.obsidian import export_obsidian
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import CATEGORIES, Memory
@@ -22,7 +24,16 @@ class AddMemoryRequest(BaseModel):
 
 @router.get("/memory", response_model=list[Memory])
 def list_memory(category: str | None = None, state: AppState = Depends(get_state)):
-    return state.memory.list(category)
+    memories = state.memory.list(category)
+    with state.db.connect() as conn:
+        flags = {
+            row["id"]: row["flag"]
+            for row in conn.execute("SELECT id,flag FROM projects WHERE flag IS NOT NULL").fetchall()
+        }
+    return [
+        item.__class__.model_validate(redact_object(item.model_dump(mode="json"), flags.get(item.project_id)))
+        for item in memories
+    ]
 
 
 @router.post("/memory", response_model=Memory, status_code=201)
@@ -43,7 +54,15 @@ def delete_memory(memory_id: str, state: AppState = Depends(get_state)):
 @router.get("/memory/search")
 def search_memory(q: str, category: str | None = None, limit: int = 5, state: AppState = Depends(get_state)):
     results = mem_search(state.memory, q, category=category, limit=limit)
-    return [{"memory": m.model_dump(), "score": s} for m, s in results]
+    with state.db.connect() as conn:
+        flags = {
+            row["id"]: row["flag"]
+            for row in conn.execute("SELECT id,flag FROM projects WHERE flag IS NOT NULL").fetchall()
+        }
+    return [
+        {"memory": redact_object(m.model_dump(), flags.get(m.project_id)), "score": s}
+        for m, s in results
+    ]
 
 
 @router.get("/memory/catalog")

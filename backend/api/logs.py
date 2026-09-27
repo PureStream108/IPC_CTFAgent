@@ -7,6 +7,7 @@ from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.archive import list_archived_projects, project_archive_id
 from backend.core.state import AppState
+from backend.core.redaction import redact_object
 from backend.filename_util import numbered_filename
 
 router = APIRouter(tags=["logs"])
@@ -49,9 +50,10 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
             "status": project.status,
         }
         for kind, key in LOG_GROUPS:
+            entries = state.logger.read_log(kind, project.id, limit)
             item[key] = {
                 "filename": project.log_filename or f"{project.id}.jsonl",
-                "entries": state.logger.read_log(kind, project.id, limit),
+                "entries": [redact_object(entry, project.flag) for entry in entries],
             }
         logs.append(item)
     for archive in list_archived_projects(state):
@@ -64,6 +66,9 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
             "status": "solved",
             "archived": True,
         }
+        with state.db.connect() as conn:
+            source_row = graph_store.get_project_row(conn, archive["project_id"])
+        secret = source_row["flag"] if source_row else None
         for kind, key in LOG_GROUPS:
             path = (
                 state.log_export_dir
@@ -72,7 +77,7 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
             )
             item[key] = {
                 "filename": archive["log_filename"],
-                "entries": state.logger.read_file(path, limit),
+                "entries": [redact_object(entry, secret) for entry in state.logger.read_file(path, limit)],
             }
         logs.append(item)
     return {
@@ -140,4 +145,7 @@ def derive_project_logs(state: AppState = Depends(get_state)):
 
 @router.get("/logs/{project_id}")
 def read_logs(project_id: str, kind: str = "project", limit: int = 500, state: AppState = Depends(get_state)):
-    return {"entries": state.logger.read_log(kind, project_id, limit)}
+    with state.db.connect() as conn:
+        row = graph_store.get_project_row(conn, project_id)
+    secret = row["flag"] if row else None
+    return {"entries": [redact_object(entry, secret) for entry in state.logger.read_log(kind, project_id, limit)]}

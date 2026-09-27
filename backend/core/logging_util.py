@@ -6,6 +6,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from backend.core.redaction import redact_flag
+
 
 def _utcnow() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -61,7 +63,11 @@ class IPCLogger:
         """
         if not self._enabled:
             return
-        record = {"ts": _utcnow(), "event": event, "project_id": project_id, **fields}
+        safe_fields = dict(fields)
+        for key in ("flag", "candidate", "normalized_flag", "secret", "password", "token"):
+            if key in safe_fields and safe_fields[key] is not None:
+                safe_fields[key] = redact_flag(str(safe_fields[key]))
+        record = {"ts": _utcnow(), "event": event, "project_id": project_id, **safe_fields}
         with self._lock:
             path = self._file(log_kind, project_id)
             with path.open("a", encoding="utf-8") as fh:

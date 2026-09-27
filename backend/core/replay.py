@@ -3,6 +3,7 @@ from __future__ import annotations
 import yaml
 
 from backend.blackboard.models import ProjectDetail
+from backend.core.redaction import redact_flag
 
 
 def export_yaml(detail: ProjectDetail) -> str:
@@ -51,7 +52,7 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
         if i.concluded_at and i.to:
             if i.to == "goal":
                 events.append({"ts": i.concluded_at, "kind": "flag_found",
-                               "label": p.flag or "", "detail": i.description, "order": 3})
+                               "label": redact_flag(p.flag) or "", "detail": i.description, "order": 3})
             else:
                 events.append({"ts": i.concluded_at, "kind": "intent_concluded",
                                "label": i.id, "detail": facts_by_id.get(i.to, ""), "order": 3})
@@ -66,7 +67,7 @@ def build_timeline(detail: ProjectDetail) -> list[dict]:
         events.append({"ts": p.updated_at, "kind": "wp_written", "label": p.wp_path, "detail": "", "order": 4})
     if p.status == "solved":
         events.append({"ts": p.flag_verified_at or p.updated_at, "kind": "solved", "label": p.title,
-                       "detail": p.flag or "", "order": 5})
+                       "detail": redact_flag(p.flag) or "", "order": 5})
 
     events.sort(key=lambda e: (e["ts"], e["order"]))
     return events

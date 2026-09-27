@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.api.deps import get_state
 from backend.core.state import AppState
+from backend.core.redaction import redact_flag
 
 router = APIRouter(prefix="/api/flags", tags=["flags"])
 
@@ -22,7 +23,7 @@ class FlagRecord(BaseModel):
     submitted: bool
 
 
-def _record(row) -> FlagRecord:
+def _record(row, *, reveal: bool = False) -> FlagRecord:
     return FlagRecord(
         project_id=row["id"],
         external_id=row["external_id"],
@@ -30,7 +31,7 @@ def _record(row) -> FlagRecord:
         category=row["category"],
         status=row["status"],
         postprocess_status=row["postprocess_status"],
-        flag=row["flag"],
+        flag=row["flag"] if reveal else redact_flag(row["flag"]),
         found_at=row["flag_verified_at"] or (row["updated_at"] if row["flag"] is not None else None),
         verified_at=row["flag_verified_at"],
         submitted=bool(row["submitted"]),
@@ -38,7 +39,10 @@ def _record(row) -> FlagRecord:
 
 
 @router.get("", response_model=list[FlagRecord])
-def list_flags(state: AppState = Depends(get_state)):
+def list_flags(
+    reveal: bool = Query(default=False),
+    state: AppState = Depends(get_state),
+):
     with state.db.connect() as conn:
         rows = conn.execute(
             """
@@ -48,11 +52,15 @@ def list_flags(state: AppState = Depends(get_state)):
             ORDER BY p.created_at
             """
         ).fetchall()
-    return [_record(row) for row in rows]
+    return [_record(row, reveal=reveal) for row in rows]
 
 
 @router.get("/{project_id}", response_model=FlagRecord)
-def get_flag(project_id: str, state: AppState = Depends(get_state)):
+def get_flag(
+    project_id: str,
+    reveal: bool = Query(default=False),
+    state: AppState = Depends(get_state),
+):
     with state.db.connect() as conn:
         row = conn.execute(
             """
@@ -65,4 +73,4 @@ def get_flag(project_id: str, state: AppState = Depends(get_state)):
         ).fetchone()
     if row is None:
         raise HTTPException(404, "Project not found")
-    return _record(row)
+    return _record(row, reveal=reveal)
