@@ -363,7 +363,7 @@
               </div>
               <div class="p-4 space-y-3 text-sm text-slate-700">
                 <template x-if="selectedSpecialId()==='flag'">
-                  <p class="break-all"><span class="text-slate-400">FLAG:</span> <span class="text-emerald-600 font-semibold" x-text="current.project.flag || '-'"></span></p>
+                  <p class="break-all"><span class="text-slate-400">FLAG:</span> <span class="text-emerald-600 font-semibold" x-text="current.project.flag ? 'redacted' : '-' "></span></p>
                 </template>
                 <template x-if="selectedSpecialId()==='wp'">
                   <p>Writeup stage. Use the WP button above to read the generated markdown.</p>
@@ -439,7 +439,7 @@
       <div class="flex-1 overflow-x-auto whitespace-nowrap">
         <template x-if="broadcasts.length===0"><span class="text-slate-400">No completions yet.</span></template>
         <template x-for="b in broadcasts" :key="b.id">
-          <span class="mr-6"><b x-text="b.title"></b> -> <span class="text-emerald-600" x-text="b.flag"></span></span>
+          <span class="mr-6"><b x-text="b.title"></b> -> <span class="text-emerald-600" x-text="b.flag ? 'redacted' : '-' "></span></span>
         </template>
       </div>
     </div>
@@ -908,7 +908,17 @@
             </button>
           </div>
           <div class="border-t border-slate-100 p-3 space-y-2">
+            <div class="flex flex-wrap items-center gap-1.5" x-show="opsAttachments.length" x-cloak>
+              <template x-for="attachment in opsAttachments" :key="attachment.id">
+                <span class="inline-flex max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600">
+                  <span class="max-w-[220px] truncate" x-text="attachment.filename"></span>
+                  <button type="button" class="text-slate-400 hover:text-rose-600" title="Remove attachment" @click="removeOpsAttachment(attachment.id)">x</button>
+                </span>
+              </template>
+            </div>
             <div class="flex gap-2 items-end">
+              <input type="file" x-ref="opsFileInput" class="hidden" multiple @change="uploadOpsFiles($event)" />
+              <button type="button" class="btn-ghost shrink-0 rounded-xl px-3 py-2.5 text-sm" title="Attach platform API documentation" :disabled="opsBusy || opsUploading" @click="$refs.opsFileInput.click()">Attach</button>
               <textarea class="flex-1 rounded-xl px-3 py-2 text-sm resize-none" rows="3" x-model="opsInput" @keydown.ctrl.enter.prevent="sendOpsMessage()" placeholder="Describe the platform API, task, or credentials for IPC."></textarea>
               <button class="btn rounded-xl px-4 py-2.5 text-sm disabled:opacity-40" :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()" x-text="opsBusy?'Interrupt & Send':'Send'"></button>
             </div>
@@ -1005,7 +1015,7 @@
       _removedMembers: [],
       memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
-      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsRunId: null, opsQueuedMessage: null, opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAtBottom: true,
+      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsRunId: null, opsQueuedMessage: null, opsQueuedAttachments: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
       opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
       opsConfirmInput: "", opsResult: null,
       competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
@@ -1020,7 +1030,7 @@
       clearAppData(){
         this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
         this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
-        this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
+        this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsUploading=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
         this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
         this.competitionRuns=[]; this.competitionRun=null; this.competitionMembers=[]; this.competitionEvents=[];
         if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
@@ -1562,6 +1572,7 @@
       },
       async selectOpsSession(sessionId,preserveLive=false){
         const data=await this.api("GET","/api/ops/sessions/"+encodeURIComponent(sessionId));
+        if(this.opsSessionId!==sessionId) this.opsAttachments=[];
         this.opsSessionId=sessionId; this.opsMessages=data.messages||[];
         if(!preserveLive || (data.events||[]).length) this.opsLiveEvents=data.events||[];
         const active=data.active_run||null;
@@ -1583,8 +1594,10 @@
           if(!this.opsRunId || this.opsRunId!==runId){
             await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
             const queued=this.opsQueuedMessage;
+            const queuedAttachments=this.opsQueuedAttachments;
             this.opsQueuedMessage=null;
-            if(queued){ this.opsInput=queued; await this.sendOpsMessage(); }
+            this.opsQueuedAttachments=[];
+            if(queued){ this.opsInput=queued; this.opsAttachments=queuedAttachments||[]; await this.sendOpsMessage(); }
           }
         }catch(error){}
       },
@@ -1619,7 +1632,24 @@
         this.scrollOpsLogsToLatest();
         this.scrollOpsToLatest(true);
       },
-      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsRunId=null; this.opsQueuedMessage=null; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; },
+      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsAttachments=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; },
+      removeOpsAttachment(id){ this.opsAttachments=this.opsAttachments.filter(item=>item.id!==id); },
+      async uploadOpsFiles(event){
+        const files=Array.from(event.target.files||[]); event.target.value="";
+        if(!files.length) return;
+        if(this.opsAttachments.length+files.length>10){ this.flash("You can attach up to 10 files per message"); return; }
+        this.opsUploading=true;
+        try{
+          for(const file of files){
+            const form=new FormData(); form.append("file",file);
+            const response=await fetch("/api/ops/uploads",{method:"POST",body:form,credentials:"same-origin"});
+            const text=await response.text(); let data=null; try{ data=text?JSON.parse(text):null; }catch(error){}
+            if(!response.ok) throw new Error((data&&data.detail)||("upload failed: "+response.status));
+            this.opsAttachments.push(data);
+          }
+        }catch(error){ this.flash(error.message||"upload failed"); }
+        finally{ this.opsUploading=false; }
+      },
       async deleteOpsSession(sessionId){
         if(!confirm("Delete this conversation?")) return;
         await this.api("DELETE","/api/ops/sessions/"+encodeURIComponent(sessionId));
@@ -1645,7 +1675,9 @@
         const message=this.opsInput.trim(); if(!message||!this.opsCfg?.configured) return;
         if(this.opsBusy){
           this.opsQueuedMessage=message;
+          this.opsQueuedAttachments=[...this.opsAttachments];
           this.opsInput="";
+          this.opsAttachments=[];
           await this.interruptOpsRun();
           return;
         }
@@ -1653,13 +1685,15 @@
         this.opsStreaming=true;
         this.opsInterrupting=false; this.opsRunId=null;
         if(!this.opsSessionId) this.opsLiveEvents=[];
-        const temporary={id:"temp-"+Date.now(),role:"user",content:message,created_at:new Date().toISOString()};
+        const attachments=[...this.opsAttachments]; this.opsAttachments=[];
+        const displayMessage=attachments.length?message+"\n\n[Attached: "+attachments.map(item=>item.filename).join(", ")+"]":message;
+        const temporary={id:"temp-"+Date.now(),role:"user",content:displayMessage,created_at:new Date().toISOString()};
         this.opsMessages.push(temporary);
         this.scrollOpsToLatest(true);
         this.opsInput="";
         try{
           const legacyOpsChatPath="/api/ops/chat";
-          const chatPayload={message,session_id:this.opsSessionId};
+          const chatPayload={message,session_id:this.opsSessionId,attachments:attachments.map(item=>item.id)};
           const response=await fetch("/api/ops/chat/stream",{
             method:"POST",
             headers:{"Content-Type":"application/json","Accept":"application/x-ndjson"},
@@ -1707,9 +1741,9 @@
           this.opsMessages=this.opsMessages.filter(item=>item!==temporary);
           this.flash(error.message||"IPC stream failed");
         }finally{
-          const queued=this.opsQueuedMessage;
-          this.opsBusy=false; this.opsStreaming=false; this.opsInterrupting=false; this.opsRunId=null; this.opsQueuedMessage=null;
-          if(queued){ this.opsInput=queued; await this.sendOpsMessage(); }
+          const queued=this.opsQueuedMessage, queuedAttachments=this.opsQueuedAttachments;
+          this.opsBusy=false; this.opsStreaming=false; this.opsInterrupting=false; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[];
+          if(queued){ this.opsInput=queued; this.opsAttachments=queuedAttachments||[]; await this.sendOpsMessage(); }
         }
       },
       async loadOpsWorkflows(){
@@ -1863,7 +1897,7 @@
       async submitFoundFlags(){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
         const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
-        const flags=await this.api("GET","/api/flags");
+        const flags=await this.api("GET","/api/flags?reveal=true");
         const candidates=flags.filter(item=>item.external_id&&item.flag);
         if(!candidates.length){ this.flash("no imported project has a flag yet"); return; }
         const results=[];
