@@ -239,3 +239,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .ipc-agent/
+
+# Local evaluation artifacts and credentials
+.qa-artifacts/
+testconfigkey.txt

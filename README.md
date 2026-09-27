@@ -85,6 +85,7 @@ IPC 将面向操作者的控制层与项目内的解题层分离：
 比赛配置以确认过的 `WorkflowProfile` 为入口。每次 Start 创建一个不可变配置快照和 `CompetitionRun`；`CompetitionService` 负责同步平台题目、导入 Project、计算席位、管理远端实例、恢复 assignment/session、提交候选 Flag、轮询异步 verdict，并在正确判题后调度 WP。
 
 - 平台通过统一适配器接入 HTTP JSON、GZCTF 和 ret2shell；适配器声明题目、提交/查询 verdict、实例生命周期和附件能力。
+- GZCTF 适配器使用 `GZCTF_Token` 身份 Cookie；部署时通过 `IPC_GZ_TOKEN` 注入，未提供 token 时才使用 `IPC_GZ_USERNAME`/`IPC_GZ_PASSWORD` 登录。
 - `CompetitionStore` 将 run、challenge、assignment、session event、submission、instance、WP job 和 run event 写入 PostgreSQL；网络、模型和容器操作在事务外执行。
 - 单题协作使用持久 SessionRunner、共享黑板和本地 sandbox；同题 Member 通过 gRPC over UDS 控制通道与 ZeroMQ recon 通道协作，消息先落库再发布。
 - 比赛 SSE 从持久 run event 读取，浏览器可用 event id 断线补流；Artifact 文件树保存附件、日志、脚本、截图和 Writeup。

@@ -88,6 +88,7 @@ services:
       # GZCTF participant cookie credentials are deployment secrets.  They are
       # read only by the backend adapter and are never copied into run specs.
       - IPC_GZ_BASE_URL=${IPC_GZ_BASE_URL:-}
+      - IPC_GZ_TOKEN=${IPC_GZ_TOKEN:-}
       - IPC_GZ_USERNAME=${IPC_GZ_USERNAME:-}
       - IPC_GZ_PASSWORD=${IPC_GZ_PASSWORD:-}
       - IPC_GZ_GAME_ID=${IPC_GZ_GAME_ID:-}

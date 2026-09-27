@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.6",
     "pyyaml>=6.0",
     "requests>=2.31",
+    "cryptography>=43,<45",
     "python-multipart>=0.0.9",
     "mcp>=1.20,<2",
     "psycopg[binary,pool]>=3.2,<4",
