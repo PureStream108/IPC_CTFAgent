@@ -4,11 +4,7 @@ from urllib.parse import quote, urlsplit
 
 from backend.ops.models import PlatformWorkflowSpec
 from backend.ops.service import _resolve_headers
-from backend.platform.ret2shell import (
-    Ret2ShellAdapter,
-    Ret2ShellPreflightError,
-    Ret2ShellRateLimitError,
-)
+from backend.platform.adapter import PlatformAdapter
 from backend.platform.verdict import interpret_response
 
 
@@ -19,41 +15,46 @@ class CompetitionPlatform:
         self.workflow_id = workflow_id
         self.spec = spec
         self.adapter = ops_service._adapter(workflow_id, spec)
-        # Only ret2shell's client has the legacy game/instance API.  GZCTF
-        # also owns a client, but its challenge-level contract is exposed by
-        # the adapter and must not be sent through the ret2shell branches.
-        self.client = self.adapter.client if isinstance(self.adapter, Ret2ShellAdapter) else None
-        self._native = all(
-            callable(getattr(self.adapter, name, None))
-            for name in ("submit", "query")
-        )
 
     @property
     def identity(self):
         adapter_identity = getattr(self.adapter, "identity", None)
         if adapter_identity:
-            return str(adapter_identity)
-        base = self.client.base_url if self.client else self.spec.challenges.list_url
+            base = str(adapter_identity).rstrip("/")
+            team = quote(str(self.spec.team_id), safe="")
+            team_marker = f"/team/{team}"
+            if base.endswith(f"/{team}") or base.endswith(team_marker) or (
+                team_marker in base and "/account/" in base
+            ):
+                return base
+            return f"{base}/{quote(str(self.spec.competition_id), safe='')}/{team}"
+        base = self.spec.challenges.list_url
         parsed = urlsplit(base)
-        return f"{parsed.scheme}://{parsed.netloc}/{self.spec.competition_id}/{self.spec.team_id}"
+        return (
+            f"{parsed.scheme}://{parsed.netloc}/"
+            f"{quote(str(self.spec.competition_id), safe='')}/"
+            f"{quote(str(self.spec.team_id), safe='')}"
+        )
 
     @property
     def supports_submit(self) -> bool:
-        return self._native or self.client is not None or self.spec.submit is not None
+        declared = getattr(self.adapter, "supports_submit", None)
+        return bool(declared() if callable(declared) else declared) or self.spec.submit is not None
 
     @property
     def supports_instances(self) -> bool:
-        return self.client is not None
+        declared = getattr(self.adapter, "supports_instances", False)
+        return bool(declared() if callable(declared) else declared)
 
     def preflight(self):
         if not self.spec.competition_id or not self.spec.team_id:
             raise ValueError("Workflow needs explicit competition_id and team_id before Start")
-        if callable(getattr(self.adapter, "preflight", None)):
+        adapter_preflight = getattr(type(self.adapter), "preflight", None)
+        if (
+            callable(getattr(self.adapter, "preflight", None))
+            and adapter_preflight is not PlatformAdapter.preflight
+        ):
             challenges = self.adapter.preflight()
-        elif self.client:
-            self.client.get_profile()
-            self.client.get_game()
-            challenges = self.adapter.fetch_challenges()
         elif not self.spec.submit or not self.spec.submit.success_path or not self.spec.submit.success_values:
             raise ValueError("Workflow needs explicit correct verdict mapping before Start")
         else:
@@ -65,38 +66,21 @@ class CompetitionPlatform:
     def challenges(self):
         native = getattr(self.adapter, "challenges", None)
         result = native() if callable(native) else self.adapter.fetch_challenges()
-        if self.client:
-            for challenge in result:
-                challenge.remote = self.client.has_environment(int(challenge.external_id))
-                challenge.solved = self.client.challenge_status(int(challenge.external_id)).get("solved") is True
         return result
 
     def submit(self, external_id: str, flag: str):
-        if self._native:
-            return self.adapter.submit(external_id, flag)
-        if self.client:
-            try:
-                value = self.client.submit_flag(int(external_id), flag)
-            except Ret2ShellRateLimitError:
-                return {"verdict": "rate_limited", "retry_after": 300}
-            except Ret2ShellPreflightError:
-                return {"verdict": "unknown"}
-            return self._r2s_verdict(value)
+        native = getattr(self.adapter, "submit", None)
+        if callable(native):
+            return native(external_id, flag)
         return self.ops._submit(
             self.workflow_id, self.spec, external_id, flag,
             include_verdict=True,
         )
 
-    @staticmethod
-    def _r2s_verdict(value):
-        return {"verdict": "correct" if value.get("solved") is True else "wrong" if value.get("solved") is False else "pending",
-                "submission_id": str(value["id"]) if value.get("id") is not None else None}
-
     def query(self, external_id: str, submission_id: str):
-        if self._native:
-            return self.adapter.query(external_id, submission_id)
-        if self.client:
-            return self._r2s_verdict(self.client.get_submission(int(external_id), int(submission_id)))
+        native = getattr(self.adapter, "query", None)
+        if callable(native):
+            return native(external_id, submission_id)
         spec = self.spec.submit
         if not spec or not spec.query_url:
             return {"verdict": "unknown"}
@@ -110,44 +94,34 @@ class CompetitionPlatform:
         method = getattr(self.adapter, "instances", None)
         if callable(method):
             return method()
-        return self.client.list_instances() if self.client else []
+        return []
 
     def start_instance(self, external_id: str):
         method = getattr(self.adapter, "start_instance", None)
         if callable(method):
             return method(external_id)
-        if not self.client:
-            raise ValueError("this platform has no verified instance lifecycle adapter")
-        self.client.start_instance(int(external_id))
-        return self.client.wait_for_instance(int(external_id), timeout=60)
+        raise ValueError("this platform has no verified instance lifecycle adapter")
 
     def stop_instance(self, external_id: str):
         method = getattr(self.adapter, "stop_instance", None)
         if callable(method):
             return method(external_id)
-        if self.client:
-            self.client.destroy_instance(int(external_id))
+        raise ValueError("this platform has no verified instance lifecycle adapter")
 
     def renew_instance(self, external_id: str):
         method = getattr(self.adapter, "renew_instance", None)
         if callable(method):
             return method(external_id)
-        if self.client:
-            self.client.renew_instance(int(external_id))
+        raise ValueError("this platform has no verified instance lifecycle adapter")
 
     def rebuild_instance(self, external_id: str):
         """Replace a failed remote instance when the platform supports it.
 
-        Rebuild is deliberately an opt-in capability.  A generic HTTP or
-        GZCTF workflow must never infer that deleting and recreating a target
-        is safe; only an adapter/client that already owns the lifecycle gets
-        this fallback.
+        Rebuild is deliberately an opt-in capability.  A workflow must never
+        infer that deleting and recreating a target is safe; only an adapter
+        that explicitly owns the lifecycle gets this operation.
         """
         method = getattr(self.adapter, "rebuild_instance", None)
         if callable(method):
             return method(external_id)
-        if not self.client:
-            raise ValueError("this platform has no verified instance rebuild lifecycle")
-        self.client.destroy_instance(int(external_id))
-        self.client.start_instance(int(external_id))
-        return self.client.wait_for_instance(int(external_id), timeout=60)
+        raise ValueError("this platform has no verified instance rebuild lifecycle")

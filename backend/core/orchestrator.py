@@ -124,7 +124,7 @@ class Orchestrator:
         # the competition coordinator while both can still see the same
         # durable Project row.  Competition workers use the coordinator's
         # owner token through ``state.competition_engine_owner``.
-        self._engine_leases: dict[str, tuple[str, str]] = {}
+        self._engine_leases: dict[str, tuple[str, str, int]] = {}
         self._engine_owner = f"{state.instance_id}:legacy"
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
         self._lock = threading.Lock()
@@ -195,6 +195,11 @@ class Orchestrator:
             with self._lock:
                 already_owned = project_id in self._project_leases
             if already_owned:
+                # The competition coordinator re-issues Start when a durable
+                # seat has no live Member (its previous task ended).  A plain
+                # no-op here strands the seat forever, so reconcile open
+                # intents with their idle seat holders instead.
+                self._submit_redispatch(project_id)
                 return self.runtime_status(project_id)
             if not self._ensure_project_lease(project_id):
                 return self.runtime_status(project_id)
@@ -288,7 +293,9 @@ class Orchestrator:
         with self._lock:
             if not hasattr(self, "_engine_leases"):
                 self._engine_leases = {}
-            self._engine_leases[project_id] = (kind, owner)
+            self._engine_leases[project_id] = (
+                kind, owner, int(lease["engine_epoch"])
+            )
         return True
 
     def _release_project_engine_lease(self, project_id: str) -> None:
@@ -298,7 +305,7 @@ class Orchestrator:
             return
         try:
             release_engine_lease(
-                self.state.db, project_id, context[0], context[1]
+                self.state.db, project_id, context[0], context[1], epoch=context[2]
             )
         except Exception:
             # Shutdown/recovery must not mask the primary project cleanup
@@ -564,6 +571,40 @@ class Orchestrator:
     def _startup_in_progress(self, project_id: str) -> bool:
         with self._lock:
             return project_id in self._startup_project_ids
+
+    def startup_in_progress(self, project_id: str) -> bool:
+        """Public read-only view for the competition coordinator."""
+        return self._startup_in_progress(project_id)
+
+    def _submit_redispatch(self, project_id: str) -> None:
+        with self._lock:
+            if project_id in self._startup_project_ids:
+                return
+            self._startup_project_ids.add(project_id)
+        try:
+            future = self.startup_executor.submit(self._redispatch_project, project_id)
+        except Exception:
+            with self._lock:
+                self._startup_project_ids.discard(project_id)
+            raise
+        with self._lock:
+            self._startup_futures[project_id] = future
+
+    def _redispatch_project(self, project_id: str) -> None:
+        try:
+            if self.lifecycle.status(project_id) != "running":
+                return
+            self._dispatch_project(project_id)
+        except Exception as exc:
+            self.state.logger.project(
+                "project_redispatch_failed",
+                project_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            with self._lock:
+                self._startup_project_ids.discard(project_id)
+                self._startup_futures.pop(project_id, None)
 
     def start_project(self, project_id: str) -> None:
         self._reconcile_resources()
@@ -1312,7 +1353,14 @@ class Orchestrator:
             )
         self.resources.release_project(project_id)
         self.projects.teardown(project_id)
-        phase = "solved" if self.lifecycle.status(project_id) == "solved" else "stopped"
+        status = self.lifecycle.status(project_id)
+        if status in ("created", "running"):
+            # The scheduler tick adopts any project still marked running as a
+            # crashed worker orphan.  An explicit Stop must leave a durable
+            # stopped status, or the next process resumes cancelled work.
+            with suppress(LifecycleError):
+                self.lifecycle.transition(project_id, "stopped")
+        phase = "solved" if status == "solved" else "stopped"
         self._set_runtime_phase(project_id, phase)
         self._release_project_lease(project_id)
 
@@ -1995,6 +2043,9 @@ class Orchestrator:
                     trigger=reason_trigger,
                     intent=created.id,
                 )
+                # The reason pass produced dispatchable work; select a Member
+                # for it now instead of waiting for the next coordinator tick.
+                self._dispatch_project(project_id)
             return
         ordered = (
             sorted(claimed, key=lambda i: (i.created_at, i.id))

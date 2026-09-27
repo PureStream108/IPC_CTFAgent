@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import inspect
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,9 +34,40 @@ TERMINAL_RUN_STATES = {"finished", "stopped"}
 
 
 def _timestamp(value: str | datetime | None) -> datetime | None:
-    if value is None or isinstance(value, datetime):
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _select_discovered(discovered: list, select: list[str] | None) -> list:
+    """Limit one run to explicitly requested challenges.
+
+    ``None`` keeps every discovered challenge; an explicit list must be a
+    subset of the preflight result so a typo cannot silently start a run with
+    fewer challenges than the operator asked for.
+    """
+    if select is None:
+        return discovered
+    wanted = {str(item) for item in select}
+    available = {item.external_id for item in discovered}
+    missing = sorted(wanted - available)
+    if missing:
+        raise ValueError(
+            "selected challenges are not available: " + ", ".join(missing)
+        )
+    return [item for item in discovered if item.external_id in wanted]
+
+
+def _selected_external_ids(run: dict) -> set[str] | None:
+    """Return the run's durable challenge selection, if one was requested."""
+
+    snapshot = run.get("config_snapshot") or {}
+    selected = snapshot.get("selected_external_ids")
+    if selected is None:
+        return None
+    return {str(item) for item in selected}
 
 
 def _safe_member_config(config) -> dict[str, Any] | None:
@@ -112,6 +144,7 @@ class CompetitionService:
         # waiting for an operator to change the workflow.
         self._instance_capability_warnings: set[tuple[str, str]] = set()
         self._engine_conflicts: set[tuple[str, str]] = set()
+        self._engine_epochs: dict[str, int] = {}
         self.observation_interval = 10.0
         self._last_observation_at = 0.0
 
@@ -172,10 +205,15 @@ class CompetitionService:
             self._recon.close()
             self._recon = None
             self._recon_endpoint = None
-        with suppress(Exception):
-            self.store.release_engine_leases_for_owner(
-                "competition", self.engine_owner
-            )
+        # Release only leases claimed by this coordinator instance.  A bulk
+        # owner-only cleanup could clear a newer epoch after a restart that
+        # reused the same durable owner identity.
+        for project_id, epoch in list(self._engine_epochs.items()):
+            with suppress(Exception):
+                self.store.release_engine_lease(
+                    project_id, "competition", self.engine_owner, epoch=epoch
+                )
+            self._engine_epochs.pop(project_id, None)
         self._wp_pool.shutdown(wait=True, cancel_futures=True)
 
     @property
@@ -226,6 +264,20 @@ class CompetitionService:
             return self._platform_factory(run["workflow_id"], spec)
         return CompetitionPlatform(self.ops, run["workflow_id"], spec)
 
+    def _import_for_run(
+        self, workflow_id: str, spec: PlatformWorkflowSpec,
+        external_ids: list[str], run_id: str,
+    ) -> dict[str, Any]:
+        """Import run-owned Projects while retaining deterministic test seams."""
+        importer = self.ops._import
+        try:
+            accepts_run = "run_id" in inspect.signature(importer).parameters
+        except (TypeError, ValueError):
+            accepts_run = True
+        if accepts_run:
+            return importer(workflow_id, spec, external_ids, run_id=run_id)
+        return importer(workflow_id, spec, external_ids)
+
     def preflight(self, workflow_id: str) -> dict:
         errors = self.state.config.startup_errors()
         if errors:
@@ -233,38 +285,72 @@ class CompetitionService:
         workflow = self._workflow(workflow_id)
         platform = self._platform_for_workflow(workflow)
         challenges = platform.preflight()
+        supports_submit = getattr(
+            platform,
+            "supports_submit",
+            workflow["spec"].submit is not None
+            or getattr(platform, "client", None) is not None,
+        )
+        if callable(supports_submit):
+            supports_submit = supports_submit()
+        supports_instances = getattr(platform, "supports_instances", None)
+        if supports_instances is None:
+            supports_instances = getattr(platform, "client", None) is not None
+        elif callable(supports_instances):
+            supports_instances = supports_instances()
         return {
             "workflow_id": workflow_id,
             "identity_key": platform.identity,
             "challenge_count": len(challenges),
             "remote_count": sum(bool(item.remote) for item in challenges),
             "capabilities": {
-                "submit": bool(getattr(
-                    platform, "supports_submit",
-                    workflow["spec"].submit is not None or getattr(platform, "client", None) is not None,
-                )),
-                "instances": bool(getattr(
-                    platform, "supports_instances", getattr(platform, "client", None) is not None,
-                )),
+                "submit": bool(supports_submit),
+                "instances": bool(supports_instances),
                 "async_verdict": bool(
                     workflow["spec"].submit and workflow["spec"].submit.pending_values
                 ),
             },
         }
 
-    def start(self, workflow_id: str, idempotency_key: str) -> dict:
+    def start(
+        self,
+        workflow_id: str,
+        idempotency_key: str,
+        select: list[str] | None = None,
+    ) -> dict:
         errors = self.state.config.startup_errors()
         if errors:
             raise ValueError("; ".join(errors))
         workflow = self._workflow(workflow_id)
         platform = self._platform_for_workflow(workflow)
-        discovered = platform.preflight()
+        supports_submit = getattr(platform, "supports_submit", False)
+        if callable(supports_submit):
+            supports_submit = supports_submit()
+        if not bool(supports_submit):
+            raise ValueError("platform adapter does not support flag submission")
+        existing = self.store.run_by_idempotency(idempotency_key)
+        if existing is not None:
+            requested_identity = platform.identity
+            stored_identity = str(existing["identity_key"])
+            if existing["workflow_id"] != workflow_id or not (
+                stored_identity == requested_identity
+                or stored_identity.startswith(requested_identity + "/account/")
+            ):
+                raise CompetitionConflict("idempotency key belongs to another run request")
+            return self.store.run_snapshot(existing["id"])
+        discovered = _select_discovered(platform.preflight(), select)
         snapshot = {
             "workflow_spec": workflow["spec"].model_dump(mode="json"),
             "spec_digest": workflow["spec_digest"],
             "member_config": _safe_member_config(self.state.config.member),
             "member_config_source": "runtime-config",
         }
+        if select is not None:
+            # Keep the operator's selection durable: periodic platform sync
+            # must not pull the remaining challenges into this run.
+            snapshot["selected_external_ids"] = [
+                str(item.external_id) for item in discovered
+            ]
         run = self.store.create_run(
             workflow_id, platform.identity, idempotency_key, snapshot
         )
@@ -273,10 +359,11 @@ class CompetitionService:
         self.store.append_run_event(run["id"], "run.created", {"workflow_id": workflow_id})
         run = self.store.transition_run(run["id"], "importing", revision=run["revision"])
         try:
-            imported = self.ops._import(
+            imported = self._import_for_run(
                 workflow_id,
                 workflow["spec"],
                 [item.external_id for item in discovered],
+                run["id"],
             )["imported"]
             projects = {item["external_id"]: item["project_id"] for item in imported}
             for item in discovered:
@@ -327,25 +414,35 @@ class CompetitionService:
         }
 
     def control(self, run_id: str, action: str, revision: int) -> dict:
-        run = self.store.get_run(run_id)
-        if run["revision"] != revision:
-            raise CompetitionConflict("stale run revision")
-        if action == "refresh":
-            self.refresh(run_id)
-            return self.store.run_snapshot(run_id)
-        target = {"pause": "paused", "resume": "running", "stop": "stopped"}.get(action)
-        if target is None:
-            raise ValueError("unsupported run action")
-        if action in {"pause", "stop"}:
-            self._stop_run_projects(run_id)
-            self.store.release_run_assignments(run_id)
-        if action == "stop":
-            self._stop_owned_instances(run)
-        changed = self.store.transition_run(run_id, target, revision=revision)
-        self.store.append_run_event(run_id, f"run.{target}", {})
-        if action == "resume":
-            self.wake()
-        return self.store.run_snapshot(changed["id"])
+        if not self._tick_lock.acquire(blocking=False):
+            raise CompetitionConflict("another competition operation is in progress")
+        try:
+            run = self.store.get_run(run_id)
+            if run["revision"] != revision:
+                raise CompetitionConflict("stale run revision")
+            if action == "refresh":
+                self._refresh_unlocked(run_id)
+                return self.store.run_snapshot(run_id)
+            target = {"pause": "paused", "resume": "running", "stop": "stopped"}.get(action)
+            if target is None:
+                raise ValueError("unsupported run action")
+            # The revision transition is the first operation.  A stale control
+            # request therefore cannot stop projects or release assignments.
+            changed = self.store.transition_run(
+                run_id, target, revision=revision,
+                permit_active=action == "stop",
+            )
+            if action in {"pause", "stop"}:
+                self._stop_run_projects(run_id)
+                self.store.release_run_assignments(run_id)
+            if action == "stop":
+                self._stop_owned_instances(run)
+            self.store.append_run_event(run_id, f"run.{target}", {})
+            if action == "resume":
+                self.wake()
+            return self.store.run_snapshot(changed["id"])
+        finally:
+            self._tick_lock.release()
 
     def _stop_run_projects(self, run_id: str) -> None:
         orchestrator = self.state.orchestrator
@@ -373,6 +470,7 @@ class CompetitionService:
             )
             return False
         if lease is not None:
+            self._engine_epochs[project_id] = int(lease["engine_epoch"])
             self._engine_conflicts.discard((run["id"], project_id))
             return True
         key = (run["id"], project_id)
@@ -393,9 +491,17 @@ class CompetitionService:
             project_id = challenge.get("project_id")
             if not project_id:
                 continue
+            epoch = self._engine_epochs.get(project_id)
+            if epoch is None:
+                # A coordinator restart must recover the current fencing
+                # token through claim before it can renew.  Owner identity
+                # alone is insufficient when an old worker is still draining.
+                self._claim_project_engine(run, project_id)
+                continue
             try:
                 renewed = self.store.renew_engine_lease(
-                    project_id, "competition", self.engine_owner, seconds=60
+                    project_id, "competition", self.engine_owner,
+                    epoch=epoch, seconds=60
                 )
             except Exception:
                 renewed = True
@@ -405,9 +511,13 @@ class CompetitionService:
                 self._claim_project_engine(run, project_id)
 
     def _release_project_engine(self, project_id: str) -> None:
+        epoch = self._engine_epochs.pop(project_id, None)
+        if epoch is None:
+            return
         with suppress(Exception):
             self.store.release_engine_lease(
-                project_id, "competition", self.engine_owner
+                project_id, "competition", self.engine_owner,
+                epoch=epoch,
             )
 
     def _stop_owned_instances(self, run: dict) -> None:
@@ -419,32 +529,84 @@ class CompetitionService:
                 (run["id"],),
             ).fetchall()
         for instance in instances:
-            try:
-                platform.stop_instance(instance["external_id"])
-            except Exception as exc:
-                self.store.append_run_event(
-                    run["id"], "instance.stop_failed",
-                    {"challenge_id": instance["challenge_id"], "error": str(exc)},
-                )
-                continue
+            self._stop_instance(
+                run,
+                {"id": instance["challenge_id"], "external_id": instance["external_id"]},
+                platform=platform,
+            )
+
+    def _stop_instance(self, run: dict, challenge: dict, *, platform=None) -> bool:
+        platform = platform or self._platform_for_run(run)
+        try:
+            platform.stop_instance(challenge["external_id"])
+        except Exception as exc:
             with self.state.db.connect() as connection:
                 connection.execute(
-                    """UPDATE competition_instances SET state='stopped',updated_at=now()
+                    """UPDATE competition_instances
+                       SET state='stop_pending',metadata=metadata || %s,updated_at=now()
                        WHERE challenge_id=%s""",
-                    (instance["challenge_id"],),
+                    (Jsonb({"stop_error": str(exc)}), challenge["id"]),
+                )
+            self.store.append_run_event(
+                run["id"], "instance.stop_failed",
+                {"challenge_id": challenge["id"], "error": str(exc)},
+            )
+            return False
+        with self.state.db.connect() as connection:
+            connection.execute(
+                """UPDATE competition_instances SET state='stopped',updated_at=now()
+                   WHERE challenge_id=%s""",
+                (challenge["id"],),
+            )
+        return True
+
+    def _retry_pending_instance_stops(self) -> None:
+        with self.state.db.connect() as connection:
+            rows = connection.execute(
+                """SELECT i.challenge_id,i.external_id,i.run_id,r.workflow_id
+                   FROM competition_instances i
+                   JOIN competition_runs r ON r.id=i.run_id
+                   WHERE i.state='stop_pending'
+                   ORDER BY i.updated_at LIMIT 20"""
+            ).fetchall()
+        for row in rows:
+            try:
+                run = self.store.get_run(row["run_id"])
+                self._stop_instance(
+                    run,
+                    {"id": row["challenge_id"], "external_id": row["external_id"]},
+                )
+            except Exception as exc:
+                self.store.append_run_event(
+                    row["run_id"], "instance.stop_retry_failed",
+                    {"challenge_id": row["challenge_id"], "error": str(exc)},
                 )
 
     def refresh(self, run_id: str) -> dict:
+        if not self._tick_lock.acquire(blocking=False):
+            raise CompetitionConflict("another competition operation is in progress")
+        try:
+            return self._refresh_unlocked(run_id)
+        finally:
+            self._tick_lock.release()
+
+    def _refresh_unlocked(self, run_id: str) -> dict:
         run = self.store.get_run(run_id)
         platform = self._platform_for_run(run)
         discovered = platform.challenges()
+        selected = _selected_external_ids(run)
+        if selected is not None:
+            discovered = [
+                item for item in discovered if item.external_id in selected
+            ]
         known = {item["external_id"]: item for item in self.store.challenges(run_id)}
         new_items = [item for item in discovered if item.external_id not in known]
         projects: dict[str, str] = {}
         if new_items:
-            imported = self.ops._import(
+            imported = self._import_for_run(
                 run["workflow_id"], platform.spec,
                 [item.external_id for item in new_items],
+                run["id"],
             )["imported"]
             projects = {item["external_id"]: item["project_id"] for item in imported}
         for item in discovered:
@@ -530,6 +692,7 @@ class CompetitionService:
         if not self._tick_lock.acquire(blocking=False):
             return
         try:
+            self._retry_pending_instance_stops()
             run = self.store.active_run()
             if run is None or not self.store.claim_run_lease(run["id"], self.owner):
                 return
@@ -537,7 +700,7 @@ class CompetitionService:
                 due = _timestamp(run.get("next_sync_at"))
                 if due is None or due <= datetime.now(timezone.utc):
                     try:
-                        self.refresh(run["id"])
+                        self._refresh_unlocked(run["id"])
                     except Exception as exc:
                         self.store.schedule_next_sync(
                             run["id"], seconds=self.sync_interval, error=str(exc)
@@ -636,14 +799,7 @@ class CompetitionService:
                         orchestrator.stop_project(challenge["project_id"])
                 self._release_project_engine(challenge["project_id"])
             if self._instance_ready(challenge["id"]):
-                with suppress(Exception):
-                    platform.stop_instance(challenge["external_id"])
-                with self.state.db.connect() as connection:
-                    connection.execute(
-                        """UPDATE competition_instances SET state='stopped',updated_at=now()
-                           WHERE challenge_id=%s""",
-                        (challenge["id"],),
-                    )
+                self._stop_instance(run, challenge, platform=platform)
             self.store.append_run_event(
                 run["id"], "challenge.expired", {"challenge_id": challenge["id"]}
             )
@@ -662,20 +818,15 @@ class CompetitionService:
                     assignment["id"], assignment["lease_owner"], assignment["epoch"]
                 )
         if self._instance_ready(challenge["id"]):
-            with suppress(Exception):
-                self._platform_for_run(run).stop_instance(challenge["external_id"])
-            with self.state.db.connect() as connection:
-                connection.execute(
-                    """UPDATE competition_instances SET state='stopped',updated_at=now()
-                       WHERE challenge_id=%s""",
-                    (challenge["id"],),
-                )
+            self._stop_instance(run, challenge)
 
     def _advance_run_completion(self, run: dict) -> None:
         terminal = {"solved", "expired", "withdrawn", "cancelled"}
         challenges = self.store.challenges(run["id"])
         current = self.store.get_run(run["id"])
-        if current["status"] == "running" and all(
+        ends_at = _timestamp(run["config_snapshot"]["workflow_spec"].get("ends_at"))
+        before_declared_end = ends_at is not None and ends_at > datetime.now(timezone.utc)
+        if current["status"] == "running" and challenges and not before_declared_end and all(
             item["state"] in terminal for item in challenges
         ):
             self._stop_run_projects(run["id"])
@@ -749,27 +900,39 @@ class CompetitionService:
                     assignment["id"], assignment["lease_owner"], assignment["epoch"]
                 )
             elif owner_project is None and project_id and assignment["role"] != "wp":
+                if start_key in self._starting_members and not orchestrator.startup_in_progress(project_id):
+                    # The earlier bootstrap finished without registering this
+                    # Member (for example nothing was claimable at that
+                    # moment).  Clear the stale marker so a fresh bootstrap
+                    # request can actually be issued.
+                    self._starting_members.discard(start_key)
+                    if not any(key[0] == project_id for key in self._starting_members):
+                        self._starting_projects.discard(project_id)
                 if start_key not in self._starting_members:
                     if not self._claim_project_engine(run, project_id):
                         continue
                     self._starting_members.add(start_key)
+                    if orchestrator.startup_in_progress(project_id):
+                        # A bootstrap or redispatch for this project is
+                        # already in flight.  It reconciles every idle seat,
+                        # so another request would only add churn.
+                        continue
                     # The legacy API starts a whole project, not one Member.
-                    # Multiple durable seats therefore share one in-flight
-                    # project bootstrap request.
-                    if project_id not in self._starting_projects:
-                        self._starting_projects.add(project_id)
-                        try:
-                            orchestrator.start_project_async(project_id)
-                        except Exception as exc:
-                            self._starting_members = {
-                                key for key in self._starting_members
-                                if key[0] != project_id
-                            }
-                            self._starting_projects.discard(project_id)
-                            self.store.append_run_event(
-                                run["id"], "assignment.recovery_failed",
-                                {"challenge_id": assignment["challenge_id"], "member": assignment["member"], "error": str(exc)},
-                            )
+                    # Multiple durable seats share one request per tick; the
+                    # orchestrator coalesces overlapping redispatches itself.
+                    self._starting_projects.add(project_id)
+                    try:
+                        orchestrator.start_project_async(project_id)
+                    except Exception as exc:
+                        self._starting_members = {
+                            key for key in self._starting_members
+                            if key[0] != project_id
+                        }
+                        self._starting_projects.discard(project_id)
+                        self.store.append_run_event(
+                            run["id"], "assignment.recovery_failed",
+                            {"challenge_id": assignment["challenge_id"], "member": assignment["member"], "error": str(exc)},
+                        )
         for member, project_id in owners.items():
             challenge = challenges.get(project_id)
             if challenge is None or self.store.find_assignment(
@@ -801,6 +964,12 @@ class CompetitionService:
         platform = self._platform_for_run(run)
         rows = self.store.challenges(run["id"])
         active = self.store.assignments(run["id"], active_only=True)
+        if not active:
+            # A resumed run starts with every seat released.  Put each
+            # Member back on the challenge whose session they already own
+            # before planning anything new.
+            self._restore_paused_seats(run, rows)
+            active = self.store.assignments(run["id"], active_only=True)
         members_by_challenge: dict[str, list[str]] = {}
         for assignment in active:
             if assignment["role"] != "wp":
@@ -822,15 +991,45 @@ class CompetitionService:
             ))
         remote_limit = int(run["config_snapshot"]["workflow_spec"].get("remote_instance_limit", 0))
         with self.state.db.connect() as connection:
-            used = connection.execute(
+            used_rows = connection.execute(
                 """SELECT count(*) AS count FROM competition_instances
                    WHERE run_id=%s AND state NOT IN ('stopped','expired')""",
                 (run["id"],),
-            ).fetchone()["count"]
+            ).fetchone()
+            local_used = int(used_rows["count"])
+            local_ids = {
+                str(row["external_id"])
+                for row in connection.execute(
+                    """SELECT external_id FROM competition_instances
+                       WHERE run_id=%s AND state NOT IN ('stopped','expired')""",
+                    (run["id"],),
+                ).fetchall()
+            }
+        external_used = 0
+        try:
+            for item in platform.instances():
+                if isinstance(item, dict):
+                    external_id = str(
+                        item.get("external_id", item.get("externalId", item.get("id", "")))
+                    )
+                    state = str(item.get("state", item.get("status", "ready"))).lower()
+                    instance_active = state not in {"stopped", "expired", "deleted", "terminated"}
+                else:
+                    external_id = str(item)
+                    instance_active = True
+                if instance_active and external_id not in local_ids:
+                    external_used += 1
+        except Exception as exc:
+            # A quota query failure must not cause an over-allocation.  Treat
+            # the entire remote capacity as occupied until the next refresh.
+            external_used = remote_limit
+            self.store.append_run_event(
+                run["id"], "instance.quota_unknown", {"error": str(exc)}
+            )
         plans = plan_assignments(
             challenges,
             occupied_members={item["member"] for item in active},
-            remote_capacity=max(0, remote_limit - int(used)),
+            remote_capacity=max(0, remote_limit - local_used - external_used),
             now=datetime.now(timezone.utc),
             local_capacity=self.state.config.limits.max_concurrent_tasks,
             available_members={member.name for member in self.state.config.available_members()},
@@ -917,6 +1116,39 @@ class CompetitionService:
                     run["id"], "assignment.start_failed",
                     {"challenge_id": challenge["id"], "error": str(exc)},
                 )
+
+    def _restore_paused_seats(self, run: dict, rows: list[dict]) -> None:
+        """Re-seat paused Members on their original challenges.
+
+        Pausing releases every durable seat.  A positional re-plan after
+        resume would scatter Members onto challenges where they own no
+        session, so the released seat mapping is restored first; the
+        planner only fills seats that could not be restored.
+        """
+        by_id = {item["id"]: item for item in rows}
+        configured = {member.name for member in self.state.config.available_members()}
+        taken: set[str] = set()
+        for seat in self.store.restorable_seats(run["id"]):
+            challenge = by_id.get(seat["challenge_id"])
+            if challenge is None or challenge["state"] not in {"ready", "solving"}:
+                continue
+            deadline_at = _timestamp(challenge.get("deadline_at"))
+            if deadline_at is not None and deadline_at <= datetime.now(timezone.utc):
+                continue
+            member = seat["member"]
+            if member in taken or member not in configured:
+                continue
+            try:
+                self.store.assign(
+                    run["id"], challenge["id"], member, self.owner, role=seat["role"]
+                )
+            except CompetitionConflict:
+                continue
+            taken.add(member)
+            self.store.append_run_event(
+                run["id"], "assignment.restored",
+                {"challenge_id": challenge["id"], "member": member, "role": seat["role"]},
+            )
 
     def _instance_ready(self, challenge_id: str) -> bool:
         with self.state.db.connect() as connection:
@@ -1065,6 +1297,15 @@ class CompetitionService:
         platform = self._platform_for_run(run)
         if not self._supports_instance_lifecycle(platform):
             return False
+        with self.state.db.connect() as connection:
+            existing = connection.execute(
+                "SELECT state FROM competition_instances WHERE challenge_id=%s",
+                (challenge["id"],),
+            ).fetchone()
+        if existing is not None and existing["state"] in {
+            "ready", "running", "active", "start_pending", "stop_pending"
+        }:
+            return existing["state"] in {"ready", "running", "active"}
         try:
             result = platform.start_instance(challenge["external_id"])
         except Exception as exc:
@@ -1077,6 +1318,15 @@ class CompetitionService:
             result = {"state": "ready"}
         state = str(result.get("state", "ready")).strip().lower()
         if state not in {"ready", "running", "active"}:
+            with self.state.db.connect() as connection:
+                connection.execute(
+                    """INSERT INTO competition_instances
+                       (challenge_id,run_id,external_id,state,metadata,updated_at)
+                       VALUES (%s,%s,%s,'start_pending',%s,now())
+                       ON CONFLICT (challenge_id) DO UPDATE SET state='start_pending',
+                       metadata=EXCLUDED.metadata,updated_at=now()""",
+                    (challenge["id"], run["id"], challenge["external_id"], Jsonb(result)),
+                )
             self.store.append_run_event(
                 run["id"], "instance.start_pending",
                 {"challenge_id": challenge["id"], "state": state or "unknown"},
@@ -1084,22 +1334,45 @@ class CompetitionService:
             return False
         result.setdefault("state", "ready")
         next_renewal = self._instance_next_renewal(result)
-        with self.state.db.connect() as connection:
-            connection.execute(
-                """INSERT INTO competition_instances
-                   (challenge_id,run_id,external_id,state,metadata,next_renew_at)
-                   VALUES (%s,%s,%s,'ready',%s,%s)
-                   ON CONFLICT (challenge_id) DO UPDATE SET state='ready',metadata=EXCLUDED.metadata,
-                   next_renew_at=EXCLUDED.next_renew_at,updated_at=now()""",
-                (
-                    challenge["id"], run["id"], challenge["external_id"],
-                    Jsonb(result), next_renewal,
-                ),
-            )
-            connection.execute(
-                "UPDATE competition_challenges SET instance_generation=instance_generation+1 WHERE id=%s",
-                (challenge["id"],),
-            )
+        try:
+            with self.state.db.connect() as connection:
+                connection.execute(
+                    """INSERT INTO competition_instances
+                       (challenge_id,run_id,external_id,state,metadata,next_renew_at)
+                       VALUES (%s,%s,%s,'ready',%s,%s)
+                       ON CONFLICT (challenge_id) DO UPDATE SET state='ready',metadata=EXCLUDED.metadata,
+                       next_renew_at=EXCLUDED.next_renew_at,updated_at=now()""",
+                    (
+                        challenge["id"], run["id"], challenge["external_id"],
+                        Jsonb(result), next_renewal,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE competition_challenges SET instance_generation=instance_generation+1 WHERE id=%s",
+                    (challenge["id"],),
+                )
+        except Exception as exc:
+            # The remote side effect happened before local registration.  Keep
+            # a durable stop_pending row so the retry worker can compensate it.
+            try:
+                with self.state.db.connect() as connection:
+                    connection.execute(
+                        """INSERT INTO competition_instances
+                           (challenge_id,run_id,external_id,state,metadata,updated_at)
+                           VALUES (%s,%s,%s,'stop_pending',%s,now())
+                           ON CONFLICT (challenge_id) DO UPDATE SET state='stop_pending',
+                           metadata=EXCLUDED.metadata,updated_at=now()""",
+                        (
+                            challenge["id"], run["id"], challenge["external_id"],
+                            Jsonb({"registration_error": str(exc)}),
+                        ),
+                    )
+            finally:
+                self.store.append_run_event(
+                    run["id"], "instance.registration_failed",
+                    {"challenge_id": challenge["id"], "error": str(exc)},
+                )
+            return False
         return True
 
     def _process_submissions(self, run: dict, *, allow_new: bool = True) -> None:
@@ -1211,13 +1484,29 @@ class CompetitionService:
         project_id = challenge.get("project_id")
         orchestrator = self.state.orchestrator
         if project_id:
+            try:
+                with self.state.db.connect() as connection:
+                    accept_verified_flag(
+                        connection, project_id, flag,
+                        source=f"competition:{run['workflow_id']}",
+                    )
+                    from backend.core.postprocess_store import enqueue_postprocess
+
+                    enqueue_postprocess(connection, project_id)
+            except Exception as exc:
+                self.store.append_run_event(
+                    run["id"], "challenge.closeout_failed",
+                    {"challenge_id": challenge["id"], "error": str(exc)},
+                )
+                with suppress(Exception):
+                    current = self.store.get_run(run["id"])
+                    if current["status"] == "running":
+                        self.store.transition_run(
+                            run["id"], "blocked", revision=current["revision"]
+                        )
+                return
             if orchestrator is not None:
                 with suppress(Exception):
-                    with self.state.db.connect() as connection:
-                        accept_verified_flag(
-                            connection, project_id, flag,
-                            source=f"competition:{run['workflow_id']}",
-                        )
                     orchestrator.stop_project(project_id)
             self._release_project_engine(project_id)
         for assignment in self.store.assignments(run["id"], active_only=True):
@@ -1226,15 +1515,7 @@ class CompetitionService:
                     assignment["id"], assignment["lease_owner"], assignment["epoch"]
                 )
         if self._instance_ready(challenge["id"]):
-            platform = self._platform_for_run(run)
-            with suppress(Exception):
-                platform.stop_instance(challenge["external_id"])
-            with self.state.db.connect() as connection:
-                connection.execute(
-                    """UPDATE competition_instances SET state='stopped',updated_at=now()
-                       WHERE challenge_id=%s""",
-                    (challenge["id"],),
-                )
+            self._stop_instance(run, challenge)
 
     def _dispatch_wp(self, run: dict) -> None:
         finished = [key for key, future in self._wp_futures.items() if future.done()]

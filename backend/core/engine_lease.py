@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -69,48 +70,65 @@ def renew_engine_lease(
     kind: str,
     owner: str,
     *,
+    epoch: int,
     seconds: int = 60,
 ) -> bool:
-    """Renew only an unexpired lease owned by the exact engine tuple."""
+    """Renew only an unexpired lease owned by the exact fencing tuple."""
 
     _validate(kind, owner, seconds)
+    if not isinstance(epoch, int) or epoch < 1:
+        raise ValueError("engine lease epoch is required")
     with db.connect() as connection:
         return bool(connection.execute(
             """UPDATE projects SET engine_lease_expires_at=now()+(%s*interval '1 second'),
-                   updated_at=now()
+               updated_at=now()
                WHERE id=%s AND engine_kind=%s AND engine_owner=%s
+                 AND engine_epoch=%s
                  AND engine_lease_expires_at>now()
                RETURNING id""",
-            (seconds, project_id, kind, owner),
+            (seconds, project_id, kind, owner, epoch),
         ).fetchone())
 
 
-def release_engine_lease(db, project_id: str, kind: str, owner: str) -> bool:
+def release_engine_lease(
+    db, project_id: str, kind: str, owner: str, *, epoch: int
+) -> bool:
     """Clear a lease only when the caller still owns its fencing tuple."""
 
     _validate(kind, owner, 60)
+    if not isinstance(epoch, int) or epoch < 1:
+        raise ValueError("engine lease epoch is required")
     with db.connect() as connection:
         return bool(connection.execute(
             """UPDATE projects SET engine_kind=NULL,engine_owner=NULL,
-                   engine_lease_expires_at=NULL,updated_at=now()
+               engine_lease_expires_at=NULL,updated_at=now()
                WHERE id=%s AND engine_kind=%s AND engine_owner=%s
+                 AND engine_epoch=%s
                RETURNING id""",
-            (project_id, kind, owner),
+            (project_id, kind, owner, epoch),
         ).fetchone())
 
 
-def release_engine_leases_for_owner(db, kind: str, owner: str) -> int:
-    """Release every project fence held by an engine during orderly shutdown."""
+def release_engine_leases_for_owner(
+    db, kind: str, owner: str, *, epochs: Mapping[str, int]
+) -> int:
+    """Release only the explicitly fenced project leases held by an engine.
+
+    A bulk owner-only update is unsafe after a restart because the same owner
+    string may already hold a newer epoch.  Callers must provide the epochs
+    they actually acquired.
+    """
 
     _validate(kind, owner, 60)
-    with db.connect() as connection:
-        cursor = connection.execute(
-            """UPDATE projects SET engine_kind=NULL,engine_owner=NULL,
-                   engine_lease_expires_at=NULL,updated_at=now()
-               WHERE engine_kind=%s AND engine_owner=%s""",
-            (kind, owner),
-        )
-        return cursor.rowcount
+    if not isinstance(epochs, Mapping):
+        raise ValueError("engine lease epochs are required")
+    released = 0
+    for project_id, epoch in epochs.items():
+        if not isinstance(epoch, int) or epoch < 1:
+            raise ValueError("engine lease epoch is required")
+        if release_engine_lease(db, project_id, kind, owner, epoch=epoch):
+            released += 1
+    return released
 
 
 def engine_lease(db, project_id: str) -> dict[str, Any] | None:

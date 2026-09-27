@@ -25,6 +25,7 @@ COMPETITION_SCHEMA = (
         id TEXT PRIMARY KEY,
         identity_key TEXT NOT NULL,
         external_id TEXT NOT NULL,
+        run_id TEXT REFERENCES competition_runs(id),
         project_id TEXT UNIQUE REFERENCES projects(id),
         state TEXT NOT NULL DEFAULT 'discovered',
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -33,7 +34,7 @@ COMPETITION_SCHEMA = (
         wrong_count INTEGER NOT NULL DEFAULT 0 CHECK (wrong_count >= 0),
         next_submission_at TIMESTAMPTZ,
         instance_generation BIGINT NOT NULL DEFAULT 0,
-        UNIQUE (identity_key, external_id),
+        UNIQUE (identity_key, external_id, run_id),
         CHECK ((first_assigned_at IS NULL AND deadline_at IS NULL) OR
           (first_assigned_at IS NOT NULL AND deadline_at = first_assigned_at + interval '5 hours'))
     )""",
@@ -42,6 +43,9 @@ COMPETITION_SCHEMA = (
         challenge_id TEXT NOT NULL REFERENCES competition_challenges(id),
         PRIMARY KEY (run_id, challenge_id)
     )""",
+    "ALTER TABLE competition_challenges ADD COLUMN IF NOT EXISTS run_id TEXT REFERENCES competition_runs(id)",
+    "ALTER TABLE competition_challenges DROP CONSTRAINT IF EXISTS competition_challenges_identity_key_external_id_key",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_competition_challenge_identity_run ON competition_challenges(identity_key,external_id,run_id)",
     """CREATE TABLE IF NOT EXISTS competition_sessions (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES competition_runs(id),

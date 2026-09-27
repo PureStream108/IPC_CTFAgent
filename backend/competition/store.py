@@ -61,23 +61,28 @@ class CompetitionStore:
         )
 
     def renew_engine_lease(
-        self, project_id: str, kind: str, owner: str, *, seconds: int = 60
+        self, project_id: str, kind: str, owner: str, *, epoch: int,
+        seconds: int = 60
     ) -> bool:
         from backend.core.engine_lease import renew_engine_lease
 
         return renew_engine_lease(
-            self.db, project_id, kind, owner, seconds=seconds
+            self.db, project_id, kind, owner, epoch=epoch, seconds=seconds
         )
 
-    def release_engine_lease(self, project_id: str, kind: str, owner: str) -> bool:
+    def release_engine_lease(
+        self, project_id: str, kind: str, owner: str, *, epoch: int
+    ) -> bool:
         from backend.core.engine_lease import release_engine_lease
 
-        return release_engine_lease(self.db, project_id, kind, owner)
+        return release_engine_lease(self.db, project_id, kind, owner, epoch=epoch)
 
-    def release_engine_leases_for_owner(self, kind: str, owner: str) -> int:
+    def release_engine_leases_for_owner(
+        self, kind: str, owner: str, *, epochs: dict[str, int]
+    ) -> int:
         from backend.core.engine_lease import release_engine_leases_for_owner
 
-        return release_engine_leases_for_owner(self.db, kind, owner)
+        return release_engine_leases_for_owner(self.db, kind, owner, epochs=epochs)
 
     def engine_lease(self, project_id: str) -> dict | None:
         from backend.core.engine_lease import engine_lease
@@ -112,6 +117,13 @@ class CompetitionStore:
                 (new_id(), workflow_id, identity_key, idempotency_key, Jsonb(snapshot)),
             ).fetchone()
 
+    def run_by_idempotency(self, idempotency_key: str) -> dict | None:
+        with self.db.connect() as connection:
+            return connection.execute(
+                "SELECT * FROM competition_runs WHERE idempotency_key=%s",
+                (idempotency_key,),
+            ).fetchone()
+
     def register_challenge(self, run_id: str, external_id: str, metadata: dict) -> dict:
         if not external_id.strip():
             raise ValueError("external id is required")
@@ -120,20 +132,35 @@ class CompetitionStore:
             run = connection.execute("SELECT * FROM competition_runs WHERE id=%s", (run_id,)).fetchone()
             if run is None:
                 raise KeyError(run_id)
-            row = connection.execute(
-                """INSERT INTO competition_challenges (id,identity_key,external_id,metadata)
-                   VALUES (%s,%s,%s,%s) ON CONFLICT (identity_key,external_id)
-                   DO UPDATE SET metadata=competition_challenges.metadata || EXCLUDED.metadata
-                   RETURNING *""",
-                (new_id(), run["identity_key"], external_id, Jsonb(metadata)),
+            existing = connection.execute(
+                """SELECT c.* FROM competition_challenges c
+                   JOIN competition_run_challenges rc ON rc.challenge_id=c.id
+                   WHERE rc.run_id=%s AND c.external_id=%s FOR UPDATE""",
+                (run_id, external_id),
             ).fetchone()
+            if existing is not None:
+                row = connection.execute(
+                    """UPDATE competition_challenges SET metadata=metadata || %s
+                       WHERE id=%s RETURNING *""",
+                    (Jsonb(metadata), existing["id"]),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """INSERT INTO competition_challenges
+                       (id,identity_key,external_id,run_id,metadata)
+                       VALUES (%s,%s,%s,%s,%s) RETURNING *""",
+                    (new_id(), run["identity_key"], external_id, run_id, Jsonb(metadata)),
+                ).fetchone()
             connection.execute(
                 """INSERT INTO competition_run_challenges (run_id,challenge_id)
                    VALUES (%s,%s) ON CONFLICT DO NOTHING""", (run_id, row["id"]),
             )
             return row
 
-    def transition_run(self, run_id: str, status: str, *, revision: int) -> dict:
+    def transition_run(
+        self, run_id: str, status: str, *, revision: int,
+        permit_active: bool = False,
+    ) -> dict:
         allowed = {
             "preflight": {"importing", "blocked", "stopped"},
             "importing": {"running", "blocked", "paused", "stopped"},
@@ -149,7 +176,7 @@ class CompetitionStore:
                 raise KeyError(run_id)
             if run["revision"] != revision or status not in allowed.get(run["status"], set()):
                 raise CompetitionConflict("stale revision or invalid run transition")
-            if status in {"finished", "stopped"}:
+            if status in {"finished", "stopped"} and not permit_active:
                 active = connection.execute(
                     "SELECT 1 FROM competition_assignments WHERE run_id=%s AND released_at IS NULL", (run_id,),
                 ).fetchone()
@@ -674,6 +701,22 @@ class CompetitionStore:
                 """SELECT c.* FROM competition_challenges c
                    JOIN competition_run_challenges rc ON rc.challenge_id=c.id
                    WHERE rc.run_id=%s ORDER BY c.external_id,c.id""",
+                (run_id,),
+            ).fetchall()
+
+    def restorable_seats(self, run_id: str) -> list[dict]:
+        """Released solver seats of a run, newest first per challenge/role.
+
+        A paused run releases every seat.  Resuming restores the original
+        Member<->challenge pairing so each solver continues its own durable
+        session instead of being scattered onto unfamiliar challenges.
+        """
+        with self.db.connect() as connection:
+            return connection.execute(
+                """SELECT DISTINCT ON (a.challenge_id, a.role) a.challenge_id, a.member, a.role
+                     FROM competition_assignments a
+                    WHERE a.run_id=%s AND a.released_at IS NOT NULL AND a.role<>'wp'
+                    ORDER BY a.challenge_id, a.role DESC, a.id DESC""",
                 (run_id,),
             ).fetchall()
 

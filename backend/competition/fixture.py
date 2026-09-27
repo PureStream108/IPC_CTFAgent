@@ -34,6 +34,11 @@ class FixturePlatform:
     def identity(self) -> str:
         return "fixture://competition/team"
 
+    @property
+    def supports_submit(self) -> bool:
+        """Expose the same explicit write capability as production adapters."""
+        return True
+
     def preflight(self) -> list[PlatformChallenge]:
         return self.challenges()
 

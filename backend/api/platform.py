@@ -12,10 +12,11 @@ from pydantic import BaseModel, ConfigDict
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.state import AppState
-from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
+from backend.platform.adapter import PlatformAdapter
+from backend.platform.factory import build_adapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient, Ret2ShellError
-from backend.platform.gzctf import GZCTFAdapter, GZCTFClient, GZCTFError
+from backend.platform.gzctf import GZCTFError
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
@@ -35,16 +36,19 @@ class ImportRequest(ChallengeRequest):
 
 
 def _build_adapter(mapping: FieldMapping) -> PlatformAdapter:
+    # Keep the legacy client injection seam used by the standalone ret2shell
+    # preview tests; the adapter implementation remains platform-owned.
     if mapping.platform == "ret2shell":
-        client = Ret2ShellClient(base_url=mapping.list_url, game_id=mapping.game_id)
         return Ret2ShellAdapter(
-            client,
+            Ret2ShellClient(base_url=mapping.list_url, game_id=mapping.game_id),
             game_id=mapping.game_id or None,
             category_map=mapping.category_map,
         )
-    if mapping.platform == "gzctf":
-        return GZCTFAdapter(GZCTFClient(), mapping)
-    return HttpJsonAdapter(mapping)
+    return build_adapter(
+        mapping,
+        request_get=requests.get,
+        base_url=mapping.list_url or None,
+    )
 
 
 def _fetch(mapping: FieldMapping) -> tuple[PlatformAdapter, list[PlatformChallenge]]:

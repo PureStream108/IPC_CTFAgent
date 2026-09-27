@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -29,6 +30,7 @@ _SESSION_ID_RE = re.compile(r"^ops_[a-f0-9]{16}$")
 _SENSITIVE_FIELD_RE = re.compile(
     r"(?i)\b(?:authorization|api[ _-]?key|token|cookie|password|secret)\b\s*[:=]\s*[^\s,;]+"
 )
+_COMPETITION_SERVICE_LOCK = threading.Lock()
 
 
 def build_ipc_mcp(state_provider: Callable[[], AppState]) -> MCPServer:
@@ -56,7 +58,7 @@ operator request.""",
     )
     tools = _Tools(state_provider)
 
-    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store.")
+    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store; for native GZCTF use secret_name=gzctf_token (or gzctf_username/gzctf_password).")
     def question(operation_key: str, title: str, options: list[str] | None = None,
                  workflow_id: str | None = None, secret_name: str | None = None,
                  ctx: Context | None = None) -> dict:
@@ -66,6 +68,55 @@ operator request.""",
             raise ValueError("question requires an IPC session")
         return QuestionStore(state_provider()).create(session_id=session_id, operation_key=operation_key,
                     title=title, options=options, workflow_id=workflow_id, secret_name=secret_name)
+
+    @server.tool(
+        name="ipc_question_result",
+        description=(
+            "Read the durable answer for an IPC question after the operator responds. "
+            "The question must belong to the current IPC session; sensitive answers are "
+            "returned only as a workflow secret reference."
+        ),
+    )
+    def question_result(question_id: str, ctx: Context | None = None) -> dict[str, Any]:
+        from backend.ops.questions import QuestionStore
+
+        session_id = _session_id_from_context(ctx)
+        if not session_id:
+            raise ValueError("question requires an IPC session")
+        return QuestionStore(state_provider()).result(question_id, session_id)
+
+    @server.tool(
+        name="ipc_platform_preflight",
+        description=(
+            "Run the confirmed platform workflow preflight through IPC. This checks "
+            "authentication and adapter capabilities before any challenge import or "
+            "Member allocation is started."
+        ),
+    )
+    def platform_preflight(workflow_id: str) -> dict[str, Any]:
+        return tools.platform_preflight(workflow_id)
+
+    @server.tool(
+        name="ipc_start_platform",
+        description=(
+            "Start one confirmed platform workflow through IPC's CompetitionService. "
+            "The idempotency key is required; preflight, import, and the ten Member "
+            "seat allocation are owned by IPC."
+        ),
+    )
+    def start_platform(
+        workflow_id: str,
+        idempotency_key: str,
+        select: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return tools.start_platform(workflow_id, idempotency_key, select)
+
+    @server.tool(
+        name="ipc_platform_status",
+        description="Read a platform run snapshot and current IPC Member seat allocation.",
+    )
+    def platform_status(run_id: str) -> dict[str, Any]:
+        return tools.platform_status(run_id)
 
     @server.tool(
         name="ipc_list_projects",
@@ -199,6 +250,77 @@ class _Tools:
 
     def list_projects(self) -> dict[str, Any]:
         return OpsToolExecutor(self.state).list_task_sandboxes()
+
+    def _competition(self):
+        """Return the single process-wide competition coordinator used by IPC.
+
+        The FastAPI lifespan normally creates this service.  The lazy fallback
+        keeps direct MCP embedding safe while preserving one coordinator per
+        AppState, so two MCP calls cannot create competing allocators.
+        """
+        service = getattr(self.state, "competition", None)
+        if service is not None:
+            return service
+        with _COMPETITION_SERVICE_LOCK:
+            service = getattr(self.state, "competition", None)
+            if service is None:
+                from backend.competition.service import CompetitionService
+
+                service = CompetitionService(self.state)
+                self.state.competition = service
+                service.start_worker()
+        return service
+
+    def platform_preflight(self, workflow_id: str) -> dict[str, Any]:
+        workflow_id = _required_text(workflow_id, "workflow_id", 200)
+        try:
+            result = self._competition().preflight(workflow_id)
+        except (KeyError, PermissionError, ValueError, RuntimeError) as exc:
+            return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+        return {"ok": True, "allocator": "ipc", **result}
+
+    def start_platform(
+        self,
+        workflow_id: str,
+        idempotency_key: str,
+        select: list[str] | None = None,
+    ) -> dict[str, Any]:
+        workflow_id = _required_text(workflow_id, "workflow_id", 200)
+        idempotency_key = _required_text(idempotency_key, "idempotency_key", 200)
+        if len(idempotency_key) < 8:
+            return {
+                "ok": False,
+                "workflow_id": workflow_id,
+                "error": "idempotency_key must contain at least 8 characters",
+            }
+        selected = [str(item) for item in select] if select is not None else None
+        try:
+            snapshot = self._competition().start(
+                workflow_id, idempotency_key, select=selected
+            )
+        except (KeyError, PermissionError, ValueError, RuntimeError) as exc:
+            return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+        return {
+            "ok": True,
+            "allocator": "ipc",
+            "workflow_id": workflow_id,
+            "run": snapshot.get("run", snapshot),
+            "capacity": snapshot.get("capacity"),
+            "message": (
+                "IPC owns platform synchronization and Member allocation. "
+                "Poll ipc_platform_status for the durable run snapshot."
+            ),
+        }
+
+    def platform_status(self, run_id: str) -> dict[str, Any]:
+        run_id = _required_text(run_id, "run_id", 200)
+        try:
+            service = self._competition()
+            run = service.store.run_snapshot(run_id)
+            members = service.store.member_snapshot(run_id)
+        except (KeyError, ValueError) as exc:
+            return {"ok": False, "run_id": run_id, "error": str(exc)}
+        return {"ok": True, "allocator": "ipc", "run": run, "members": members}
 
     def start_challenge(
         self,
