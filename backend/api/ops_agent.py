@@ -5,7 +5,7 @@ import threading
 from typing import Any, Literal
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,6 +13,7 @@ from backend.api.deps import get_state
 from backend.core.config import ApiFormat, ApiSurface, SelectedReasoningEffort
 from backend.core.state import AppState
 from backend.ops.network import NetworkPolicyError
+from backend.ops.attachments import MAX_UPLOAD_BYTES, OpsAttachmentStore
 from backend.ops.service import (
     OpsAgentNotConfigured,
     OpsAgentService,
@@ -41,6 +42,14 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     session_id: str | None = Field(default=None, pattern=r"^ops_[a-f0-9]{16}$")
     secrets: dict[str, str] = Field(default_factory=dict)
+    attachments: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("attachments")
+    @classmethod
+    def validate_attachments(cls, values: list[str]) -> list[str]:
+        if any(not isinstance(value, str) or not value.startswith("upload_") for value in values):
+            raise ValueError("invalid attachment id")
+        return values
 
 
 class ChatInterruptRequest(BaseModel):
@@ -147,6 +156,7 @@ def chat(body: ChatRequest, service: OpsAgentService = Depends(get_ops_service))
         message=body.message,
         session_id=body.session_id,
         secrets_values=body.secrets,
+        attachments=body.attachments,
     )
 
 
@@ -157,6 +167,7 @@ def chat_stream(body: ChatRequest, service: OpsAgentService = Depends(get_ops_se
             message=body.message,
             session_id=body.session_id,
             secrets_values=body.secrets,
+            attachments=body.attachments,
         ):
             yield json.dumps(event, ensure_ascii=False) + "\n"
 
@@ -165,6 +176,28 @@ def chat_stream(body: ChatRequest, service: OpsAgentService = Depends(get_ops_se
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/uploads")
+async def upload_attachment(
+    file: UploadFile = File(...),
+    service: OpsAgentService = Depends(get_ops_service),
+):
+    """Upload platform API documentation for the next IPC message."""
+
+    if not file.filename:
+        raise HTTPException(400, "attachment filename is required")
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"attachment exceeds {MAX_UPLOAD_BYTES} bytes")
+    try:
+        result = OpsAttachmentStore(service.store.root).save(
+            file.file,
+            filename=file.filename,
+            content_type=file.content_type or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    return result
 
 
 @router.post("/chat/interrupt")

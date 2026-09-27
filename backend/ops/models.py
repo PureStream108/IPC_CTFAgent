@@ -101,6 +101,7 @@ class ChallengeMappingSpec(BaseModel):
     track_id_field: str = ""
     pagination_path: str = ""
     max_pages: int = Field(default=100, ge=1, le=1000)
+    max_challenges: int = Field(default=0, ge=0, le=1000)
     category_map: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
     headers: list[SecretHeader] = Field(default_factory=list)
@@ -171,6 +172,7 @@ class ChallengeMappingSpec(BaseModel):
             track_id_field=self.track_id_field,
             pagination_path=self.pagination_path,
             max_pages=self.max_pages,
+            max_challenges=self.max_challenges,
             category_map=self.category_map,
             headers=headers,
             attachment_base_url=self.attachment_base_url,
@@ -271,6 +273,26 @@ class PlatformWorkflowSpec(BaseModel):
         if self.submit is not None:
             names.update(header.secret_name for header in self.submit.headers)
             names.update(_template_secret_names(self.submit.json_template))
+        return names
+
+    def allowed_secret_names(self) -> set[str]:
+        """Return required secrets plus credentials for native adapters.
+
+        Native clients authenticate outside the declarative HTTP header/template
+        model. Their credentials remain optional because deployment environment
+        variables may already provide them.
+        """
+
+        names = self.required_secret_names()
+        if self.challenges.platform == "gzctf":
+            names.update(
+                {
+                    "gzctf_token",
+                    "gzctf_username",
+                    "gzctf_password",
+                    "platform_token",
+                }
+            )
         return names
 
 

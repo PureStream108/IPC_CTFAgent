@@ -24,11 +24,11 @@ from backend.ops.models import (
 )
 from backend.ops.network import WorkflowHttpClient
 from backend.ops.claude_runner import ClaudeCodeRunner, ClaudeCodeRunnerError
+from backend.ops.attachments import OpsAttachmentStore
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor, tool_prompt
-from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
-from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient
-from backend.platform.gzctf import GZCTFAdapter, GZCTFClient
+from backend.platform.adapter import PlatformAdapter
+from backend.platform.factory import build_adapter
 
 _JSON_DECODER = json.JSONDecoder()
 _MAX_TOOL_ROUNDS = 8
@@ -54,6 +54,12 @@ The only executable artifact for an external platform remains a declarative work
 Workflows are drafts until the human explicitly confirms their exact URL, HTTP method, and JSON
 template. The operator may provide credentials directly or by a {{secret.NAME}} alias. Use them
 only for the requested operation and avoid repeating credentials in replies or logs.
+
+For a native GZCTF workflow, do not put the participant cookie in the workflow or ordinary chat.
+If IPC_GZ_TOKEN is not already configured, ask with ipc_question using the confirmed workflow id
+and secret_name=gzctf_token (or ask for gzctf_username and gzctf_password when a browser cookie
+is unavailable). The answer is stored as a workflow secret and the GZCTF adapter performs the
+authenticated platform requests.
 
 Return exactly one JSON object:
 {"reply":"helpful response","workflow":null}
@@ -249,12 +255,17 @@ class OpsAgentService:
         message: str,
         session_id: str | None = None,
         secrets_values: dict[str, str] | None = None,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         config = self.store.load_llm_config()
         if not config.configured:
             raise OpsAgentNotConfigured("configure the IPC API before starting a chat")
         normalized_secrets = _normalize_secrets(secrets_values or {})
         safe_message = _replace_secret_values(message.strip(), normalized_secrets)
+        safe_message += _replace_secret_values(
+            OpsAttachmentStore(self.store.root).prompt_context(attachments),
+            normalized_secrets,
+        )
         if session_id is None:
             session_id = self.store.create_session(_session_title(safe_message))["id"]
         else:
@@ -478,6 +489,7 @@ class OpsAgentService:
         message: str,
         session_id: str | None = None,
         secrets_values: dict[str, str] | None = None,
+        attachments: list[str] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Start an IPC run and follow its durable event stream.
 
@@ -498,6 +510,7 @@ class OpsAgentService:
                     message=message,
                     session_id=session_id,
                     secrets_values=secrets_values,
+                    attachments=attachments,
                 )
             elif config.api_format == "openai":
                 session_id, run_id = self._start_api_run(
@@ -505,6 +518,7 @@ class OpsAgentService:
                     message=message,
                     session_id=session_id,
                     secrets_values=secrets_values,
+                    attachments=attachments,
                 )
             else:
                 # Preserve the existing synchronous compatibility path for
@@ -514,6 +528,7 @@ class OpsAgentService:
                     message=message,
                     session_id=session_id,
                     secrets_values=secrets_values,
+                    attachments=attachments,
                 )
                 yield {"type": "session", "session_id": result["session_id"]}
                 yield {"type": "complete", "response": result}
@@ -531,9 +546,14 @@ class OpsAgentService:
         message: str,
         session_id: str | None,
         secrets_values: dict[str, str] | None,
+        attachments: list[str] | None,
     ) -> tuple[str, str]:
         normalized_secrets = _normalize_secrets(secrets_values or {})
         safe_message = _replace_secret_values(message.strip(), normalized_secrets)
+        safe_message += _replace_secret_values(
+            OpsAttachmentStore(self.store.root).prompt_context(attachments),
+            normalized_secrets,
+        )
         if session_id is None:
             session_id = self.store.create_session(_session_title(safe_message))["id"]
         else:
@@ -656,11 +676,16 @@ class OpsAgentService:
         message: str,
         session_id: str | None,
         secrets_values: dict[str, str] | None,
+        attachments: list[str] | None,
     ) -> tuple[str, str]:
         if not self.claude_runner.enabled:
             raise OpsAgentUpstreamError("IPC runtime is not configured")
         normalized_secrets = _normalize_secrets(secrets_values or {})
         safe_message = _replace_secret_values(message.strip(), normalized_secrets)
+        safe_message += _replace_secret_values(
+            OpsAttachmentStore(self.store.root).prompt_context(attachments),
+            normalized_secrets,
+        )
         if session_id is None:
             session_id = self.store.create_session(_session_title(safe_message))["id"]
         else:
@@ -1214,6 +1239,7 @@ class OpsAgentService:
             "track_id_field": challenge.track_id_field,
             "pagination_path": challenge.pagination_path,
             "max_pages": challenge.max_pages,
+            "max_challenges": challenge.max_challenges,
             "category_map": challenge.category_map,
             "attachment_base_url": challenge.attachment_base_url,
             "headers": _header_view(challenge.headers, configured),
@@ -1236,6 +1262,8 @@ class OpsAgentService:
                 "query_url": spec.submit.query_url,
             }
         required = sorted(spec.required_secret_names())
+        optional_native = sorted(spec.allowed_secret_names() - set(required))
+        secret_names = required + [name for name in optional_native if name in configured]
         return {
             "id": workflow["id"],
             "session_id": workflow["session_id"],
@@ -1258,7 +1286,7 @@ class OpsAgentService:
             },
             "secrets": [
                 {"name": name, "secret_set": bool(configured.get(name))}
-                for name in required
+                for name in secret_names
             ],
             "confirmation_phrase": f"CONFIRM WORKFLOW {workflow['id']}",
         }
@@ -1267,28 +1295,13 @@ class OpsAgentService:
         secrets_values = self.store.workflow_secrets(workflow_id)
         headers = _resolve_headers(spec.challenges.headers, secrets_values)
         mapping = spec.challenges.to_field_mapping(headers)
-        if mapping.platform == "ret2shell":
-            # Credentials come from IPC_R2S_* environment variables inside the
-            # backend process; the workflow spec carries no secrets.
-            return Ret2ShellAdapter(
-                Ret2ShellClient(game_id=mapping.game_id),
-                game_id=mapping.game_id or None,
-                category_map=mapping.category_map,
-                max_attachment_bytes=spec.max_attachment_bytes,
-            )
-        if mapping.platform == "gzctf":
-            # GZCTF uses the participant cookie session.  The username and
-            # password are deployment secrets (IPC_GZ_*) and are never part
-            # of the workflow spec or competition run snapshot.
-            return GZCTFAdapter(
-                GZCTFClient(),
-                mapping,
-                max_attachment_bytes=spec.max_attachment_bytes,
-            )
-        return HttpJsonAdapter(
+        return build_adapter(
             mapping,
             request_get=self._http_client(spec).get,
             max_attachment_bytes=spec.max_attachment_bytes,
+            credentials=secrets_values,
+            competition_id=spec.competition_id,
+            team_id=spec.team_id,
         )
 
     def _http_client(self, spec: PlatformWorkflowSpec) -> WorkflowHttpClient:
@@ -1326,6 +1339,8 @@ class OpsAgentService:
         workflow_id: str,
         spec: PlatformWorkflowSpec,
         select: list[str] | None,
+        *,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         adapter = self._adapter(workflow_id, spec)
         challenges = adapter.fetch_challenges()
@@ -1352,12 +1367,14 @@ class OpsAgentService:
                 with self.state.db.connect() as connection:
                     connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("workflow-import:" + workflow_id,))
                     for challenge in selected:
-                        existing = connection.execute(
-                            """SELECT p.id,p.title,p.category FROM projects p
-                               JOIN workflow_challenges w ON w.project_id=p.id
-                               WHERE w.workflow_id=%s AND w.external_id=%s""",
-                            (workflow_id, challenge.external_id),
-                        ).fetchone()
+                        existing = None
+                        if run_id is None:
+                            existing = connection.execute(
+                                """SELECT p.id,p.title,p.category FROM projects p
+                                   JOIN workflow_challenges w ON w.project_id=p.id
+                                   WHERE w.workflow_id=%s AND w.external_id=%s""",
+                                (workflow_id, challenge.external_id),
+                            ).fetchone()
                         if existing is not None:
                             imported.append({"external_id": challenge.external_id, "project_id": existing["id"],
                                              "title": existing["title"], "category": existing["category"], "created": False})
@@ -1375,10 +1392,11 @@ class OpsAgentService:
                             target = destination / path.name
                             path.replace(target)
                             graph_store.create_attachment(connection, project_id, target.name, str(target))
-                        connection.execute(
-                            "INSERT INTO workflow_challenges (workflow_id,external_id,project_id) VALUES (%s,%s,%s)",
-                            (workflow_id, challenge.external_id, project_id),
-                        )
+                        if run_id is None:
+                            connection.execute(
+                                "INSERT INTO workflow_challenges (workflow_id,external_id,project_id) VALUES (%s,%s,%s)",
+                                (workflow_id, challenge.external_id, project_id),
+                            )
                         imported.append({"external_id": challenge.external_id, "project_id": project_id,
                                          "title": challenge.title, "category": challenge.category, "created": True})
             except Exception:

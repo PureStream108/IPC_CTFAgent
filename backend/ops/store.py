@@ -495,7 +495,7 @@ class OpsStore:
 
     def save_workflow_secrets(self, workflow_id: str, values: dict[str, str]) -> None:
         workflow = self.get_workflow(workflow_id)
-        allowed = workflow["spec"].required_secret_names()
+        allowed = workflow["spec"].allowed_secret_names()
         unknown = sorted(set(values) - allowed)
         if unknown:
             raise ValueError(f"unknown workflow secret names: {unknown}")
