@@ -4,6 +4,7 @@ import ast
 import json
 import random
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -235,9 +236,18 @@ class OpenAICompatibleAdapter(BaseAdapter):
         self._last_response_meta: dict[str, Any] = {}
         self._surface_cache: str | None = None
         self._profile_cache: dict[tuple[Any, ...], _OpenAIProfile] = {}
+        self._provider_session = f"ipc-{name}-{uuid.uuid4().hex[:16]}"
 
     def _endpoint(self, surface: str) -> str:
         return _openai_endpoint(self.config.base_url, surface)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        headers.update(opencode_provider_headers(self.config.base_url, self._provider_session))
+        return headers
 
     def health(self) -> dict:
         try:
@@ -277,11 +287,10 @@ class OpenAICompatibleAdapter(BaseAdapter):
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
-            # Forced-reasoning models (e.g. kimi-for-coding) spend the output
-            # budget on hidden reasoning before any content; 4096 was observed
-            # being fully consumed by reasoning alone on large contexts, leaving
-            # an empty response with finish_reason=length.
-            max_tokens=16384 if reasoning_model else (4096 if deepseek else None),
+            # Output length is intentionally uncapped: a reasoning model may
+            # spend the whole budget on hidden reasoning before emitting the
+            # action JSON, so the provider decides the generation length.
+            max_tokens=None,
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -302,7 +311,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             [*messages, {"role": "user", "content": repair_message}],
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if not reasoning_model else None,
-            max_tokens=16384 if reasoning_model else (4096 if deepseek else 1024),
+            max_tokens=None,
             structured=True,
             reasoning_effort=reasoning_effort,
             thinking="disabled" if deepseek else None,
@@ -451,10 +460,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
                 )
                 resp = _post_with_retries(
                     self._endpoint(surface),
-                    headers={
-                        "Authorization": f"Bearer {self.config.api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=self._headers(),
                     json_body=request_body,
                     timeout=timeout,
                     provider=self.config.api_format,
@@ -915,6 +921,25 @@ def _is_reasoning_model(model: str) -> bool:
 def _is_native_openai(base_url: str) -> bool:
     host = (urlsplit(base_url).hostname or "").lower()
     return host == "api.openai.com" or host.endswith(".api.openai.com")
+
+
+_CLIENT_USER_AGENT = "IPC_CTFAgent/1.0"
+
+
+def _is_opencode_gateway(base_url: str) -> bool:
+    host = (urlsplit(base_url).hostname or "").lower()
+    return host == "opencode.ai" or host.endswith(".opencode.ai")
+
+
+def opencode_provider_headers(base_url: str, session_id: str) -> dict[str, str]:
+    """Headers required by the OpenCode Go/Zen gateway routing layer."""
+
+    if not _is_opencode_gateway(base_url):
+        return {}
+    return {
+        "x-opencode-session": session_id,
+        "User-Agent": _CLIENT_USER_AGENT,
+    }
 
 
 def _prefers_responses(base_url: str, model: str) -> bool:

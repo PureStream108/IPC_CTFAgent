@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import requests
 
-from backend.members.adapters import _anthropic_endpoint, _openai_endpoint
+from backend.members.adapters import (
+    _anthropic_endpoint,
+    _openai_endpoint,
+    opencode_provider_headers,
+)
 
 
 @dataclass
@@ -54,6 +59,7 @@ class ConversationAdapter:
         self.surface = "anthropic" if config.api_format in {"anthropic", "claudecode"} else (
             "responses" if config.api_surface == "responses" else "chat_completions"
         )
+        self._provider_session = f"ipc-session-{uuid.uuid4().hex[:16]}"
 
     def tool_result(self, call: ToolCall, output: dict) -> dict:
         text = json.dumps(output, ensure_ascii=False)
@@ -69,6 +75,7 @@ class ConversationAdapter:
         if config.api_format == "mock":
             return Turn([{"role": "assistant", "content": "Mock has no queued action."}], text="Mock has no queued action.")
         headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+        headers.update(opencode_provider_headers(config.base_url, self._provider_session))
         body: dict[str, Any] = {"model": config.model, "stream": True}
         if self.surface == "anthropic":
             headers.update({"x-api-key": config.api_key, "anthropic-version": "2023-06-01"})
@@ -111,7 +118,7 @@ class ConversationAdapter:
                 if kind == "response.output_text.delta":
                     delta_text = event.get("delta", "")
                 elif kind == "response.completed":
-                    output = event["response"]["output"]
+                    output = (event.get("response") or {}).get("output") or []
                     complete = True
             elif self.surface == "anthropic":
                 index = event.get("index", 0)
@@ -120,7 +127,7 @@ class ConversationAdapter:
                     if blocks[index].get("type") == "tool_use":
                         blocks[index]["_json"] = ""
                 elif kind == "content_block_delta":
-                    delta = event["delta"]
+                    delta = event.get("delta") or {}
                     if delta.get("type") == "text_delta":
                         delta_text = delta.get("text", "")
                         blocks[index]["text"] = blocks[index].get("text", "") + delta_text
@@ -135,17 +142,19 @@ class ConversationAdapter:
                 elif kind == "message_stop":
                     complete = True
             else:
-                for choice in event.get("choices", []):
+                for choice in event.get("choices") or []:
                     if choice.get("index", 0) != 0:
                         continue
-                    delta = choice.get("delta", {})
+                    delta = choice.get("delta") or {}
                     delta_text += delta.get("content") or ""
-                    for item in delta.get("tool_calls", []):
-                        entry = calls.setdefault(item["index"], {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    for item in delta.get("tool_calls") or []:
+                        item = item or {}
+                        entry = calls.setdefault(item.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                         if item.get("id"):
                             entry["id"] = item["id"]
+                        function = item.get("function") or {}
                         for field in ("name", "arguments"):
-                            entry["function"][field] += item.get("function", {}).get(field, "")
+                            entry["function"][field] += function.get(field) or ""
                     reason = choice.get("finish_reason")
                     if reason in {"stop", "tool_calls"}:
                         complete = True
@@ -158,7 +167,7 @@ class ConversationAdapter:
             raise RuntimeError("provider stream disconnected before completion")
         result_calls = []
         if self.surface == "responses":
-            for item in output:
+            for item in output or []:
                 if item.get("type") == "function_call":
                     result_calls.append(ToolCall(item["call_id"], item["name"], json.loads(item["arguments"])))
             messages = output

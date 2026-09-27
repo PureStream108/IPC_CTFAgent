@@ -46,7 +46,7 @@ class SessionRunner:
         emit: Callable[[str], None] | None = None,
         compressor: Callable[[list[dict[str, Any]]], tuple[str, list[dict[str, Any]]]] | None = None,
         before_turn: Callable[[SessionRunner], list[dict[str, Any]]] | None = None,
-        context_bytes: int = 512_000,
+        context_bytes: int = 1_000_000,
         repeated_batch_limit: int = 8,
     ) -> None:
         self.store = store
@@ -223,15 +223,65 @@ class SessionRunner:
                 break
         return [call for call_id, call in calls.items() if call_id not in completed]
 
+    def _completed_call_ids(self) -> set[str]:
+        completed: set[str] = set()
+        after = 0
+        while True:
+            events = self.store.events(self.session_id, after=after, limit=500)
+            if not events:
+                break
+            for event in events:
+                after = event["sequence"]
+                if event["kind"] == "tool_result":
+                    payload = event.get("payload") or {}
+                    if payload.get("id"):
+                        completed.add(str(payload["id"]))
+            if len(events) < 500:
+                break
+        return completed
+
+    def _dangling_provider_calls(
+        self, messages: list[dict[str, Any]], completed: set[str], known: list[ToolCall]
+    ) -> list[ToolCall]:
+        """Find tool calls in provider history that never got a result.
+
+        A batch containing a terminal action cancels the loop after the first
+        call, so the remaining calls of that batch are persisted inside the
+        assistant message without a matching ``tool_call`` event.  A provider
+        rejects that transcript on the next turn; repair it with an explicit
+        unknown result so the session stays replayable.
+        """
+        seen = {call.id for call in known}
+        found: list[ToolCall] = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for raw in message.get("tool_calls") or []:
+                if not isinstance(raw, dict):
+                    continue
+                call_id = str(raw.get("id") or "")
+                if not call_id or call_id in completed or call_id in seen:
+                    continue
+                function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+                found.append(
+                    ToolCall(call_id, str(function.get("name") or ""), {})
+                )
+                seen.add(call_id)
+        return found
+
     def _restore_unknown_side_effects(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Fence calls interrupted by a worker crash before the result event."""
+        """Fence calls interrupted by a crash or cancellation before the result event."""
         if self.adapter is None:
             return messages
         pending = self._pending_tool_calls()
-        for call in pending:
+        dangling = self._dangling_provider_calls(
+            messages, self._completed_call_ids(), pending
+        )
+        repaired = [*pending, *dangling]
+        for call in repaired:
             unknown = {
                 "status": "unknown",
-                "reason": "worker restarted before the side-effect result was persisted",
+                "reason": "worker restarted or cancelled before the side-effect result was persisted",
             }
             result_message = self.adapter.tool_result(call, unknown)
             self._append(
@@ -239,10 +289,10 @@ class SessionRunner:
                 {"id": call.id, "message": result_message},
             )
             messages.append(result_message)
-        if pending:
+        if repaired:
             self.store.save_checkpoint(
                 self.assignment,
-                {"status": "unknown_side_effect", "calls": [call.id for call in pending]},
+                {"status": "unknown_side_effect", "calls": [call.id for call in repaired]},
             )
         return messages
 

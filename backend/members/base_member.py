@@ -30,6 +30,7 @@ from backend.members.adapters import (
     ProviderError,
 )
 from backend.competition.runtime import SessionRunner
+from backend.competition.store import CompetitionConflict
 from backend.competition.conversation import ConversationAdapter, ToolCall
 from backend.competition.transport import ReconSubscriber
 from backend.memory.memory_search import search as mem_search
@@ -103,10 +104,102 @@ class DispatchResult:
     graph_action: str | None = None
     invalid_action: bool = False
     invalid_knowledge: list[str] | None = None
+    # Latest observation produced by the action. The provider-native tool
+    # loop returns it as the tool result so the model actually sees command
+    # output instead of only a status envelope.
+    observation: str | None = None
 
 
 class _IntentLeaseLost(RuntimeError):
     """Abort the surrounding transaction when a member loses its fence."""
+
+
+_NATIVE_HISTORY_TARGET_BYTES = 512_000
+_NATIVE_HISTORY_MIN_BLOCKS = 6
+_NATIVE_TOOL_CLIP_BYTES = 8_000
+_NATIVE_TOOL_CLIP_KEEP = 3_000
+
+
+def _history_bytes(messages: list[dict[str, Any]]) -> int:
+    return len(
+        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+
+
+def _history_blocks(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group an assistant tool-call message with the tool results it owns."""
+
+    blocks: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        block = [message]
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and message.get("tool_calls")
+        ):
+            call_ids = {
+                str(call.get("id"))
+                for call in message.get("tool_calls") or []
+                if isinstance(call, dict)
+            }
+            index += 1
+            while index < len(messages):
+                candidate = messages[index]
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("role") == "tool"
+                    and str(candidate.get("tool_call_id")) in call_ids
+                ):
+                    block.append(candidate)
+                    index += 1
+                    continue
+                break
+            blocks.append(block)
+            continue
+        index += 1
+        blocks.append(block)
+    return blocks
+
+
+def _clip_message_content(message: dict[str, Any], limit: int) -> None:
+    content = message.get("content")
+    if isinstance(content, str) and len(content) > limit:
+        message["content"] = content[:limit] + "\n[older output elided]"
+
+
+def compact_native_history(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Deterministically shrink a provider-native transcript to fit context.
+
+    Long tool outputs are elided first; when the transcript is still over the
+    target, the oldest complete blocks (an assistant tool-call message plus
+    its tool results) are dropped while the first user message and the most
+    recent exchanges stay intact so the next turn can continue.
+    """
+
+    kept = [dict(message) for message in messages]
+    for message in kept:
+        _clip_message_content(message, _NATIVE_TOOL_CLIP_BYTES)
+    if _history_bytes(kept) <= _NATIVE_HISTORY_TARGET_BYTES:
+        return "elided older tool outputs from the native history", kept
+
+    blocks = _history_blocks(kept)
+    head = blocks[:1]
+    tail = blocks[1:]
+    summary = "dropped the oldest native conversation blocks to fit the provider context"
+    while (
+        len(tail) > _NATIVE_HISTORY_MIN_BLOCKS
+        and _history_bytes(head + tail) > _NATIVE_HISTORY_TARGET_BYTES
+    ):
+        tail.pop(0)
+    compacted = [message for block in head + tail for message in block]
+    if _history_bytes(compacted) > _NATIVE_HISTORY_TARGET_BYTES:
+        for message in compacted:
+            _clip_message_content(message, _NATIVE_TOOL_CLIP_KEEP)
+    return summary, compacted
 
 
 class BaseMember:
@@ -660,6 +753,7 @@ class BaseMember:
             adapter,
             None,  # installed by _solve_with_native_session below
             assignment=self.deps.competition_assignment,
+            compressor=compact_native_history,
             system=(
                 f"You are Member {self.name}, a persistent {self.role_blurb}. "
                 "Use the member_action function for every investigation step. "
@@ -788,23 +882,57 @@ class BaseMember:
                 if result is not None:
                     state["result"] = result
                     runner.cancel.set()
-                return {
+                payload: dict[str, Any] = {
                     "status": "ok",
                     "graph_action": dispatched.graph_action,
                     "invalid_action": dispatched.invalid_action,
                     "terminal": result.status if result else None,
                 }
+                if dispatched.observation:
+                    payload["observation"] = dispatched.observation
+                return payload
 
         runner.executor = Executor()
         try:
             context = self._build_context(
                 project_id, intent_id, category, 0, is_initial, True
             )
-            initial = (
-                f"Begin the {category} challenge for intent {intent_id}. "
-                "Persist useful evidence and choose the next action.\n"
-                + json.dumps(context, ensure_ascii=False)
-            )
+            if is_initial:
+                initial = (
+                    f"Begin the {category} challenge for intent {intent_id}. "
+                    "Persist useful evidence and choose the next action.\n"
+                    + json.dumps(context, ensure_ascii=False)
+                )
+            else:
+                initial = (
+                    f"Continue the {category} challenge for intent {intent_id}. "
+                    "A previous attempt ended without a verified flag: do not "
+                    "repeat an earlier final answer or candidate flag; choose a "
+                    "different concrete analysis or exploit action now.\n"
+                    + json.dumps(context, ensure_ascii=False)
+                )
+                # A restored session ends with the previous attempt's
+                # conclusion, and the runner does not re-add the bootstrap
+                # prompt when history exists.  Record a durable continuation
+                # directive so the model does not just replay that final
+                # answer.  The payload is intentionally stable per intent: a
+                # retry must reuse the stored copy instead of failing with an
+                # event-key conflict.
+                try:
+                    runner.record_user_message(
+                        (
+                            f"New assigned intent {intent_id}. The previous attempt "
+                            "ended without a verified flag. Do not repeat an earlier "
+                            "final answer or candidate flag; choose a different "
+                            "concrete analysis or exploit action now with the "
+                            "member_action tool."
+                        ),
+                        event_key=f"session:user:{intent_id}",
+                    )
+                except CompetitionConflict:
+                    # The directive is already durable for this intent; the
+                    # model sees the stored copy on the restored history.
+                    pass
             native_result = await runner.run_async(initial)
         except ProviderError as exc:
             self._release(project_id, intent_id)
@@ -842,10 +970,19 @@ class BaseMember:
         if self._stop.is_set():
             self._release(project_id, intent_id)
             return SolveResult(status="stopped", steps=state["steps"])
-        self._release(project_id, intent_id)
         status = "done" if state["graph_actions"] or native_result.status == "idle" else "stalled"
         if state["error"]:
             status = "stalled"
+        if status == "done" and not state["graph_actions"]:
+            # No graph change and no further actions.  Close the assigned
+            # intent so the coordinator can plan a new direction instead of
+            # redispatching the same finished intent forever.
+            self._conclude_with_description(
+                project_id,
+                intent_id,
+                "member reported no further actions for this intent",
+            )
+        self._release(project_id, intent_id)
         self.deps.logger.project(
             "member_task_finished", project_id, member=self.name,
             intent=intent_id, status=status, steps=state["steps"],
@@ -878,10 +1015,12 @@ class BaseMember:
                     intent=intent_id,
                     keys=sorted(action.args),
                 )
-                self._observe("[invalid bash action omitted: missing non-empty `command`]")
-                return DispatchResult(invalid_action=True)
+                text = "[invalid bash action omitted: missing non-empty `command`]"
+                self._observe(text)
+                return DispatchResult(invalid_action=True, observation=text)
             res = d.sandbox.exec(cmd, timeout=60)
-            self._observe(f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip())
+            text = f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip()
+            self._observe(text)
             self._observe_webui_links(project_id, cmd, res.stdout, res.stderr)
             d.logger.tool(
                 "bash",
@@ -895,8 +1034,10 @@ class BaseMember:
             missing_command = self._missing_command_from_result(cmd, res.stderr)
             if missing_command:
                 knowledge = self._record_unavailable_cli(project_id, intent_id, missing_command)
-                return DispatchResult(invalid_action=True, invalid_knowledge=knowledge)
-            return DispatchResult()
+                return DispatchResult(
+                    invalid_action=True, invalid_knowledge=knowledge, observation=text
+                )
+            return DispatchResult(observation=text)
         if kind == "tool":
             server = self._string_arg(action.args.get("server", ""))
             tool = self._string_arg(action.args.get("tool", ""))
@@ -911,13 +1052,15 @@ class BaseMember:
                     intent=intent_id,
                     keys=sorted(action.args),
                 )
-                self._observe("[invalid tool action omitted: missing `server` or `tool`]")
-                return DispatchResult(invalid_action=True)
+                text = "[invalid tool action omitted: missing `server` or `tool`]"
+                self._observe(text)
+                return DispatchResult(invalid_action=True, observation=text)
             try:
                 out = await mcp_session.call_tool(server, tool, args)
             except Exception as exc:
                 out = {"error": str(exc)}
-            self._observe(f"[mcp:{server}.{tool}] {out}")
+            text = f"[mcp:{server}.{tool}] {out}"[:5000]
+            self._observe(text)
             artifact = out if isinstance(out, dict) and out.get("artifact_id") else {}
             sensitive_operation = bool(
                 server == "browser"
@@ -938,21 +1081,23 @@ class BaseMember:
                 artifact_size=artifact.get("size"),
                 artifact_sha256=artifact.get("sha256"),
             )
-            return DispatchResult()
+            return DispatchResult(observation=text)
         if kind == "memory":
             query = self._string_arg(action.args.get("query", ""))
             hits = mem_search(d.memory, query, limit=5)
-            self._observe(f"[memory:{query}] " + "; ".join(f"{m.title}" for m, _ in hits))
+            text = f"[memory:{query}] " + "; ".join(f"{m.title}" for m, _ in hits)
+            self._observe(text)
             d.logger.memory("search", project_id, member=self.name, query=query, hits=len(hits))
-            return DispatchResult()
+            return DispatchResult(observation=text)
         if kind == "tool_search":
             query = self._string_arg(action.args.get("query", ""))
             tools = d.registry.search(
                 query, available_mcps=self._available_mcp_names()
             )
-            self._observe(f"[tool_search:{query}] " + ", ".join(t.name for t in tools))
+            text = f"[tool_search:{query}] " + ", ".join(t.name for t in tools)
+            self._observe(text)
             d.logger.tool("tool_search", project_id, member=self.name, query=query)
-            return DispatchResult()
+            return DispatchResult(observation=text)
         if kind == "report":
             report = self._submit_report(project_id, intent_id, action)
             return DispatchResult(graph_action="report" if report is not None else None)
@@ -973,9 +1118,16 @@ class BaseMember:
         if kind == "flag":
             return DispatchResult(result=self._raise_flag(project_id, intent_id, action, step), graph_action="flag")
         if kind == "done":
+            reason = self._string_arg(action.args.get("reason", "member gave up")) or "member gave up"
+            concluded = self._conclude_with_description(
+                project_id, intent_id, f"member stopped: {reason}"[:500]
+            )
             self._release(project_id, intent_id)
-            d.logger.project("member_done", project_id, member=self.name, reason=action.args.get("reason"))
-            return DispatchResult(result=SolveResult(status="done", steps=step))
+            d.logger.project("member_done", project_id, member=self.name, reason=reason)
+            return DispatchResult(
+                result=SolveResult(status="done", steps=step),
+                graph_action="conclude" if concluded.status == "concluded" else None,
+            )
         return DispatchResult()
 
     def _claim(self, project_id, intent_id) -> bool:
@@ -1061,7 +1213,7 @@ class BaseMember:
             parsed = json.loads(raw) if raw else []
             if not isinstance(parsed, list):
                 raise ValueError("progress checkpoint must contain a JSON array")
-            self.observations = [str(item)[:2000] for item in parsed if str(item).strip()][-8:]
+            self.observations = [str(item)[:5000] for item in parsed if str(item).strip()][-8:]
         except Exception as exc:
             self.deps.logger.project(
                 "member_progress_restore_failed",
@@ -1532,6 +1684,11 @@ class BaseMember:
 
     def _conclude(self, project_id, intent_id, action: MemberAction) -> SolveResult:
         desc = self._string_arg(action.args.get("description", "confirmed result")) or "confirmed result"
+        return self._conclude_with_description(project_id, intent_id, desc)
+
+    def _conclude_with_description(
+        self, project_id, intent_id, desc: str
+    ) -> SolveResult:
         try:
             with self.deps.db.connect() as conn:
                 row = edge_store.get_intent(conn, project_id, intent_id)
@@ -1802,7 +1959,7 @@ class BaseMember:
         }
 
     def _observe(self, text: str) -> None:
-        self.observations.append(text[:2000])
+        self.observations.append(text[:5000])
         self._persist_progress()
 
     def _string_arg(self, value: Any) -> str:
