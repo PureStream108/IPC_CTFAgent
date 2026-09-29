@@ -17,7 +17,7 @@ def _safe_segment(value: str) -> str:
 
 
 class ContainerPool:
-    """Owns one sandbox per CTF task.
+    """
 
     In docker mode a task maps to a single ``TaskSandbox`` (one container per
     project) whose ``member_view`` gives each Member an isolated working

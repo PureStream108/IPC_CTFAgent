@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 class TaskSlotLimiter:
     """Concurrency gate for CTF tasks.
 
-    Each running CTF task (project) occupies one slot. Memory is no longer
+    Each running task (project) occupies one slot. Memory is no longer
     reserved per agent - a task owns a single Docker container shared by all of
     its Members, and that container is not memory-capped. The only global limit
     is how many tasks may run at once.

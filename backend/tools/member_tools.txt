@@ -10,6 +10,16 @@ but this file lists the broader base image so agents know what to reach for.
 Execution model
 ---------------
 - Use action "bash" to run commands in the current Member sandbox.
+- Every command runs inside this challenge's task container. Only container
+  paths exist: work under /workspace/shared, /workspace/attachments and /tmp.
+  Never reference a host path (Windows drive paths, /host, a host interpreter
+  such as /d/Language/Python314/python) or any directory belonging to the IPC
+  deployment itself (its source tree, data/, artifacts/, exports/, writeups,
+  .qa-artifacts). Such commands are blocked, and reading a writeup or solution
+  file instead of solving the challenge invalidates the run.
+- If a CLI tool or library is missing, use action "install" with
+  {manager: apt|pip|gem|npm|go, packages: ["name"]} to add it to this
+  container, then retry. Never substitute a tool from the host.
 - In Docker mode each Member works in /workspace/shared.
 - Extra cloned tools are under /workspace/tools, which points to
   /opt/ipc-tools/tools.
@@ -65,8 +75,6 @@ Network and web tools
   /workspace/tools/dirsearch/dirsearch.
 - commix: command injection detection/exploitation. Path:
   /workspace/tools/commix.
-- WhatWaf: WAF/CDN fingerprinting and simple bypass guidance. Path:
-  /workspace/tools/WhatWaf.
 - Fenjing: Jinja2/Flask SSTI exploitation helper. Path:
   /workspace/tools/Fenjing, also installed as a Python package when build
   succeeds.
@@ -162,7 +170,7 @@ Common first moves by challenge shape
 -------------------------------------
 - Unknown attachment: file, ls -la, strings, xxd/head, binwalk, exiftool.
 - Web URL/service: curl -i, nmap -sV, directory discovery, then targeted tools
-  such as sqlmap, Fenjing, commix, or WhatWaf only when evidence points there.
+  such as sqlmap, Fenjing, or commix only when evidence points there.
 - Python pyjail/sandbox: read source, run small probes, then use
   `from Typhon import bypassREAD, bypassRCE` to generate payloads or continue
   scripted object-graph exploration.

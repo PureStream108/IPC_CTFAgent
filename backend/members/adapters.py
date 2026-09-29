@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -16,6 +17,7 @@ from backend.core.config import LLMConfig
 ACTION_KINDS = (
     "tool",        # call an MCP tool: {server, tool, args}
     "bash",        # run a command in the sandbox: {command}
+    "install",
     "memory",      # search memory: {query}
     "tool_search", # search the tool catalog: {query}
     "report",      # difficulty report to Diamond: {progress,difficulty,steps,directions,knowledge}
@@ -52,6 +54,15 @@ class MemberAction:
                 args["tool"] = args.pop("name")
             if not isinstance(args.get("args"), dict):
                 args["args"] = {}
+        if kind == "install":
+            for alias in ("package", "name", "names", "library", "libraries"):
+                if "packages" not in args and alias in args:
+                    args["packages"] = args.pop(alias)
+            packages = args.get("packages")
+            if isinstance(packages, str):
+                args["packages"] = [part for part in re.split(r"[\s,]+", packages) if part]
+            elif isinstance(packages, list):
+                args["packages"] = [str(part) for part in packages if str(part).strip()]
         thought = obj.get("thought", "")
         return cls(kind=kind, args=args, thought=thought if isinstance(thought, str) else "")
 
@@ -147,7 +158,7 @@ def make_adapter(config: LLMConfig, name: str = "agent", script: list | None = N
         return MockAdapter(config, name=name, script=script)
     if fmt in ("openai", "deepseek"):
         return OpenAICompatibleAdapter(config, name=name)
-    if fmt in ("anthropic", "claudecode"):
+    if fmt == "anthropic":
         return ClaudeAdapter(config, name=name)
     if fmt == "pi":
         return PiAdapter(config, name=name)
@@ -156,10 +167,19 @@ def make_adapter(config: LLMConfig, name: str = "agent", script: list | None = N
 _SYSTEM_PROMPT = (
     "You are an expert CTF solver agent. Respond with EXACTLY ONE JSON object describing "
     "your next action and nothing else. Schema: "
-    '{"thought": "...", "action": "tool|bash|memory|tool_search|report|intent|conclude|flag|done", ...}. '
+    '{"thought": "...", "action": "tool|bash|install|memory|tool_search|report|intent|conclude|flag|done", ...}. '
     "For bash actions, include a non-empty `command` string exactly; do not use `cmd`, `shell`, "
     "or prose-only bash actions. For tool actions, include non-empty `server` and `tool` strings plus "
     "an `args` object when arguments are needed. "
+    "Every command runs inside this challenge's Linux task container. Only paths inside the container "
+    "exist: work under your workspace, /workspace/shared, /workspace/attachments and /tmp. Never read, "
+    "write, or execute host paths — no Windows drive paths (C:\\..., D:/...), no /host, no host interpreter "
+    "such as /d/Language/Python314/python, and no path belonging to the IPC deployment itself (its source "
+    "tree, data/, artifacts/, exports/, writeups or .qa-artifacts). Use the container's own `python3`. "
+    "Reading a solution, writeup, or expected-flag file instead of solving the challenge is cheating and "
+    "invalidates the run. "
+    "If a CLI tool or library is missing, use the install action to add it to this container "
+    "{manager: apt|pip|gem|npm|go, packages: [\"name\"]} and then continue; never fall back to a host tool. "
     "Keep thought under 240 characters and a bash command under 1500 characters. Split long investigations "
     "across multiple actions instead of returning an oversized command. "
     "You are working inside a short exploration task: each run has only some actions, "
@@ -187,7 +207,8 @@ _SYSTEM_PROMPT = (
     "stuckness or four-plus credible surfaces/classes. Do not count the same exploit class repeated with tiny "
     "payload variations as distinct evidence. If two consecutive evaluations find the same difficulty level, do "
     "not report again unless there is new evidence or a changed direction. "
-    "Use bash to run sandbox commands, tool to call an MCP tool {server,tool,args}, memory to recall "
+    "Use bash to run sandbox commands, install to add a missing package to this container "
+    "{manager,packages}, tool to call an MCP tool {server,tool,args}, memory to recall "
     "past experience {query}, report to escalate difficulty to Diamond "
     "{progress,difficulty,steps,directions,knowledge}, conclude to record a confirmed fact for your "
     "assigned intent {description}, flag when you have the real flag {flag,description,from}."
@@ -231,12 +252,26 @@ class _OpenAIProfile:
 
 class OpenAICompatibleAdapter(BaseAdapter):
 
-    def __init__(self, config: LLMConfig, name: str = "agent"):
+    def __init__(
+        self,
+        config: LLMConfig,
+        name: str = "agent",
+        provider_session_id: str | None = None,
+    ) -> None:
         super().__init__(config, name=name)
         self._last_response_meta: dict[str, Any] = {}
         self._surface_cache: str | None = None
         self._profile_cache: dict[tuple[Any, ...], _OpenAIProfile] = {}
-        self._provider_session = f"ipc-{name}-{uuid.uuid4().hex[:16]}"
+        # Session affinity has to outlive this object: a rebuilt adapter that
+        # invents a new id loses whatever routing or cache the provider had
+        # associated with the conversation.
+        self._provider_session = (
+            provider_session_id or f"ipc-{name}-{uuid.uuid4().hex[:16]}"
+        )
+
+    @property
+    def provider_session_id(self) -> str:
+        return self._provider_session
 
     def _endpoint(self, surface: str) -> str:
         return _openai_endpoint(self.config.base_url, surface)

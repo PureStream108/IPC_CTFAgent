@@ -28,6 +28,17 @@ POSTGRES_TEST_MODULES = {
 
 _MIGRATED_DATABASE_URL: str | None = None
 
+
+@pytest.fixture(autouse=True)
+def allow_local_sandbox(monkeypatch):
+    """Tests run without Docker, so they opt into the host-backed sandbox.
+
+    Production refuses ``sandbox_backend: local`` unless this flag is set, which
+    keeps solver commands inside the task container. See
+    tests/test_sandbox_containment.py for that guard.
+    """
+    monkeypatch.setenv("IPC_ALLOW_LOCAL_SANDBOX", "1")
+
 TRUNCATE_TABLES = (
     "migration_runs",
     "audit_events",
@@ -56,6 +67,13 @@ TRUNCATE_TABLES = (
     "projects",
     "settings",
     "competition_run_observations",
+    # The unified agent tables cascade from agent_sessions, but competition
+    # rows reference them, so truncate the whole group explicitly.
+    "agent_compactions",
+    "agent_turns",
+    "agent_events",
+    "agent_session_writers",
+    "agent_sessions",
 )
 
 

@@ -25,6 +25,49 @@ def test_mock_is_always_configured():
     assert LLMConfig(api_format="openai", api_key="k", base_url="u").configured is True
 
 
+def test_claudecode_is_no_longer_an_accepted_api_format():
+    """The sidecar runtime is gone; only real wire formats remain."""
+    with pytest.raises(ValueError):
+        LLMConfig(api_format="claudecode")
+
+
+def test_stored_claudecode_ops_config_is_migrated_with_a_warning(tmp_path: Path):
+    """An existing deployment must still load after the runtime was removed.
+
+    ``LLMConfig`` rejects unknown formats outright, so without this migration a
+    stored ``claudecode`` config would fail every startup instead of degrading
+    to the Anthropic endpoint it always pointed at.
+    """
+    import json
+
+    from backend.ops.store import OpsStore
+
+    config_dir = tmp_path / "data" / "ops-agent"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "api_format": "claudecode",
+                "base_url": "https://api.anthropic.com",
+                "model": "claude-opus-4-8",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _NoDatabase:
+        def configure(self):
+            return self
+
+    store = OpsStore(tmp_path, database=_NoDatabase())
+    config = store.load_llm_config()
+
+    assert config.api_format == "anthropic"
+    assert config.base_url == "https://api.anthropic.com"
+    assert store.migrated_api_format is not None
+    assert "claudecode" in store.migrated_api_format
+
+
 def test_browser_runtime_limits_and_origins_are_validated():
     runtime = RuntimeConfig(
         browser_event_limit=1000,

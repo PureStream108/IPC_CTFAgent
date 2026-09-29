@@ -77,7 +77,9 @@ def test_engine_lease_fences_legacy_and_competition_schedulers(store):
     legacy = store.claim_engine_lease(project_id, "legacy", "legacy-a", seconds=30)
     assert legacy["engine_epoch"] == competition["engine_epoch"] + 1
     # A stale competition owner cannot clear the new legacy lease.
-    assert not store.release_engine_lease(project_id, "competition", "coordinator-a")
+    assert not store.release_engine_lease(
+        project_id, "competition", "coordinator-a", epoch=competition["engine_epoch"]
+    )
     assert store.engine_lease(project_id)["engine_kind"] == "legacy"
 
     # Reclaiming an expired lease with the same owner still fences the old
@@ -89,6 +91,18 @@ def test_engine_lease_fences_legacy_and_competition_schedulers(store):
         )
     reclaimed = store.claim_engine_lease(project_id, "legacy", "legacy-a", seconds=30)
     assert reclaimed["engine_epoch"] == legacy["engine_epoch"] + 1
+    assert not store.renew_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=legacy["engine_epoch"], seconds=30
+    )
+    assert store.renew_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=reclaimed["engine_epoch"], seconds=30
+    )
+    assert not store.release_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=legacy["engine_epoch"]
+    )
+    assert store.release_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=reclaimed["engine_epoch"]
+    )
 
 
 def test_run_observation_tracks_replay_pressure_and_engine_lease(store):
@@ -349,6 +363,151 @@ def test_pair_messages_are_authorized_idempotent_and_replayable(store):
     changed = message.model_copy(update={"payload": {"task": "different"}})
     with pytest.raises(CompetitionConflict, match="different message"):
         store.claim_message(changed)
+
+
+def test_recon_persists_concurrently_without_a_global_lock(store):
+    """Recon is the highest-volume writer: it must not serialize on one lock.
+
+    The assertion is structural rather than timing-based: a second connection
+    holding the run shard still lets a recon insert commit, which is only true
+    once ``persist_recon_message`` relies on UNIQUE (run_id,request_id) instead
+    of the database-wide advisory lock.
+    """
+    import threading
+
+    run = running(store)
+    challenge = ready(store, run, "concurrent-recon")
+    sender = store.assign(run["id"], challenge["id"], "amber", "worker-a")
+    receiver = store.assign(
+        run["id"], challenge["id"], "agate", "worker-b", role="helper"
+    )
+    now = datetime.now(timezone.utc)
+
+    def message(request_id: str) -> Envelope:
+        return Envelope(
+            run_id=run["id"], challenge_id=challenge["id"],
+            sender_member_id="amber", receiver_member_id="agate",
+            sender_session_id=sender["session_id"],
+            receiver_session_id=receiver["session_id"],
+            request_id=request_id, lease_epoch=sender["epoch"],
+            created_at=now, deadline_at=now + timedelta(minutes=5),
+            message_type="recon", payload={"value": request_id},
+        )
+
+    holding = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def hold_the_run_shard() -> None:
+        try:
+            with store.db.connect() as connection:
+                store._lock(connection, run["id"])
+                holding.set()
+                release.wait(10)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+            holding.set()
+
+    holder = threading.Thread(target=hold_the_run_shard, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(10)
+        assert not failure
+        # Would block until `release` if recon still took the shared lock.
+        record = store.persist_recon_message(message("free-recon"))
+        assert record["status"] == "done"
+    finally:
+        release.set()
+        holder.join(10)
+    assert not failure
+
+
+def test_concurrent_recon_of_one_request_id_stays_idempotent(store):
+    """Without the lock, two writers race the unique key; both must succeed."""
+    import threading
+
+    run = running(store)
+    challenge = ready(store, run, "racing-recon")
+    sender = store.assign(run["id"], challenge["id"], "amber", "worker-a")
+    receiver = store.assign(
+        run["id"], challenge["id"], "agate", "worker-b", role="helper"
+    )
+    now = datetime.now(timezone.utc)
+    envelope = Envelope(
+        run_id=run["id"], challenge_id=challenge["id"],
+        sender_member_id="amber", receiver_member_id="agate",
+        sender_session_id=sender["session_id"],
+        receiver_session_id=receiver["session_id"],
+        request_id="raced", lease_epoch=sender["epoch"],
+        created_at=now, deadline_at=now + timedelta(minutes=5),
+        message_type="recon", payload={"value": "raced"},
+    )
+
+    start = threading.Barrier(4)
+    results: list[dict] = []
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def persist() -> None:
+        try:
+            start.wait(10)
+            record = store.persist_recon_message(envelope)
+            with lock:
+                results.append(record)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            with lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=persist, daemon=True) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+
+    assert not failures
+    assert len(results) == 4
+    # One row, one sequence: every racing writer observed the same record.
+    assert len({record["sequence"] for record in results}) == 1
+
+
+def test_two_runs_do_not_contend_on_the_same_lock_shard(store):
+    """A finished run's shard must not block a new run's slot transitions."""
+    import threading
+
+    first = running(store, "first-run")
+    store.transition_run(
+        first["id"], "stopped", revision=first["revision"], permit_active=True
+    )
+    second = running(store, "second-run")
+    challenge = ready(store, second, "sharded")
+
+    holding = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def hold_first_run_shard() -> None:
+        try:
+            with store.db.connect() as connection:
+                store._lock(connection, first["id"])
+                holding.set()
+                release.wait(10)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+            holding.set()
+
+    holder = threading.Thread(target=hold_first_run_shard, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(10)
+        assert not failure
+        assignment = store.assign(
+            second["id"], challenge["id"], "amber", "worker-a"
+        )
+        assert assignment["member"] == "amber"
+    finally:
+        release.set()
+        holder.join(10)
+    assert not failure
 
 
 def test_recon_postgres_publisher_replays_across_offline_and_restart(store):

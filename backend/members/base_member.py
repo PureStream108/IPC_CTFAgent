@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from backend.competition.conversation import ConversationAdapter, ToolCall
 from backend.competition.transport import ReconSubscriber
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
+from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.sandbox import Sandbox
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
@@ -52,6 +54,17 @@ _CLI_PROBE_TOOLS = (
     "file", "strings", "xxd", "unzip", "zip", "openssl", "nmap", "gdb",
     "sqlmap", "sage", "node", "npm", "php", "ruby",
 )
+
+_INSTALL_MANAGERS: dict[str, str] = {
+    "apt": "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends",
+    "pip": "python3 -m pip install --no-cache-dir",
+    "gem": "gem install --no-document",
+    "npm": "npm install -g",
+    "go": "go install",
+}
+_INSTALL_TIMEOUT = 600
+_PACKAGE_NAME_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._+/@:=<>~^-]{0,127}$")
+_MAX_INSTALL_PACKAGES = 12
 
 
 @dataclass
@@ -85,6 +98,9 @@ class MemberDeps:
     competition_recon_endpoint: str | None = None
     competition_recon_replay: Callable[..., list[dict[str, Any]]] | None = None
     competition_recon_advance: Callable[[str, int], int] | None = None
+    # RuntimeConfig, when available: supplies the agent runtime's token and
+    # output budgets. Absent in unit fixtures, where the defaults apply.
+    runtime: Any | None = None
 
 
 @dataclass
@@ -113,93 +129,6 @@ class DispatchResult:
 class _IntentLeaseLost(RuntimeError):
     """Abort the surrounding transaction when a member loses its fence."""
 
-
-_NATIVE_HISTORY_TARGET_BYTES = 512_000
-_NATIVE_HISTORY_MIN_BLOCKS = 6
-_NATIVE_TOOL_CLIP_BYTES = 8_000
-_NATIVE_TOOL_CLIP_KEEP = 3_000
-
-
-def _history_bytes(messages: list[dict[str, Any]]) -> int:
-    return len(
-        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode()
-    )
-
-
-def _history_blocks(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Group an assistant tool-call message with the tool results it owns."""
-
-    blocks: list[list[dict[str, Any]]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        block = [message]
-        if (
-            isinstance(message, dict)
-            and message.get("role") == "assistant"
-            and message.get("tool_calls")
-        ):
-            call_ids = {
-                str(call.get("id"))
-                for call in message.get("tool_calls") or []
-                if isinstance(call, dict)
-            }
-            index += 1
-            while index < len(messages):
-                candidate = messages[index]
-                if (
-                    isinstance(candidate, dict)
-                    and candidate.get("role") == "tool"
-                    and str(candidate.get("tool_call_id")) in call_ids
-                ):
-                    block.append(candidate)
-                    index += 1
-                    continue
-                break
-            blocks.append(block)
-            continue
-        index += 1
-        blocks.append(block)
-    return blocks
-
-
-def _clip_message_content(message: dict[str, Any], limit: int) -> None:
-    content = message.get("content")
-    if isinstance(content, str) and len(content) > limit:
-        message["content"] = content[:limit] + "\n[older output elided]"
-
-
-def compact_native_history(
-    messages: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
-    """Deterministically shrink a provider-native transcript to fit context.
-
-    Long tool outputs are elided first; when the transcript is still over the
-    target, the oldest complete blocks (an assistant tool-call message plus
-    its tool results) are dropped while the first user message and the most
-    recent exchanges stay intact so the next turn can continue.
-    """
-
-    kept = [dict(message) for message in messages]
-    for message in kept:
-        _clip_message_content(message, _NATIVE_TOOL_CLIP_BYTES)
-    if _history_bytes(kept) <= _NATIVE_HISTORY_TARGET_BYTES:
-        return "elided older tool outputs from the native history", kept
-
-    blocks = _history_blocks(kept)
-    head = blocks[:1]
-    tail = blocks[1:]
-    summary = "dropped the oldest native conversation blocks to fit the provider context"
-    while (
-        len(tail) > _NATIVE_HISTORY_MIN_BLOCKS
-        and _history_bytes(head + tail) > _NATIVE_HISTORY_TARGET_BYTES
-    ):
-        tail.pop(0)
-    compacted = [message for block in head + tail for message in block]
-    if _history_bytes(compacted) > _NATIVE_HISTORY_TARGET_BYTES:
-        for message in compacted:
-            _clip_message_content(message, _NATIVE_TOOL_CLIP_KEEP)
-    return summary, compacted
 
 
 class BaseMember:
@@ -742,10 +671,38 @@ class BaseMember:
             },
         }
 
+    def _semantic_compressor(self):
+        """Summarize dropped history with this Member's own model.
+
+        Reusing the Member's configured endpoint keeps compaction inside the
+        credentials and rate limits the deployment already granted it. The
+        runtime falls back to a deterministic projection if this fails, so a
+        summarizer outage never ends a task.
+        """
+        from backend.agent.compaction import summarize
+
+        def request(prompt: str, dropped: list[dict[str, Any]]) -> str:
+            rendered = json.dumps(dropped, ensure_ascii=False)[:400_000]
+            return self.adapter.chat(
+                [{"role": "user", "content": rendered}],
+                system_prompt=prompt,
+                temperature=0.0,
+            )
+
+        def compress(messages: list[dict[str, Any]]):
+            return summarize(messages, request=request)
+
+        return compress
+
     def _make_native_runner(self, tools: list[dict[str, Any]]) -> SessionRunner:
         factory = self.deps.competition_conversation_factory
+        runtime_config = getattr(self.deps, "runtime", None)
         if factory is None:
-            adapter = ConversationAdapter(self.adapter.config)
+            adapter = ConversationAdapter(
+                self.adapter.config,
+                max_output_tokens=getattr(runtime_config, "max_output_tokens", 32768),
+                read_timeout=getattr(runtime_config, "provider_read_timeout", 300),
+            )
         else:
             adapter = factory(self.adapter.config)
         runner = SessionRunner(
@@ -753,7 +710,12 @@ class BaseMember:
             adapter,
             None,  # installed by _solve_with_native_session below
             assignment=self.deps.competition_assignment,
-            compressor=compact_native_history,
+            compressor=self._semantic_compressor(),
+            context_token_limit=getattr(runtime_config, "context_token_limit", 0),
+            compaction_trigger_ratio=getattr(
+                runtime_config, "compaction_trigger_ratio", 0.75
+            ),
+            max_turns=getattr(runtime_config, "max_turns", 0),
             system=(
                 f"You are Member {self.name}, a persistent {self.role_blurb}. "
                 "Use the member_action function for every investigation step. "
@@ -1018,6 +980,23 @@ class BaseMember:
                 text = "[invalid bash action omitted: missing non-empty `command`]"
                 self._observe(text)
                 return DispatchResult(invalid_action=True, observation=text)
+            violation = host_path_violation(cmd)
+            if violation is not None:
+                d.logger.project(
+                    "host_path_command_blocked",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    command=cmd[:2000],
+                    reason=violation,
+                )
+                text = f"[command blocked: {violation}]"
+                self._observe(text)
+                return DispatchResult(
+                    invalid_action=True,
+                    invalid_knowledge=["host_path_command_blocked"],
+                    observation=text,
+                )
             res = d.sandbox.exec(cmd, timeout=60)
             text = f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip()
             self._observe(text)
@@ -1038,6 +1017,8 @@ class BaseMember:
                     invalid_action=True, invalid_knowledge=knowledge, observation=text
                 )
             return DispatchResult(observation=text)
+        if kind == "install":
+            return self._install_packages(project_id, intent_id, action)
         if kind == "tool":
             server = self._string_arg(action.args.get("server", ""))
             tool = self._string_arg(action.args.get("tool", ""))
@@ -1344,7 +1325,8 @@ class BaseMember:
             "-------------------------\n"
             f"- available now: {available}\n"
             f"- missing now: {missing}\n"
-            "- If a command is missing, switch to an available fallback or call tool_search/MCP instead of retrying it."
+            "- If a command is missing, install it into this container with the install action, "
+            "switch to an available fallback, or call tool_search/MCP. Never run a host binary."
         )
 
     def _record_unavailable_cli(self, project_id: str, intent_id: str, command_name: str) -> list[str]:
@@ -1357,8 +1339,9 @@ class BaseMember:
         count = self._missing_tool_counts.get(command_name, 0) + 1
         self._missing_tool_counts[command_name] = count
         self._observe(
-            f"[tool unavailable:{command_name}] This command is missing in the sandbox. "
-            "Use `cat tools.txt` to choose an installed fallback, or call tool_search/MCP."
+            f"[tool unavailable:{command_name}] This command is missing in this container. "
+            "Install it with the install action (manager: apt|pip|gem|npm|go), pick an installed "
+            "fallback from `cat tools.txt`, or call tool_search/MCP. Do not use a host tool."
         )
         self.deps.logger.project(
             "sandbox_tool_unavailable",
@@ -1369,6 +1352,70 @@ class BaseMember:
             count=count,
         )
         return [f"unavailable_cli_tool:{command_name}"]
+
+    def _install_packages(self, project_id, intent_id, action: MemberAction) -> DispatchResult:
+        """Install a missing package inside this task's own container.
+
+        A missing library previously pushed members toward a host interpreter or
+        a host-installed tool. Installing into the container keeps every file and
+        every runtime inside the sandbox.
+        """
+        d = self.deps
+        manager = self._string_arg(action.args.get("manager", "")).strip().lower()
+        raw_packages = action.args.get("packages", [])
+        packages = [str(p).strip() for p in raw_packages] if isinstance(raw_packages, list) else []
+        packages = [p for p in packages if p]
+        problem: str | None = None
+        if manager not in _INSTALL_MANAGERS:
+            problem = (
+                f"unsupported manager {manager!r}; use one of "
+                f"{', '.join(sorted(_INSTALL_MANAGERS))}"
+            )
+        elif not packages:
+            problem = "missing non-empty `packages` list"
+        elif len(packages) > _MAX_INSTALL_PACKAGES:
+            problem = f"install is limited to {_MAX_INSTALL_PACKAGES} packages per action"
+        else:
+            invalid = [p for p in packages if not _PACKAGE_NAME_RE.fullmatch(p)]
+            if invalid:
+                problem = f"invalid package name(s): {', '.join(invalid[:3])}"
+        if problem is not None:
+            d.logger.project(
+                "invalid_install_action",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                manager=manager,
+                reason=problem,
+            )
+            text = f"[invalid install action omitted: {problem}]"
+            self._observe(text)
+            return DispatchResult(invalid_action=True, observation=text)
+
+        command = f"{_INSTALL_MANAGERS[manager]} {' '.join(shlex.quote(p) for p in packages)}"
+        res = d.sandbox.exec(command, timeout=_INSTALL_TIMEOUT)
+        text = f"$ {command}\n{res.stdout}\n{res.stderr}".strip()
+        self._observe(text)
+        d.logger.tool(
+            "install",
+            project_id,
+            member=self.name,
+            manager=manager,
+            packages=packages,
+            command=command,
+            exit_code=res.exit_code,
+            stdout=res.stdout[:4000],
+            stderr=res.stderr[:4000],
+        )
+        if res.ok:
+            self._tool_availability = None
+            self._missing_tool_counts.clear()
+            return DispatchResult(observation=text)
+        return DispatchResult(
+            invalid_action=True,
+            invalid_knowledge=[f"install_failed:{manager}:{','.join(packages[:3])}"],
+            observation=text,
+        )
 
     def _missing_command_from_result(self, command: str, stderr: str) -> str | None:
         text = stderr or ""
@@ -1653,7 +1700,7 @@ class BaseMember:
         )
 
     def _record_action_signature(self, action: MemberAction) -> str | None:
-        if action.kind not in {"bash", "tool", "tool_search", "memory"}:
+        if action.kind not in {"bash", "tool", "tool_search", "memory", "install"}:
             return None
         sig = action.kind + ":" + json.dumps(action.args, sort_keys=True, ensure_ascii=False)
         self._recent_action_sigs.append(sig)
@@ -1831,8 +1878,12 @@ class BaseMember:
             for attachment in attachments:
                 attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
         runtime_notes = [
-            "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
-            "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
+            "All work happens inside this challenge's Linux task container. Only container paths exist.",
+            "Never touch host paths: no Windows drive paths, no /host, no host interpreter, and no path "
+            "inside the IPC deployment itself (source tree, data/, artifacts/, exports/, writeups, .qa-artifacts). "
+            "Reading a solution or writeup file instead of solving the challenge invalidates the run.",
+            "If a CLI tool or Python library is missing, use the install action to add it to this container "
+            "(manager: apt|pip|gem|npm|go), then retry. Do not substitute a host tool.",
             "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
             "If attachment_true is true, inspect the listed attachments before blind target probing.",
             (

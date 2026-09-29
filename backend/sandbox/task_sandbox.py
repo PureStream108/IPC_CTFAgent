@@ -40,12 +40,6 @@ def member_workdir(member: str) -> str:
 
 
 class TaskSandbox:
-    """One Docker container per CTF task (project), shared by all its Members.
-
-    Members use the same /workspace/shared working directory. The complete
-    workspace lives on a named volume that survives container removal. The container is not
-    memory-capped; concurrency is bounded by the task-slot limiter instead.
-    """
 
     def __init__(
         self,

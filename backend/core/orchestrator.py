@@ -1166,6 +1166,7 @@ class Orchestrator:
                     competition_store.advance_message_cursor
                     if competition_store is not None else None
                 ),
+                runtime=self.state.config.runtime,
             )
             script = self.scripts.get((project_id, member_name)) or self.scripts.get(member_name)
             member = create_member(cfg, deps, script=script)
