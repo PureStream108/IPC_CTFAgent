@@ -96,7 +96,6 @@
     <button class="h-7 px-2.5 rounded-lg border border-teal-200 bg-teal-50 text-xs text-teal-700 hover:bg-teal-100 transition inline-flex items-center" @click="openCompetition()">Competition</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition items-center" @click="openOpsAgent()">IPC</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openIPCConfig()">Config</button>
-    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500" @click="openSkills()">Skill</button>
   </header>
 
   <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
@@ -599,20 +598,76 @@
   </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-40 p-4" x-show="showSkills" x-cloak>
-    <div class="panel rounded-2xl w-[680px] max-h-[85vh] overflow-y-auto p-5">
-      <div class="flex justify-between mb-4"><h2 class="text-lg font-semibold">Skill</h2><button @click="showSkills=false">Close</button></div>
-      <p class="text-xs text-slate-500 mb-3">Shared CTF skills. Updates use a fixed commit; existing versions remain available.</p>
-      <template x-for="pkg in skillPackages" :key="pkg.repository">
-        <div class="border rounded-xl p-3 mb-2">
-          <div class="flex justify-between"><strong x-text="pkg.repository"></strong><button class="text-xs text-brand-600" @click="toggleSkill(pkg)" x-text="pkg.enabled?'Disable':'Enable'"></button></div>
-          <div class="text-xs break-all text-slate-500" x-text="pkg.revision"></div>
-          <div class="text-xs mt-2" x-text="pkg.skills.join(', ')"></div>
-        </div>
-      </template>
-      <label class="block text-xs mt-4">GitHub owner/repository<input class="w-full rounded-lg p-2 mt-1" x-model="skillRepository"></label>
-      <label class="block text-xs mt-2">Commit (40 characters)<input class="w-full rounded-lg p-2 mt-1" x-model="skillRevision" maxlength="40"></label>
-      <p class="text-xs text-rose-600 mt-2" x-show="skillError" x-text="skillError"></p>
-      <button class="btn rounded-lg px-3 py-2 mt-3 text-sm disabled:opacity-50" :disabled="skillBusy" @click="installSkill()" x-text="skillBusy?'Downloading and validating…':'Install / Update'"></button>
+    <div class="panel rounded-2xl w-[720px] max-w-[96vw] h-[78vh] p-5 flex flex-col">
+      <div class="flex items-center justify-between mb-3 shrink-0">
+        <h2 class="text-lg font-semibold text-slate-700">Skill</h2>
+        <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="showSkills=false">Close</button>
+      </div>
+
+      <div class="flex items-center gap-2 shrink-0">
+        <input class="flex-1 min-w-0 rounded-lg px-3 py-2 text-sm" x-model="skillQuery"
+          placeholder="Search skills, or enter owner/repository or a .git URL to install"
+          @keydown.enter="installSkillSpec()" />
+        <button type="button" class="btn-ghost h-9 w-9 rounded-lg inline-flex items-center justify-center shrink-0 disabled:opacity-40"
+          :disabled="skillBusy || !skillQuery.trim()" @click="installSkillSpec()"
+          :title="'Install ' + (skillQuery.trim() || 'skill') + ' with npx skills add'">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>
+        </button>
+        <input type="file" accept=".md,text/markdown" x-ref="skillFile" class="hidden" @change="uploadSkillFile($event)" />
+        <button type="button" class="btn-ghost h-9 w-9 rounded-lg inline-flex items-center justify-center shrink-0 disabled:opacity-40"
+          :disabled="skillBusy" @click="$refs.skillFile.click()" title="Upload a local SKILL.md into Custom">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+      </div>
+      <p class="mt-2 text-[11px] shrink-0" :class="skillError ? 'text-rose-600' : 'text-slate-400'"
+        x-text="skillError || skillNotice || 'Drag a skill onto a folder to move it. Downloads and uploads land in Custom.'"></p>
+
+      <div class="mt-3 flex-1 min-h-0 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2">
+        <template x-if="skillQuery.trim()">
+          <div>
+            <template x-for="item in skillSearchResults()" :key="item.repository+item.path">
+              <div class="flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm hover:bg-slate-50"
+                draggable="true" @dragstart="skillDragStart(item)" @dragend="skillDragging=null">
+                <span class="truncate text-slate-700" x-text="item.name"></span>
+                <span class="shrink-0 text-[10px] uppercase tracking-wide text-slate-400" x-text="item.folder"></span>
+              </div>
+            </template>
+            <div x-show="skillSearchResults().length===0" class="px-3 py-6 text-center text-xs text-slate-400">
+              No installed skill matches. Press Install to fetch it.
+            </div>
+          </div>
+        </template>
+
+        <template x-if="!skillQuery.trim()">
+          <div>
+            <template x-for="folder in skillFolders" :key="folder">
+              <div class="mb-1 rounded-xl transition"
+                :class="skillDropTarget===folder ? 'bg-brand-50 ring-1 ring-brand-200' : ''"
+                @dragover.prevent="skillDropTarget=folder" @dragleave="if(skillDropTarget===folder) skillDropTarget=null"
+                @drop.prevent="skillDrop(folder)">
+                <button type="button" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left hover:bg-slate-50"
+                  @click="skillOpenFolder = (skillOpenFolder===folder ? null : folder)">
+                  <svg class="w-3.5 h-3.5 shrink-0 text-slate-400 transition" :class="skillOpenFolder===folder ? 'rotate-90' : ''"
+                    fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                  <svg class="w-4 h-4 shrink-0 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                  <span class="text-sm font-medium text-slate-700" x-text="folder"></span>
+                  <span class="text-[10px] text-slate-400 tabular-nums" x-text="(skillTree[folder]||[]).length"></span>
+                </button>
+                <div x-show="skillOpenFolder===folder" class="pb-1 pl-9 pr-2">
+                  <template x-for="item in (skillTree[folder]||[])" :key="item.repository+item.path">
+                    <div class="flex cursor-grab items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+                      draggable="true" @dragstart="skillDragStart(item)" @dragend="skillDragging=null">
+                      <span class="truncate" x-text="item.name"></span>
+                      <span x-show="!item.enabled" class="shrink-0 text-[10px] text-amber-600">disabled</span>
+                    </div>
+                  </template>
+                  <div x-show="(skillTree[folder]||[]).length===0" class="px-2 py-2 text-xs text-slate-300">Empty</div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
     </div>
   </div>
 
@@ -626,6 +681,9 @@
         <div>
           <div class="text-xs text-amber-600 mb-2" x-show="cfg.startup_errors.length">
             <template x-for="e in cfg.startup_errors" :key="e"><div x-text="'! ' + e"></div></template>
+          </div>
+          <div class="text-xs text-sky-700 mb-2" x-show="(cfg.startup_warnings||[]).length">
+            <template x-for="w in (cfg.startup_warnings||[])" :key="w"><div x-text="'· ' + w"></div></template>
           </div>
           <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3">
             <div class="text-sm font-semibold text-slate-700 mb-2">Diamond <span class="text-[10px]" :class="health.diamond?(health.diamond.skipped?'text-slate-400':(health.diamond.ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health.diamond?(health.diamond.skipped?'skipped':(health.diamond.ok?'healthy':'unreachable')):''"></span></div>
@@ -644,9 +702,9 @@
           <template x-if="opsCfg">
             <div class="rounded-2xl border border-brand-100 bg-brand-50/30 p-3 mb-3">
               <div class="text-sm font-semibold text-slate-700 mb-1">IPC action agent <span class="text-[10px]" :class="health.ops_agent?(health.ops_agent.ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health.ops_agent?(health.ops_agent.ok?'healthy':'unreachable'):''"></span></div>
-              <div class="text-[11px] text-slate-400 mb-2">Choose Claude Code for its native agent session, or OpenAI-compatible API for Responses / Chat Completions with durable IPC history.</div>
+              <div class="text-[11px] text-slate-400 mb-2">Pick the wire format of your endpoint. Every mode runs on the same durable agent runtime, so conversation context is rebuilt from persisted events.</div>
               <div x-html="llmFields('ops_agent', opsCfg)"></div>
-              <div class="mt-2 text-[10px] leading-relaxed text-slate-400">Claude Code and OpenAI modes both run independently from the solver, persist action logs, and can be interrupted. OpenAI interruption takes effect at the next safe model/tool boundary.</div>
+              <div class="mt-2 text-[10px] leading-relaxed text-slate-400">IPC runs independently from the solver, persists action logs, and can be interrupted. Interruption takes effect at the next safe model/tool boundary.</div>
             </div>
           </template>
           <div class="flex justify-end gap-2 mt-3">
@@ -848,6 +906,7 @@
           <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in Config'"></span>
           <button x-show="opsBusy" x-cloak class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50" :disabled="opsInterrupting" @click="interruptOpsRun()" x-text="opsInterrupting?'Interrupting…':'Interrupt IPC'"></button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">Config</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="openSkills()" title="Skills Diamond distributes to Members">Skill</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false">Close</button>
         </div>
       </div>
@@ -907,22 +966,43 @@
               ↓ Latest
             </button>
           </div>
-          <div class="border-t border-slate-100 p-3 space-y-2">
-            <div class="flex flex-wrap items-center gap-1.5" x-show="opsAttachments.length" x-cloak>
-              <template x-for="attachment in opsAttachments" :key="attachment.id">
-                <span class="inline-flex max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600">
-                  <span class="max-w-[220px] truncate" x-text="attachment.filename"></span>
-                  <button type="button" class="text-slate-400 hover:text-rose-600" title="Remove attachment" @click="removeOpsAttachment(attachment.id)">x</button>
-                </span>
-              </template>
+          <div class="border-t border-slate-100 p-3">
+            <div class="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm transition focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
+              <div class="flex flex-wrap items-center gap-1.5 pb-2" x-show="opsAttachments.length" x-cloak>
+                <template x-for="attachment in opsAttachments" :key="attachment.id">
+                  <span class="inline-flex max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600">
+                    <span class="max-w-[220px] truncate" x-text="attachment.filename"></span>
+                    <button type="button" class="text-slate-400 hover:text-rose-600" title="Remove attachment" @click="removeOpsAttachment(attachment.id)">&times;</button>
+                  </span>
+                </template>
+              </div>
+              <textarea class="w-full resize-none border-0 bg-transparent px-0 py-1 text-sm leading-relaxed text-slate-700 placeholder:text-slate-400 focus:ring-0"
+                x-ref="opsInputBox" rows="1" x-model="opsInput"
+                @input="autoGrowOpsInput()"
+                @keydown.enter="onOpsInputEnter($event)"
+                placeholder="Describe the platform API, task, or credentials for IPC."></textarea>
+              <div class="flex items-center gap-1.5 pt-1">
+                <input type="file" x-ref="opsFileInput" class="hidden" multiple @change="uploadOpsFiles($event)" />
+                <button type="button" class="h-8 w-8 rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-40 inline-flex items-center justify-center"
+                  title="Attach platform API documentation" :disabled="opsBusy || opsUploading" @click="$refs.opsFileInput.click()">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                </button>
+                <span class="text-[10px] text-slate-400" x-show="opsUploading" x-cloak>Uploading…</span>
+                <div class="flex-1"></div>
+                <span class="hidden sm:inline text-[10px] text-slate-400" x-show="!opsBusy" x-cloak>Enter to send · Shift+Enter for newline</span>
+                <button type="button" class="h-8 w-8 rounded-lg bg-brand-500 text-white transition hover:bg-brand-600 disabled:opacity-30 inline-flex items-center justify-center"
+                  x-show="!opsBusy"
+                  :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()" title="Send">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>
+                </button>
+                <button type="button" class="h-8 w-8 rounded-lg bg-rose-500 text-white transition hover:bg-rose-600 disabled:opacity-40 inline-flex items-center justify-center"
+                  x-show="opsBusy" x-cloak :disabled="opsInterrupting" @click="interruptOpsRun()"
+                  :title="opsInterrupting?'Interrupting…':'Stop IPC'">
+                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+                </button>
+              </div>
             </div>
-            <div class="flex gap-2 items-end">
-              <input type="file" x-ref="opsFileInput" class="hidden" multiple @change="uploadOpsFiles($event)" />
-              <button type="button" class="btn-ghost shrink-0 rounded-xl px-3 py-2.5 text-sm" title="Attach platform API documentation" :disabled="opsBusy || opsUploading" @click="$refs.opsFileInput.click()">Attach</button>
-              <textarea class="flex-1 rounded-xl px-3 py-2 text-sm resize-none" rows="3" x-model="opsInput" @keydown.ctrl.enter.prevent="sendOpsMessage()" placeholder="Describe the platform API, task, or credentials for IPC."></textarea>
-              <button class="btn rounded-xl px-4 py-2.5 text-sm disabled:opacity-40" :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()" x-text="opsBusy?'Interrupt & Send':'Send'"></button>
-            </div>
-            <div class="text-[10px] text-slate-400">Ctrl+Enter to send. Chat content is retained in this conversation.</div>
+            <div class="mt-1.5 text-[10px] text-slate-400">Chat content is retained in this conversation.</div>
           </div>
         </section>
 
@@ -931,10 +1011,22 @@
             <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Workflows</div>
             <button class="text-[11px] text-brand-600" @click="loadOpsWorkflows()">Refresh</button>
           </div>
-          <div class="flex gap-1.5 overflow-x-auto pb-2 mb-2">
+          <div class="flex flex-col gap-1.5 pb-2 mb-2">
             <template x-for="workflow in opsWorkflows" :key="workflow.id">
-              <button class="shrink-0 rounded-lg border px-2.5 py-1.5 text-[11px]" :class="opsWorkflowId===workflow.id?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 bg-white text-slate-500'" @click="selectOpsWorkflow(workflow.id)" x-text="workflow.name"></button>
+              <button class="w-full rounded-lg border px-2.5 py-2 text-left text-[11px] transition"
+                :class="opsWorkflowId===workflow.id?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 bg-white text-slate-500 hover:border-slate-300'"
+                @click="selectOpsWorkflow(workflow.id)"
+                :title="opsWorkflowId===workflow.id?'Click again to deselect and adapt a new platform':'Select this configured platform'">
+                <div class="flex items-center gap-1.5">
+                  <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="opsWorkflowId===workflow.id?'bg-brand-500':'bg-slate-300'"></span>
+                  <span class="min-w-0 flex-1 break-words font-medium" x-text="workflow.name"></span>
+                </div>
+              </button>
             </template>
+          </div>
+          <div class="mb-2 rounded-lg border border-dashed border-slate-200 px-2.5 py-2 text-[10px] leading-relaxed text-slate-400"
+            x-show="opsWorkflows.length && !opsWorkflowId" x-cloak>
+            No workflow selected: IPC will individually adapt a new platform from your description.
           </div>
           <template x-if="selectedOpsWorkflow()">
             <div class="space-y-3">
@@ -1075,7 +1167,11 @@
         if (r.status===204) return null;
         const txt = await r.text();
         let data; try { data = txt ? JSON.parse(txt) : null; } catch(e){ data = txt; }
-        if (!r.ok) { this.flash((data&&data.detail)||("error "+r.status)); throw new Error(txt); }
+        if (!r.ok) {
+          const detail=(data&&data.detail)||("error "+r.status);
+          this.flash(detail);
+          throw new Error(detail);
+        }
         return data;
       },
       flash(m){ this.toast=m; setTimeout(()=>this.toast="",2500); },
@@ -1632,7 +1728,24 @@
         this.scrollOpsLogsToLatest();
         this.scrollOpsToLatest(true);
       },
-      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsAttachments=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; },
+      onOpsInputEnter(event){
+        if(event.shiftKey || event.isComposing || event.keyCode===229) return;
+        event.preventDefault();
+        if(!this.opsInput.trim() || !this.opsCfg?.configured) return;
+        this.sendOpsMessage();
+      },
+      autoGrowOpsInput(){
+        const element=this.$refs.opsInputBox; if(!element) return;
+        element.style.height="auto";
+        element.style.height=Math.min(element.scrollHeight,200)+"px";
+      },
+      resetOpsInputHeight(){
+        this.$nextTick(()=>{
+          const element=this.$refs.opsInputBox;
+          if(element) element.style.height="auto";
+        });
+      },
+      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsAttachments=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; this.resetOpsInputHeight(); },
       removeOpsAttachment(id){ this.opsAttachments=this.opsAttachments.filter(item=>item.id!==id); },
       async uploadOpsFiles(event){
         const files=Array.from(event.target.files||[]); event.target.value="";
@@ -1677,6 +1790,7 @@
           this.opsQueuedMessage=message;
           this.opsQueuedAttachments=[...this.opsAttachments];
           this.opsInput="";
+          this.resetOpsInputHeight();
           this.opsAttachments=[];
           await this.interruptOpsRun();
           return;
@@ -1691,9 +1805,10 @@
         this.opsMessages.push(temporary);
         this.scrollOpsToLatest(true);
         this.opsInput="";
+        this.resetOpsInputHeight();
         try{
           const legacyOpsChatPath="/api/ops/chat";
-          const chatPayload={message,session_id:this.opsSessionId,attachments:attachments.map(item=>item.id)};
+          const chatPayload={message,session_id:this.opsSessionId,attachments:attachments.map(item=>item.id),workflow_id:this.opsWorkflowId};
           const response=await fetch("/api/ops/chat/stream",{
             method:"POST",
             headers:{"Content-Type":"application/json","Accept":"application/x-ndjson"},
@@ -1750,7 +1865,6 @@
         const data=await this.api("GET","/api/ops/workflows");
         this.opsWorkflows=data.workflows||[];
         if(this.opsWorkflowId&&!this.opsWorkflows.some(workflow=>workflow.id===this.opsWorkflowId)) this.opsWorkflowId=null;
-        if(!this.opsWorkflowId&&this.opsWorkflows.length) this.opsWorkflowId=this.opsWorkflows[0].id;
       },
       selectedOpsWorkflow(){ return this.opsWorkflows.find(workflow=>workflow.id===this.opsWorkflowId)||null; },
       async openCompetition(){
@@ -1872,7 +1986,10 @@
         const payload=event?.payload||{};
         return Object.entries(payload).map(([key,value])=>key+": "+String(value)).join(" | ");
       },
-      selectOpsWorkflow(workflowId){ this.opsWorkflowId=workflowId; this.opsConfirmInput=""; this.opsResult=null; this.workflowSecret={name:"",value:""}; },
+      selectOpsWorkflow(workflowId){
+        this.opsWorkflowId = this.opsWorkflowId===workflowId ? null : workflowId;
+        this.opsConfirmInput=""; this.opsResult=null; this.workflowSecret={name:"",value:""};
+      },
       async saveWorkflowSecret(){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
         const name=this.workflowSecret.name.trim().toLowerCase(), value=this.workflowSecret.value;
@@ -1924,8 +2041,8 @@
       escapeAttr(value){ return String(value??"").replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;").replaceAll(">","&gt;"); },
       llmFields(name, obj){
         const formats=name==="ops_agent"
-          ? [["claudecode","Claude Code (native)"],["openai","OpenAI-compatible API"],["anthropic","Anthropic API"],["deepseek","DeepSeek API"],["pi","Pi API"],["mock","Mock"]]
-          : [["mock","mock"],["openai","openai"],["anthropic","anthropic"],["claudecode","claudecode"],["deepseek","deepseek"],["pi","pi"]];
+          ? [["openai","OpenAI-compatible API"],["anthropic","Anthropic API"],["deepseek","DeepSeek API"],["pi","Pi API"],["mock","Mock"]]
+          : [["mock","mock"],["openai","openai"],["anthropic","anthropic"],["deepseek","deepseek"],["pi","pi"]];
         const fmt=formats.map(([value,label])=>`<option value="${value}" ${obj.api_format===value?"selected":""}>${label}</option>`).join("");
         const surface=["auto","chat_completions","responses"].map(f=>`<option value="${f}" ${(obj.api_surface||"auto")===f?"selected":""}>${f}</option>`).join("");
         const reasoning=(obj.reasoning_effort && !["auto","none","minimal"].includes(obj.reasoning_effort)?"":"<option value='' selected disabled>Select effort</option>")+["low","medium","high","xhigh","max"].map(f=>`<option value="${f}" ${(obj.reasoning_effort||"auto")===f?"selected":""}>${f}</option>`).join("");
@@ -1957,21 +2074,77 @@
         }catch(error){ this.questionError=error.message; }
         finally{ this.questionBusy=false; }
       },
-      showSkills: false, skillPackages: [], skillBusy: false, skillError: "", skillRepository: "", skillRevision: "",
+      showSkills: false, skillPackages: [], skillTree: {}, skillFolders: [],
+      skillBusy: false, skillError: "", skillNotice: "", skillQuery: "",
+      skillOpenFolder: null, skillDragging: null, skillDropTarget: null,
       async openSkills(){
-        const result=await this.api("GET","/skills");
-        this.skillPackages=result.packages; this.skillRepository=result.default_repository; this.skillRevision=result.default_revision;
-        this.skillError=""; this.showSkills=true;
+        this.skillError=""; this.skillNotice=""; this.skillQuery="";
+        this.skillDragging=null; this.skillDropTarget=null;
+        this.showSkills=true;
+        await this.loadSkills();
       },
-      async installSkill(){
-        if(this.skillBusy) return;
-        this.skillBusy=true; this.skillError="";
-        try{ await this.api("POST","/skills",{repository:this.skillRepository,revision:this.skillRevision}); this.skillPackages=(await this.api("GET","/skills")).packages; }
-        catch(error){ this.skillError=error.message; }
+      async loadSkills(){
+        const result=await this.api("GET","/skills");
+        this.applySkills(result);
+      },
+      applySkills(result){
+        if(!result) return;
+        this.skillPackages=result.packages||[];
+        this.skillTree=result.tree||{};
+        this.skillFolders=result.folders||Object.keys(this.skillTree);
+        if(this.skillOpenFolder && !this.skillFolders.includes(this.skillOpenFolder)) this.skillOpenFolder=null;
+      },
+      skillSearchResults(){
+        const query=this.skillQuery.trim().toLowerCase();
+        if(!query) return [];
+        const matches=[];
+        for(const folder of this.skillFolders){
+          for(const item of (this.skillTree[folder]||[])){
+            const haystack=(item.name+" "+item.repository+" "+item.path).toLowerCase();
+            if(haystack.includes(query)) matches.push(item);
+          }
+        }
+        return matches;
+      },
+      skillDragStart(item){ this.skillDragging=item; },
+      async skillDrop(folder){
+        const item=this.skillDragging;
+        this.skillDropTarget=null; this.skillDragging=null;
+        if(!item || item.folder===folder) return;
+        this.skillError=""; this.skillNotice="";
+        try{
+          this.applySkills(await this.api("POST","/skills/move",{repository:item.repository,path:item.path,folder}));
+          this.skillNotice=item.name+" moved to "+folder;
+        }catch(error){ this.skillError=error.message||"could not move the skill"; }
+      },
+      async installSkillSpec(){
+        const spec=this.skillQuery.trim();
+        if(this.skillBusy||!spec) return;
+        this.skillBusy=true; this.skillError=""; this.skillNotice="Running npx skills add "+spec+"…";
+        try{
+          const result=await this.api("POST","/skills/add",{spec});
+          this.applySkills(result);
+          this.skillQuery=""; this.skillNotice="Installed "+spec;
+        }catch(error){ this.skillNotice=""; this.skillError=error.message||"install failed"; }
+        finally{ this.skillBusy=false; }
+      },
+      async uploadSkillFile(event){
+        const file=(event.target.files||[])[0]; event.target.value="";
+        if(!file) return;
+        this.skillBusy=true; this.skillError=""; this.skillNotice="";
+        try{
+          const form=new FormData(); form.append("file",file);
+          const response=await fetch("/skills/upload",{method:"POST",body:form,credentials:"same-origin"});
+          const text=await response.text(); let data=null; try{ data=text?JSON.parse(text):null; }catch(error){}
+          if(!response.ok) throw new Error((data&&data.detail)||("upload failed: "+response.status));
+          this.applySkills(data);
+          this.skillOpenFolder="Custom";
+          this.skillNotice=file.name+" added to Custom";
+        }catch(error){ this.skillError=error.message||"upload failed"; }
         finally{ this.skillBusy=false; }
       },
       async toggleSkill(pkg){
-        try{ const result=await this.api("PATCH","/skills",{repository:pkg.repository,enabled:!pkg.enabled}); this.skillPackages=result.packages; }
+        try{ this.applySkills(await this.api("PATCH","/skills",{repository:pkg.repository,enabled:!pkg.enabled})); }
         catch(error){ this.skillError=error.message; }
       },
       async selectLegacyMember(name){

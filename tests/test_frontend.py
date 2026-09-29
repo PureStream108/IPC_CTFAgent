@@ -39,15 +39,33 @@ def test_index_served(client):
     assert "First-time setup" not in body
     assert 'await this.authRequest("POST","/auth/setup"' not in body
     assert 'await this.authRequest("POST","/auth/login"' not in body
-    assert "Claude Code action agent with native session context" not in body
     assert "OpenAI-compatible action agent with durable IPC history" not in body
-    assert "Claude Code (native)" in body
+    # The Claude Code sidecar was removed: it must not be offerable as a format.
+    assert "claudecode" not in body
+    assert "Claude Code" not in body
     assert "OpenAI-compatible API" in body
     assert "IPC live log" in body
     assert "Archived" in body
-    assert "Interrupt & Send" in body
+    assert "Interrupt IPC" in body
     assert "/api/ops/chat/interrupt" in body
     assert "interruptOpsRun" in body
+    assert "onOpsInputEnter" in body
+    assert "autoGrowOpsInput" in body
+    assert "Enter to send · Shift+Enter for newline" in body
+    assert "Ctrl+Enter to send" not in body
+    assert 'showOps=false;openIPCConfig()' in body
+    assert '@click="openSkills()"' in body
+    assert "flex flex-col gap-1.5 pb-2 mb-2" in body
+    assert "this.opsWorkflowId===workflowId ? null : workflowId" in body
+    assert "IPC will individually adapt a new platform" in body
+    assert "workflow_id:this.opsWorkflowId" in body
+    assert "skillSearchResults" in body
+    assert "installSkillSpec" in body
+    assert "uploadSkillFile" in body
+    assert "skillDrop(folder)" in body
+    assert "/skills/upload" in body
+    assert '"/skills/move"' in body
+    assert '"/skills/add"' in body
     assert "credentials for IPC" in body
     assert "pollOpsRun" in body
     assert "token/value (never added to chat history)" not in body
