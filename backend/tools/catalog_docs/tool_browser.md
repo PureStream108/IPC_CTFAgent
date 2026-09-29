@@ -1,6 +1,6 @@
 # browser
 
-Browser 是运行在任务容器内的有状态 Playwright Chromium MCP。它提供结构化页面交互、有界且默认脱敏的网络/JavaScript 诊断，以及项目隔离的截图和下载产物。
+Browser 是使用外部浏览器可执行文件的有状态 Playwright MCP。它提供结构化页面交互、有界且默认脱敏的网络/JavaScript 诊断，以及项目隔离的截图和下载产物；任务镜像只安装 Playwright 包。
 
 ## 用途与适用场景
 
@@ -65,7 +65,7 @@ ipc-mcp-server --help
 
 ## 常见错误与限制
 
-当前尚未实现 Tab 管理、Frame/Storage 工具、Trace、HAR、设备模拟和路由改写。Browser MCP 也不复用宿主机 Chrome Profile，不替代 ZAP 的爬虫或主动扫描。
+当前尚未实现 Tab 管理、Frame/Storage 工具、Trace、HAR、设备模拟和路由改写。Browser MCP 也不复用宿主机 Chrome Profile。
 
 ## 调试入口与实现位置
 
@@ -81,7 +81,7 @@ ipc-mcp-server browser --transport stdio
 
 ## 关联条目
 
-- 可通过 Memory 工具目录查看 `browser MCP`、ZAP 和其他 Web 工具条目。
+- 可通过 Memory 工具目录查看 `browser MCP` 和其他 Web 工具条目。
 
 ## 官方参考
 

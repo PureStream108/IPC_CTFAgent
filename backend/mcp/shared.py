@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import requests
-
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 
 
