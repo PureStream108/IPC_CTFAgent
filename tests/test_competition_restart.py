@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 from psycopg.types.json import Jsonb
 
-from backend.blackboard import graph_store
 from backend.competition.fixture import FixturePlatform
 from backend.competition.service import CompetitionService
 from backend.competition.store import CompetitionConflict

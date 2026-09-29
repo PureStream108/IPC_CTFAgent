@@ -441,6 +441,94 @@ def test_orchestrator_adds_members_without_per_member_admission(state):
     orch.shutdown()
 
 
+def test_start_project_async_redispatches_owned_running_project(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        edge_store.create_intent(conn, pid, ["origin"], "keep working", "diamond")
+        graph_store.set_status(conn, pid, "running")
+
+    state.config.runtime.sandbox_backend = "local"
+    state.limiter.max_concurrent_tasks = 1
+    assert state.limiter.acquire(pid) is True
+    state.pool.get(pid, "jade")
+
+    orch = Orchestrator(
+        state,
+        max_workers=1,
+        scripts={
+            name: [{"action": "done", "reason": "redispatch ok"}]
+            for name in (
+                "amber", "agate", "topaz", "sugilite", "aventurine",
+                "pearl", "sapphire", "jade", "obsidian", "opal",
+            )
+        },
+    )
+    assert orch._ensure_project_lease(pid) is True
+
+    orch.start_project_async(pid)
+    launched = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        with orch._lock:
+            futures = list(orch._futures.get(pid, []))
+        if futures:
+            launched = True
+            if all(future.done() for future in futures):
+                break
+        time.sleep(0.05)
+
+    assert launched
+    entries = state.logger.read_log("project", pid, None)
+    assert any(entry["event"] == "member_done" for entry in entries)
+    orch.shutdown()
+
+
+def test_dispatch_project_launches_intent_created_by_reason(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+
+    state.config.runtime.sandbox_backend = "local"
+    state.limiter.max_concurrent_tasks = 1
+    assert state.limiter.acquire(pid) is True
+    state.pool.get(pid, "jade")
+
+    orch = Orchestrator(
+        state,
+        max_workers=1,
+        scripts={
+            name: [{"action": "done", "reason": "reason dispatch ok"}]
+            for name in (
+                "amber", "agate", "topaz", "sugilite", "aventurine",
+                "pearl", "sapphire", "jade", "obsidian", "opal",
+            )
+        },
+    )
+    assert orch._ensure_project_lease(pid) is True
+
+    orch._dispatch_project(pid)
+    launched = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        with orch._lock:
+            futures = list(orch._futures.get(pid, []))
+        if futures:
+            launched = True
+            if all(future.done() for future in futures):
+                break
+        time.sleep(0.05)
+
+    assert launched
+    entries = state.logger.read_log("project", pid, None)
+    assert any(entry["event"] == "diamond_reason_planned" for entry in entries)
+    assert any(entry["event"] == "member_done" for entry in entries)
+    orch.shutdown()
+
+
 def test_task_slot_queue_starts_next_project_after_release(state):
     from backend.core.orchestrator import Orchestrator
 
@@ -468,6 +556,36 @@ def test_task_slot_queue_starts_next_project_after_release(state):
     assert Lifecycle(state.db).status(project_ids[2]) == "running"
     assert state.limiter.active_tasks() == sorted(project_ids[1:])
     assert list(orch._pending_projects) == []
+    orch.shutdown()
+
+
+def test_stop_project_leaves_durable_stopped_status(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state)
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+    orch = Orchestrator(state, max_workers=1)
+    orch.stop_project(pid)
+
+    assert Lifecycle(state.db).status(pid) == "stopped"
+    orch._tick()
+    assert Lifecycle(state.db).status(pid) == "stopped"
+    orch.shutdown()
+
+
+def test_stop_project_preserves_solved_status(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state)
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+        graph_store.set_status(conn, pid, "flag_found")
+        graph_store.set_status(conn, pid, "solved")
+    orch = Orchestrator(state, max_workers=1)
+    orch.stop_project(pid)
+
+    assert Lifecycle(state.db).status(pid) == "solved"
     orch.shutdown()
 
 

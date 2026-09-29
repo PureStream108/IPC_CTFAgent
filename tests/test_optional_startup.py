@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from backend import cli
-from backend.api.config import ConfigUpdate, LLMUpdate, RuntimeUpdate, update_config
+from backend.api.config import ConfigUpdate, LLMUpdate, update_config
 from backend.core.config import AppConfig, MEMBER_NAMES, load_config
 from backend.core.state import AppState
 

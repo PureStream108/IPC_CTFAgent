@@ -154,6 +154,9 @@ class _FixtureOrchestrator:
     def active_member_owners(self) -> dict[str, str]:
         return dict(self.owners)
 
+    def startup_in_progress(self, _project_id: str) -> bool:
+        return False
+
     def start_project_async(self, project_id: str) -> dict[str, str]:
         self.started.append(project_id)
         self._refresh_owners()
@@ -705,5 +708,76 @@ def test_wp_dispatch_caps_concurrency_under_archive_pressure(tmp_path, monkeypat
         assert counters["maximum"] <= 2
     finally:
         gate.set()
+        service.shutdown()
+        db.close()
+
+
+def test_resume_restores_original_member_challenge_pairing(tmp_path):
+    platform = FixturePlatform(
+        [
+            PlatformChallenge(
+                external_id=f"resume-{index}", title=f"Resume {index}",
+                category="misc", description="resume fixture",
+            )
+            for index in range(4)
+        ],
+        flags={f"resume-{index}": f"flag{{resume-{index}}}" for index in range(4)},
+        remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "resume"
+    )
+    try:
+        snapshot = service.start(workflow_id, "resume-run")
+        run_id = snapshot["run"]["id"]
+        service.tick()
+        service.tick()
+        original = {
+            item["challenge_id"]: (item["member"], item["session_id"])
+            for item in service.store.assignments(run_id, active_only=True)
+        }
+        assert len(original) == 4
+
+        paused = service.control(
+            run_id, "pause", service.store.get_run(run_id)["revision"]
+        )
+        assert paused["run"]["status"] == "paused"
+        assert service.store.assignments(run_id, active_only=True) == []
+
+        with db.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,metadata FROM competition_challenges"
+            ).fetchall()
+            ordered = sorted(
+                rows,
+                key=lambda row: (str(row["metadata"].get("ready_at") or ""), row["id"]),
+            )
+            for index, row in enumerate(reversed(ordered)):
+                connection.execute(
+                    """UPDATE competition_challenges
+                       SET metadata = jsonb_set(metadata, '{ready_at}', to_jsonb(%s::text), true)
+                       WHERE id=%s""",
+                    (f"2026-01-01T00:00:0{index}+00:00", row["id"]),
+                )
+
+        resumed = service.control(
+            run_id, "resume", service.store.get_run(run_id)["revision"]
+        )
+        assert resumed["run"]["status"] == "running"
+        service.tick()
+
+        restored = {
+            item["challenge_id"]: (item["member"], item["session_id"])
+            for item in service.store.assignments(run_id, active_only=True)
+        }
+        assert restored == original
+        with db.connect() as connection:
+            restored_events = connection.execute(
+                """SELECT count(*) AS count FROM competition_run_events
+                   WHERE run_id=%s AND kind='assignment.restored'""",
+                (run_id,),
+            ).fetchone()
+        assert restored_events["count"] == 4
+    finally:
         service.shutdown()
         db.close()
