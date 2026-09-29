@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.getenv("IPC_GZ_BASE_URL", ""))
     parser.add_argument("--username", default=os.getenv("IPC_GZ_USERNAME", ""))
     parser.add_argument("--password", default=os.getenv("IPC_GZ_PASSWORD", ""))
+    parser.add_argument("--token", default=os.getenv("IPC_GZ_TOKEN", ""), help="GZCTF_Token cookie")
     parser.add_argument("--game", type=int, required=True)
     parser.add_argument("--output", type=Path, default=TARGETS_PATH)
     args = parser.parse_args()
@@ -29,6 +30,7 @@ def main() -> int:
         base_url=args.base_url,
         username=args.username,
         password=args.password,
+        token=args.token,
     ) as client:
         client.login()
         game = client.get_game(args.game)

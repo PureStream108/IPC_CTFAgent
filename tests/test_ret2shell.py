@@ -19,7 +19,7 @@ from backend.platform.ret2shell import (
     Ret2ShellRateLimitError,
     _SubmitRateLimiter,
 )
-from backend.platform.ret2shell_mcp import WsrxTunnelManager, build_ret2shell_mcp
+from backend.platform.ret2shell.mcp import WsrxTunnelManager, build_ret2shell_mcp
 from backend.server.app import create_app
 from tests.helpers import setup_test_auth, write_mock_config
 
@@ -695,7 +695,9 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
         assert "nc target 1337" in facts.get("origin", "")
         graph_store.set_flag(conn, item["project_id"], "flag{r2s}")
         graph_store.set_status(conn, item["project_id"], "completed")
-    assert api_client.get(f"/api/flags/{item['project_id']}").json()["flag"] == "flag{r2s}"
+    flag_response = api_client.get(f"/api/flags/{item['project_id']}")
+    assert flag_response.json()["flag"].startswith("sha256:")
+    assert api_client.get(f"/api/flags/{item['project_id']}?reveal=true").json()["flag"] == "flag{r2s}"
 
 
 def test_field_mapping_requires_list_url_for_http_json():
