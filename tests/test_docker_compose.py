@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-def test_compose_persists_app_exports_and_claude_native_sessions():
+def test_compose_persists_app_exports_and_postgres_state():
     raw = Path("docker-compose.yml").read_text(encoding="utf-8")
     compose = yaml.safe_load(raw)
     app = compose["services"]["ipc-app"]
@@ -14,14 +14,11 @@ def test_compose_persists_app_exports_and_claude_native_sessions():
     # ./data is the app's host bind mount for durable IPC state and exports.
     assert binds.get("./data") == "/app/data"
 
-    # PostgreSQL and Claude native sessions use their own named volumes. Large
-    # solver artifacts are shared through the host's ./data bind mount.
-    assert set(compose.get("volumes", {})) == {
-        "ipc_claude_home",
-        "ipc_postgres_data",
-    }
-    runner_volumes = compose["services"]["ipc-claude-runner"]["volumes"]
-    assert "ipc_claude_home:/home/node/.claude" in runner_volumes
+    # PostgreSQL is the only named volume. Every agent runs in-process through
+    # the unified runtime, so there is no sidecar session store to persist.
+    assert set(compose.get("volumes", {})) == {"ipc_postgres_data"}
+    assert "ipc-claude-runner" not in compose["services"]
+    assert "claude" not in raw.lower()
     assert {src for src in binds if not src.startswith((".", "/"))} == set()
     for legacy in ("ipc_data", "ipc_memory", "ipc_wp", "ipc_runtime_logs", "ipc_projects"):
         assert legacy not in raw

@@ -21,7 +21,6 @@ from backend.members.adapters import (
 from backend.mcp.mcp_client import MCPClient
 from backend.ops.network import NetworkPolicyError, WorkflowHttpClient
 from backend.ops.ipc_mcp import build_ipc_mcp
-from backend.ops.service import _claude_log_events, _parse_tool_call
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolExecutor
 from backend.server.app import create_app
@@ -54,130 +53,86 @@ def configure_mock(client: TestClient):
     return response
 
 
-def test_tool_call_accepts_json_string_arguments():
-    assert _parse_tool_call(
-        {
-            "name": "host_exec",
-            "arguments": '{"command":"ls -la","timeout":15}',
-        }
-    ) == ("host_exec", {"command": "ls -la", "timeout": 15})
+def _streaming_adapter(turns):
+    """Build a ConversationAdapter stand-in that replays scripted turns."""
 
+    class FakeConversationAdapter:
+        def __init__(self, *args, **kwargs):
+            self.turns = list(turns)
+            self.seen = []
+            self.tool_names = []
+            FakeConversationAdapter.instances.append(self)
 
-def test_claude_log_events_redact_tool_output_and_render_tools():
-    events = _claude_log_events(
-        {
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "tool_use", "name": "Bash", "input": {"command": "echo secret-value"}},
-                ]
-            },
-        },
-        {"platform_token": "secret-value"},
-    )
-    assert events == [{"kind": "tool", "label": "Tool · Bash", "text": '{"command": "echo {{secret.platform_token}}"}'}]
+        def turn(self, messages, system, tools, emit, cancel):
+            self.seen.append(list(messages))
+            self.tool_names = [tool["name"] for tool in tools]
+            turn = self.turns.pop(0)
+            emit(turn.text)
+            return turn
 
-
-def test_chat_stream_forwards_live_events_and_final_response(client, monkeypatch):
-    client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "claudecode",
-            "api_key": "ops-secret-key",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "model": "deepseek-v4-flash",
-        },
-    )
-    service = client.app.state.ipc.ops_agent_service
-
-    class FakeRunner:
-        enabled = True
-
-        def stream(self, **kwargs):
-            yield {"type": "started", "message": "started"}
-            yield {
-                "type": "event",
-                "event": {
-                    "type": "assistant",
-                    "message": {
-                        "content": [
-                            {"type": "tool_use", "name": "Bash", "input": {"command": "id"}},
-                        ]
-                    },
-                },
-            }
-            yield {
-                "type": "result",
-                "reply": json.dumps({"reply": "log visible", "workflow": None}),
-                "tool_events": [{"name": "Bash"}],
+        def tool_result(self, call, output):
+            return {
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(output, ensure_ascii=False),
             }
 
-    service.claude_runner = FakeRunner()
-    response = client.post("/api/ops/chat/stream", json={"message": "run a safe test"})
+    FakeConversationAdapter.instances = []
+    return FakeConversationAdapter
 
+
+def _configure_openai(client, **extra):
+    payload = {
+        "api_format": "openai",
+        "api_key": "openai-secret-key",
+        "base_url": "https://api.openai.invalid/v1",
+        "model": "openai-model",
+    }
+    payload.update(extra)
+    response = client.put("/api/ops/config", json=payload)
     assert response.status_code == 200
-    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-    assert events[0]["type"] == "session"
-    assert events[1]["type"] == "run"
-    assert events[1]["run_id"].startswith("run_")
-    assert any(item["type"] == "log" and item["event"]["label"] == "Tool · Bash" for item in events)
-    completed = next(item for item in events if item["type"] == "complete")
-    assert completed["response"]["reply"] == "log visible"
-    assert completed["response"]["tool_calls"] == [{"name": "Bash"}]
-    history = client.get(f"/api/ops/sessions/{completed['response']['session_id']}")
-    assert history.status_code == 200
-    assert any(event["label"] == "Tool · Bash" for event in history.json()["events"])
+    return client.app.state.ipc.ops_agent_service
 
 
-def test_openai_chat_stream_runs_in_background_with_live_tool_events(client, monkeypatch):
-    response = client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "openai",
-            "api_surface": "responses",
-            "api_key": "openai-secret-key",
-            "base_url": "https://api.openai.invalid/v1",
-            "model": "openai-model",
-        },
-    )
-    assert response.status_code == 200
-    service = client.app.state.ipc.ops_agent_service
-    calls = []
-    answers = iter(
+class _HealthTools:
+    def catalog(self):
+        return [
+            {
+                "name": "task_sandbox_health",
+                "description": "probe",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+
+    def execute(self, name, arguments):
+        return {"ok": True, "status": "running"}
+
+
+def test_ops_tool_transcript_is_durable_and_visible_to_the_next_turn(client, monkeypatch):
+    """The intermediate tool call and its result must survive into context.
+
+    The previous protocol fed tool rounds back as throwaway prose and stored
+    only the final reply, so a later turn could not see what had already run.
+    """
+    from backend.competition.conversation import ToolCall, Turn
+
+    service = _configure_openai(client, api_surface="responses")
+    adapter_class = _streaming_adapter(
         [
-            json.dumps(
-                {
-                    "reply": "",
-                    "workflow": None,
-                    "tool_call": {
-                        "name": "task_sandbox_health",
-                        "arguments": {"project_id": "proj_openai"},
-                    },
-                }
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "call-1"}]}],
+                [ToolCall("call-1", "task_sandbox_health", {"project_id": "proj_openai"})],
+                "",
             ),
-            json.dumps(
-                {
-                    "reply": "OpenAI action completed",
-                    "workflow": None,
-                    "tool_call": None,
-                }
+            Turn(
+                [{"role": "assistant", "content": "OpenAI action completed"}],
+                [],
+                "OpenAI action completed",
             ),
         ]
     )
-
-    class FakeAdapter:
-        def chat(self, messages, **kwargs):
-            calls.append((list(messages), kwargs))
-            return next(answers)
-
-    class FakeTools:
-        def execute(self, name, arguments):
-            assert name == "task_sandbox_health"
-            assert arguments == {"project_id": "proj_openai"}
-            return {"ok": True, "status": "running"}
-
-    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
-    service.tools = FakeTools()
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
+    service.tools = _HealthTools()
 
     streamed = client.post("/api/ops/chat/stream", json={"message": "inspect the sandbox"})
 
@@ -195,47 +150,167 @@ def test_openai_chat_stream_runs_in_background_with_live_tool_events(client, mon
     assert completed["tool_calls"] == [
         {"name": "task_sandbox_health", "project_id": "proj_openai", "ok": True}
     ]
-    assert len(calls) == 2
-    assert "TOOL_RESULT task_sandbox_health" in calls[1][0][-1]["content"]
-    history = client.get(f"/api/ops/sessions/{completed['session_id']}").json()
+
+    # The workflow proposal is a real tool now, not a field parsed out of prose.
+    adapter = adapter_class.instances[0]
+    assert "propose_platform_workflow" in adapter.tool_names
+
+    # The second turn sees the actual assistant tool call and its tool result.
+    second_turn = adapter.seen[1]
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in second_turn)
+    tool_messages = [m for m in second_turn if m.get("role") == "tool"]
+    assert tool_messages
+    assert "running" in tool_messages[-1]["content"]
+
+    # And it is durable: the transcript is in agent_events, not just in memory.
+    session_id = completed["session_id"]
+    agent_session_id = service.store.agent_session_id(session_id)
+    assert agent_session_id
+    kinds = [event["kind"] for event in service.agent_store.events(agent_session_id)]
+    assert kinds == [
+        "provider_messages",
+        "provider_messages",
+        "tool_call",
+        "tool_result",
+        "provider_messages",
+    ]
+
+    history = client.get(f"/api/ops/sessions/{session_id}").json()
     assert history["active_run"] is None
-    assert history["context_mode"] == "ipc_history"
+    # One runtime: context always comes from the durable agent transcript.
+    assert history["context_mode"] == "agent_session"
     assert history["agent_context_ready"] is True
+    assert history["agent_session_id"] == agent_session_id
     assert [item["content"] for item in history["messages"]] == [
         "inspect the sandbox",
         "OpenAI action completed",
     ]
 
 
-def test_openai_chat_stream_can_be_interrupted_without_claude_runner(client, monkeypatch):
-    client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "openai",
-            "api_key": "openai-secret-key",
-            "base_url": "https://api.openai.invalid/v1",
-            "model": "openai-model",
-        },
+def test_ops_has_no_fixed_tool_round_ceiling(client, monkeypatch):
+    """A long investigation is ordinary work, not a condition to abort on."""
+    from backend.competition.conversation import ToolCall, Turn
+
+    service = _configure_openai(client)
+    turns = [
+        Turn(
+            [{"role": "assistant", "tool_calls": [{"id": f"call-{index}"}]}],
+            [ToolCall(f"call-{index}", "task_sandbox_health", {"round": index})],
+            "",
+        )
+        for index in range(20)
+    ]
+    turns.append(
+        Turn([{"role": "assistant", "content": "done after 20"}], [], "done after 20")
     )
-    service = client.app.state.ipc.ops_agent_service
+    adapter_class = _streaming_adapter(turns)
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
+    service.tools = _HealthTools()
+
+    result = service.chat(message="keep digging")
+
+    assert result["reply"] == "done after 20"
+    assert len(result["tool_calls"]) == 20
+
+
+def test_ops_workflow_proposal_is_an_explicit_tool_call(client, monkeypatch):
+    from backend.competition.conversation import ToolCall, Turn
+
+    service = _configure_openai(client)
+    spec = {
+        "name": "Proposed",
+        "challenges": {
+            "list_url": "https://ctf.invalid/api/challenges",
+            "list_path": "data",
+            "id_field": "id",
+            "title_field": "name",
+        },
+    }
+    adapter_class = _streaming_adapter(
+        [
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "wf-1"}]}],
+                [ToolCall("wf-1", "propose_platform_workflow", {"spec": spec})],
+                "",
+            ),
+            Turn(
+                [{"role": "assistant", "content": "drafted a workflow"}],
+                [],
+                "drafted a workflow",
+            ),
+        ]
+    )
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
+
+    result = service.chat(message="build me a platform workflow")
+
+    assert result["reply"] == "drafted a workflow"
+    assert len(result["proposals"]) == 1
+    assert result["proposals"][0]["name"] == "Proposed"
+    # A draft is never executable until the operator confirms it.
+    assert result["proposals"][0]["status"] == "draft"
+
+
+def test_ops_rejects_an_invalid_workflow_proposal_without_failing_the_turn(client, monkeypatch):
+    from backend.competition.conversation import ToolCall, Turn
+
+    service = _configure_openai(client)
+    adapter_class = _streaming_adapter(
+        [
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "wf-bad"}]}],
+                [ToolCall("wf-bad", "propose_platform_workflow", {"spec": {"name": "broken"}})],
+                "",
+            ),
+            Turn(
+                [{"role": "assistant", "content": "could not draft it"}],
+                [],
+                "could not draft it",
+            ),
+        ]
+    )
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
+
+    result = service.chat(message="build a broken workflow")
+
+    assert result["proposals"] == []
+    assert "was not saved" in result["proposal_error"]
+    # The model is told why, so it can correct course inside the same session.
+    adapter = adapter_class.instances[0]
+    tool_messages = [m for m in adapter.seen[1] if m.get("role") == "tool"]
+    assert "was not saved" in tool_messages[-1]["content"]
+
+def test_openai_chat_stream_can_be_interrupted(client, monkeypatch):
+    """Cancellation must land at a safe boundary and discard the late answer."""
+    from backend.competition.conversation import Turn
+
+    service = _configure_openai(client)
     entered = threading.Event()
     release = threading.Event()
 
-    class FakeAdapter:
-        def chat(self, messages, **kwargs):
+    class BlockingAdapter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def turn(self, messages, system, tools, emit, cancel):
             entered.set()
-            assert release.wait(timeout=3)
-            return json.dumps({"reply": "must be discarded", "workflow": None})
+            assert release.wait(timeout=5)
+            if cancel.is_set():
+                raise InterruptedError("session cancelled")
+            return Turn(
+                [{"role": "assistant", "content": "must be discarded"}],
+                [],
+                "must be discarded",
+            )
 
-    class DisabledRunner:
-        enabled = False
+        def tool_result(self, call, output):
+            return {"role": "tool", "tool_call_id": call.id, "content": "{}"}
 
-    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
-    service.claude_runner = DisabledRunner()
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", BlockingAdapter)
     follower = service.chat_stream(message="start an OpenAI action")
     session_event = next(follower)
     run_event = next(follower)
-    assert entered.wait(timeout=3)
+    assert entered.wait(timeout=5)
 
     interrupted = client.post(
         "/api/ops/chat/interrupt",
@@ -260,26 +335,17 @@ def test_openai_chat_stream_can_be_interrupted_without_claude_runner(client, mon
     assert "must be discarded" not in json.dumps(history, ensure_ascii=False)
 
 
-def test_interrupt_chat_requests_runner_cancellation_and_persists_status(client):
+def test_interrupt_chat_requests_cancellation_and_persists_status(client):
     client.put(
         "/api/ops/config",
         json={
-            "api_format": "claudecode",
+            "api_format": "anthropic",
             "api_key": "ops-secret-key",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "model": "deepseek-v4-flash",
+            "base_url": "https://api.anthropic.com",
+            "model": "claude-opus-4-8",
         },
     )
     service = client.app.state.ipc.ops_agent_service
-
-    class FakeRunner:
-        enabled = True
-
-        def cancel(self, run_id):
-            assert run_id == "run_0123456789abcdef"
-            return {"ok": True, "run_id": run_id, "status": "interrupting"}
-
-    service.claude_runner = FakeRunner()
     session_id = service.store.create_session("interrupt") ["id"]
     # Linked project events are mirrored through IPCLogger.  The event's own
     # ``kind`` field must not collide with the logger's destination argument.
@@ -310,131 +376,6 @@ def test_active_ipc_conversation_cannot_be_deleted(client):
     assert response.status_code == 409
     assert "interrupt" in response.json()["detail"]
     assert service.store.get_session(session_id)["id"] == session_id
-
-
-def test_interrupted_claude_stream_finishes_the_chat_normally(client):
-    client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "claudecode",
-            "api_key": "ops-secret-key",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "model": "deepseek-v4-flash",
-        },
-    )
-    service = client.app.state.ipc.ops_agent_service
-
-    class FakeRunner:
-        enabled = True
-
-        def stream(self, **kwargs):
-            assert kwargs["run_id"].startswith("run_")
-            yield {"type": "started", "message": "started"}
-            yield {"type": "interrupted", "message": "IPC interrupted by operator"}
-
-    service.claude_runner = FakeRunner()
-    response = client.post("/api/ops/chat/stream", json={"message": "long running task"})
-
-    assert response.status_code == 200
-    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-    completed = next(item["response"] for item in events if item["type"] == "complete")
-    assert completed["interrupted"] is True
-    history = client.get(f"/api/ops/sessions/{completed['session_id']}").json()
-    assert history["messages"][-1]["content"] == "IPC 已被操作员打断；已产生的实时日志已保存。"
-
-
-def test_claude_stream_resumes_the_native_session_without_replaying_history(client):
-    client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "claudecode",
-            "api_key": "ops-secret-key",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "model": "deepseek-v4-flash",
-        },
-    )
-    service = client.app.state.ipc.ops_agent_service
-    calls = []
-    native_session_id = "05801f61-7b2c-4a5a-8db8-6cb1a7d54914"
-
-    class FakeRunner:
-        enabled = True
-
-        def stream(self, **kwargs):
-            calls.append(kwargs)
-            yield {"type": "started", "message": "started"}
-            yield {"type": "claude_session", "session_id": native_session_id}
-            yield {
-                "type": "result",
-                "session_id": native_session_id,
-                "reply": json.dumps({"reply": f"answer {len(calls)}", "workflow": None}),
-            }
-
-    service.claude_runner = FakeRunner()
-    first = client.post("/api/ops/chat/stream", json={"message": "remember alpha"})
-    first_events = [json.loads(line) for line in first.text.splitlines() if line.strip()]
-    session_id = first_events[0]["session_id"]
-    second = client.post(
-        "/api/ops/chat/stream",
-        json={"session_id": session_id, "message": "what did I ask?"},
-    )
-
-    assert second.status_code == 200
-    assert calls[0]["resume_session_id"] is None
-    assert calls[0]["prompt"] == "remember alpha"
-    assert calls[1]["resume_session_id"] == native_session_id
-    assert calls[1]["prompt"] == "what did I ask?"
-    view = client.get(f"/api/ops/sessions/{session_id}").json()
-    assert view["agent_context_ready"] is True
-    assert view["active_run"] is None
-    assert [item["content"] for item in view["messages"]] == [
-        "remember alpha",
-        "answer 1",
-        "what did I ask?",
-        "answer 2",
-    ]
-
-
-def test_claude_background_run_survives_stream_follower_disconnect(client):
-    client.put(
-        "/api/ops/config",
-        json={
-            "api_format": "claudecode",
-            "api_key": "ops-secret-key",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "model": "deepseek-v4-flash",
-        },
-    )
-    service = client.app.state.ipc.ops_agent_service
-    release = threading.Event()
-
-    class FakeRunner:
-        enabled = True
-
-        def stream(self, **kwargs):
-            yield {"type": "started", "message": "started"}
-            assert release.wait(timeout=3)
-            yield {
-                "type": "result",
-                "session_id": "afa728e4-6494-4663-89db-e6f2b07ff372",
-                "reply": json.dumps({"reply": "finished in background", "workflow": None}),
-            }
-
-    service.claude_runner = FakeRunner()
-    follower = service.chat_stream(message="keep working")
-    session_event = next(follower)
-    run_event = next(follower)
-    follower.close()
-    release.set()
-
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        if service.store.get_run(run_event["run_id"])["status"] == "completed":
-            break
-        time.sleep(0.02)
-    run = service.store.get_run(run_event["run_id"])
-    assert run["status"] == "completed"
-    assert service.session_view(session_event["session_id"])["messages"][-1]["content"] == "finished in background"
 
 
 def test_ops_store_uses_shared_postgres_schema(client):
@@ -744,20 +685,24 @@ def test_chat_accepts_direct_credentials(client, message):
 
 
 def test_agent_can_propose_a_workflow_without_seeing_secret(client, monkeypatch):
+    from backend.competition.conversation import ToolCall, Turn
+
     configure_mock(client)
-    seen_messages = []
-
-    class FakeAdapter:
-        def chat(self, messages, **kwargs):
-            seen_messages.extend(messages)
-            return json.dumps(
-                {
-                    "reply": "I prepared a reviewable workflow draft.",
-                    "workflow": workflow_payload(),
-                }
-            )
-
-    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
+    adapter_class = _streaming_adapter(
+        [
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "wf"}]}],
+                [ToolCall("wf", "propose_platform_workflow", {"spec": workflow_payload()})],
+                "",
+            ),
+            Turn(
+                [{"role": "assistant", "content": "I prepared a reviewable workflow draft."}],
+                [],
+                "I prepared a reviewable workflow draft.",
+            ),
+        ]
+    )
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
     response = client.post(
         "/api/ops/chat",
         json={
@@ -771,11 +716,15 @@ def test_agent_can_propose_a_workflow_without_seeing_secret(client, monkeypatch)
     assert response.json()["proposals"][0]["secrets"] == [
         {"name": "platform_token", "secret_set": True}
     ]
-    assert "abcdefghijklmnop" not in json.dumps(seen_messages)
+    # The raw credential never reaches the provider or the response.
+    seen = adapter_class.instances[0].seen
+    assert "abcdefghijklmnop" not in json.dumps(seen, ensure_ascii=False)
     assert "abcdefghijklmnop" not in response.text
 
 
 def test_ops_tools_are_exposed_and_chat_runs_a_tool_loop(client, monkeypatch):
+    from backend.competition.conversation import ToolCall, Turn
+
     configure_mock(client)
     tools_response = client.get("/api/ops/tools")
     assert tools_response.status_code == 200
@@ -788,42 +737,46 @@ def test_ops_tools_are_exposed_and_chat_runs_a_tool_loop(client, monkeypatch):
 
     class FakeTools:
         def catalog(self):
-            return []
+            return [
+                {
+                    "name": "host_exec",
+                    "description": "run as root on the host",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ]
 
         def execute(self, name, arguments):
             executed.append((name, arguments))
             return {"ok": True, "privilege": "host-root", "stdout": "uid=0(root)"}
 
     service.tools = FakeTools()
-    responses = iter(
+    adapter_class = _streaming_adapter(
         [
-            json.dumps(
-                {
-                    "reply": "",
-                    "workflow": None,
-                    "tool_call": {
-                        "name": "host_exec",
-                        "arguments": {"command": "id", "timeout": 10},
-                    },
-                }
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "host-1"}]}],
+                [ToolCall("host-1", "host_exec", {"command": "id", "timeout": 10})],
+                "",
             ),
-            json.dumps({"reply": "宿主机检查完成：uid=0(root)", "workflow": None, "tool_call": None}),
+            Turn(
+                [{"role": "assistant", "content": "宿主机检查完成：uid=0(root)"}],
+                [],
+                "宿主机检查完成：uid=0(root)",
+            ),
         ]
     )
-    seen_messages = []
-
-    class FakeAdapter:
-        def chat(self, messages, **kwargs):
-            seen_messages.append(list(messages))
-            return next(responses)
-
-    monkeypatch.setattr("backend.ops.service.make_adapter", lambda *args, **kwargs: FakeAdapter())
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
     response = client.post("/api/ops/chat", json={"message": "检查宿主机权限"})
 
     assert response.status_code == 200
     assert executed == [("host_exec", {"command": "id", "timeout": 10})]
     assert response.json()["tool_calls"] == [{"name": "host_exec", "project_id": None, "ok": True}]
-    assert "TOOL_RESULT host_exec" in seen_messages[1][-1]["content"]
+    # The tool result reaches the model as a real tool message.
+    tool_messages = [
+        message
+        for message in adapter_class.instances[0].seen[1]
+        if message.get("role") == "tool"
+    ]
+    assert tool_messages and "uid=0(root)" in tool_messages[-1]["content"]
     assert "uid=0(root)" in response.json()["reply"]
 
 
@@ -1386,7 +1339,7 @@ def test_decision_output_error_preserves_safe_response_diagnostics(monkeypatch):
     assert "finish_reason=length" in str(caught.value)
 
 
-def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):
+def test_anthropic_decide_keeps_original_request_fields(monkeypatch):
     captured = {"json": {}, "headers": {}}
 
     class FakeResponse:
@@ -1405,7 +1358,7 @@ def test_existing_claude_decide_keeps_original_request_fields(monkeypatch):
     monkeypatch.setattr("requests.post", fake_post)
     adapter = ClaudeAdapter(
         LLMConfig(
-            api_format="claudecode",
+            api_format="anthropic",
             api_key="key",
             base_url="https://llm.invalid",
             model="model",
