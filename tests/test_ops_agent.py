@@ -1115,7 +1115,9 @@ def test_gpt_56_auto_uses_responses_structured_output(monkeypatch):
     assert calls[0][0] == "https://api.openai.com/v1/responses"
     body = calls[0][1]["json"]
     assert "input" in body and "messages" not in body
-    assert body["max_output_tokens"] == 16384
+    assert not any(
+        key in body for key in ("max_tokens", "max_output_tokens", "max_completion_tokens")
+    )
     assert body["reasoning"] == {"effort": "high"}
     assert body["text"]["format"]["type"] == "json_schema"
     assert "temperature" not in body
@@ -1162,7 +1164,10 @@ def test_gpt_56_auto_falls_back_to_chat_and_caches_surface(monkeypatch):
 
     assert calls[0][0].endswith("/v1/responses")
     assert calls[1][0].endswith("/v1/chat/completions")
-    assert calls[1][1]["max_completion_tokens"] == 16384
+    assert not any(
+        key in calls[1][1]
+        for key in ("max_tokens", "max_output_tokens", "max_completion_tokens")
+    )
     assert calls[1][1]["reasoning_effort"] == "high"
     assert calls[2][0].endswith("/v1/chat/completions")
     assert sum(url.endswith("/responses") for url, _ in calls) == 1
@@ -1293,7 +1298,7 @@ def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
     assert len(requests_seen) == 2
     assert all(body["response_format"] == {"type": "json_object"} for body in requests_seen)
     assert all(body["thinking"] == {"type": "disabled"} for body in requests_seen)
-    assert requests_seen[0]["max_tokens"] == 4096
+    assert "max_tokens" not in requests_seen[0]
     assert requests_seen[0]["temperature"] == 0.0
 
 
