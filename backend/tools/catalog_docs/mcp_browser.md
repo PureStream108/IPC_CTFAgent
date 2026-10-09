@@ -1,6 +1,6 @@
 # browser MCP
 
-在每个 Member 的任务容器中启动独立的 Playwright Chromium 会话，用于渲染页面、执行结构化交互、观察浏览器侧网络与 JavaScript 错误，以及保存截图和下载产物。
+在每个 Member 的任务容器中启动独立的 Playwright 会话，用于渲染页面、执行结构化交互、观察浏览器侧网络与 JavaScript 错误，以及保存截图和下载产物。浏览器二进制由部署环境提供，任务镜像不下载 Chrome/Chromium。
 
 ## 用途与适用场景
 
@@ -52,7 +52,7 @@ ipc-mcp-server browser --transport stdio
 - 默认页面 ID 为 `main`；新打开的页面会获得稳定的 `page_01`、`page_02` 等 ID。
 - 未传 `page_id` 时，工具操作当前活动页面；返回结果会带上实际 `page_id` 和 URL。
 - Browser、Context、页面、Cookie 和事件缓冲区仅属于当前 Member 的本次 solve，不与其他 Member 共享。
-- MCP 会话结束时会关闭 Context、Chromium 和 Playwright，不保留常驻浏览器进程。
+- MCP 会话结束时会关闭 Context、浏览器进程和 Playwright，不保留常驻浏览器进程。
 
 ## 常用工作流
 
@@ -134,7 +134,7 @@ ipc-mcp-server browser --transport stdio
 - 当 `browser_allowed_origins` 非空时，请求层只放行白名单中的 `scheme + host + port`，包括导航重定向和子资源请求。
 - Browser MCP 不复用宿主机浏览器 Profile、账号、扩展或本地登录状态，也不会增加任务容器原本没有的网络权限。
 - 当前版本尚未提供 `tabs_list/tab_*`、Frame 工具、Storage 工具、Trace、HAR、设备模拟或请求改写；不要假定这些 Phase 2/3 能力已经可用。
-- Browser MCP 负责真实浏览器交互与浏览器侧观测，不替代 ZAP 的爬虫或主动扫描能力。
+- Browser MCP 负责真实浏览器交互与浏览器侧观测。
 
 ## 运行时配置
 

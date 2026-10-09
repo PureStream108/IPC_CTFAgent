@@ -16,15 +16,10 @@ from backend.platform.mapping import PlatformChallenge
 DEFAULT_BASE_URL = "https://ctf.xidian.edu.cn"
 DEFAULT_GAME_ID = 37
 
-# ret2shell limits each account to 10 flag submissions per 5-minute window
-# (HTTP 429).  The client-side limiter guards that shared quota.
 SUBMIT_WINDOW_SECONDS = 300.0
 SUBMIT_LIMIT = 10
-# ret2shell judges submissions asynchronously: the POST returns a Submission
-# with ``solved: null`` and the result must be polled.
 SUBMIT_POLL_ATTEMPTS = 7
 SUBMIT_POLL_INTERVAL = 1.0
-# Instance exposed_ports appear asynchronously after a start request.
 INSTANCE_WAIT_TIMEOUT = 60.0
 INSTANCE_WAIT_INTERVAL = 2.0
 

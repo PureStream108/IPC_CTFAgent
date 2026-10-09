@@ -102,6 +102,7 @@ def _config_view(state: AppState) -> dict:
             "browser_artifact_max_bytes": cfg.runtime.browser_artifact_max_bytes,
         },
         "startup_errors": cfg.startup_errors(),
+        "startup_warnings": cfg.startup_warnings(),
     }
 
 

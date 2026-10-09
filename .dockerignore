@@ -1,7 +1,11 @@
 .git
-__pycache__
-*.pyc
+# Unanchored so nested caches are excluded too. A bare "__pycache__" only
+# matches the repository root, which let bytecode for deleted modules (a stale
+# claude_runner.pyc, for one) ride into the image alongside the real sources.
+**/__pycache__
+**/*.pyc
 .pytest_cache
+.venv
 tools/
 data/
 logs/

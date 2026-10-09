@@ -1131,10 +1131,16 @@ class Orchestrator:
             )
             competition_store = None
             competition_service = getattr(self.state, "competition", None)
+            job_store = None
             if competition_assignment is not None:
+                from backend.agent.jobs import AgentJobStore
                 from backend.competition.store import CompetitionStore
 
                 competition_store = CompetitionStore(self.state.db)
+                # Detached jobs are keyed by the agent session, which only a
+                # competition seat has; standalone projects keep the 60s
+                # foreground path.
+                job_store = AgentJobStore(self.state.db)
             deps = MemberDeps(
                 db=self.state.db,
                 logger=self.state.logger,
@@ -1166,6 +1172,8 @@ class Orchestrator:
                     competition_store.advance_message_cursor
                     if competition_store is not None else None
                 ),
+                runtime=self.state.config.runtime,
+                job_store=job_store,
             )
             script = self.scripts.get((project_id, member_name)) or self.scripts.get(member_name)
             member = create_member(cfg, deps, script=script)
@@ -1337,6 +1345,24 @@ class Orchestrator:
                     graph_store.set_agent_state(conn, project_id, member.name, "idle")
 
     # ---- stop ----
+
+    def stop_member(self, member_name: str) -> bool:
+        """Cancel one Member's in-flight work without touching its project.
+
+        The watchdog's middle escalation (P5c): the Member's durable session,
+        its seat and everything it has recorded survive, and only the wedged
+        turn is abandoned. ``stop_project`` would be far too blunt here - it
+        tears down the whole challenge the Member was working on.
+        """
+        with self._lock:
+            targets = [
+                members[member_name]
+                for members in self._members.values()
+                if member_name in members
+            ]
+        for member in targets:
+            member.stop()
+        return bool(targets)
 
     def stop_project(self, project_id: str) -> None:
         self._remove_queued_project(project_id)

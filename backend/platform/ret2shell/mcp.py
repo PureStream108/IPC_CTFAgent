@@ -11,15 +11,8 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from backend.mcp.mcp_server import MCPServer, close_lifespan, create_mcp_server
-from backend.platform.ret2shell import Ret2ShellClient
+from backend.platform.ret2shell.adapter import Ret2ShellClient
 
-# ret2shell does not expose direct host:port pairs: each running instance
-# carries a ``traffic`` token plus the container ``ports``, and the platform
-# web app connects through wsrx (WebSocket Reflector X, XDSEC) links of the
-# form ``wss://<platform>/api/traffic/<token>?port=<port>``.  The backend
-# keeps one ``wsrx connect`` subprocess per (challenge, port) alive so that
-# Members — running in their own containers on the same docker network — can
-# simply connect to ``ipc-app:<local port>``.
 WSRX_BINARY = os.getenv("IPC_R2S_WSRX_BINARY", "wsrx")
 WSRX_BIND_HOST = os.getenv("IPC_R2S_WSRX_BIND_HOST", "0.0.0.0")
 WSRX_ENDPOINT_HOST = os.getenv("IPC_R2S_WSRX_ENDPOINT_HOST", "ipc-app")

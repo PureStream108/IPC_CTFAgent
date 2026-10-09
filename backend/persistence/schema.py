@@ -43,7 +43,7 @@ SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE IF EXISTS reports ADD COLUMN IF NOT EXISTS directions_json JSONB NOT NULL DEFAULT '[]'::jsonb",
     "ALTER TABLE IF EXISTS reports ADD COLUMN IF NOT EXISTS knowledge_json JSONB NOT NULL DEFAULT '[]'::jsonb",
     "ALTER TABLE IF EXISTS memories ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'diamond'",
-    "ALTER TABLE IF EXISTS sessions ADD COLUMN IF NOT EXISTS claude_session_id TEXT",
+    "ALTER TABLE IF EXISTS sessions ADD COLUMN IF NOT EXISTS agent_session_id TEXT",
     "ALTER TABLE IF EXISTS runs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE IF EXISTS runs ADD COLUMN IF NOT EXISTS response_json JSONB",
     "ALTER TABLE IF EXISTS runs ADD COLUMN IF NOT EXISTS error TEXT",
@@ -241,7 +241,7 @@ SCHEMA_STATEMENTS = (
         title TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
-        claude_session_id TEXT
+        agent_session_id TEXT
     )
     """,
     """
@@ -369,9 +369,10 @@ SCHEMA_STATEMENTS = (
 )
 
 
+from backend.agent.schema import AGENT_SCHEMA
 from backend.competition.schema import COMPETITION_SCHEMA
 
-SCHEMA_STATEMENTS = (*SCHEMA_STATEMENTS, *COMPETITION_SCHEMA)
+SCHEMA_STATEMENTS = (*SCHEMA_STATEMENTS, *COMPETITION_SCHEMA, *AGENT_SCHEMA)
 
 # One ordered contract is consumed by both runtime bootstrap and Alembic.
 SCHEMA_CONTRACT_STATEMENTS = (*SCHEMA_COMPATIBILITY_STATEMENTS, *SCHEMA_STATEMENTS)

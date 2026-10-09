@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from backend.core.logging_util import IPCLogger
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
+from backend.agent.jobs import INLINE_LIMIT
 from backend.members.adapters import (
     ACTION_KINDS,
     BaseAdapter,
@@ -33,8 +35,15 @@ from backend.competition.runtime import SessionRunner
 from backend.competition.store import CompetitionConflict
 from backend.competition.conversation import ConversationAdapter, ToolCall
 from backend.competition.transport import ReconSubscriber
+from backend.members.member_tools import (
+    MEMBER_TOOLS,
+    action_payload,
+    is_parallel_safe,
+    is_terminal,
+)
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
+from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.sandbox import Sandbox
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
@@ -52,6 +61,17 @@ _CLI_PROBE_TOOLS = (
     "file", "strings", "xxd", "unzip", "zip", "openssl", "nmap", "gdb",
     "sqlmap", "sage", "node", "npm", "php", "ruby",
 )
+
+_INSTALL_MANAGERS: dict[str, str] = {
+    "apt": "DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends",
+    "pip": "python3 -m pip install --no-cache-dir",
+    "gem": "gem install --no-document",
+    "npm": "npm install -g",
+    "go": "go install",
+}
+_INSTALL_TIMEOUT = 600
+_PACKAGE_NAME_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._+/@:=<>~^-]{0,127}$")
+_MAX_INSTALL_PACKAGES = 12
 
 
 @dataclass
@@ -85,6 +105,13 @@ class MemberDeps:
     competition_recon_endpoint: str | None = None
     competition_recon_replay: Callable[..., list[dict[str, Any]]] | None = None
     competition_recon_advance: Callable[[str, int], int] | None = None
+    # RuntimeConfig, when available: supplies the agent runtime's token and
+    # output budgets. Absent in unit fixtures, where the defaults apply.
+    runtime: Any | None = None
+    # AgentJobStore, when available: backs the detached job tools. Absent in
+    # fixtures without a database, where job_* reports itself unavailable
+    # rather than pretending to start work.
+    job_store: Any | None = None
 
 
 @dataclass
@@ -114,93 +141,6 @@ class _IntentLeaseLost(RuntimeError):
     """Abort the surrounding transaction when a member loses its fence."""
 
 
-_NATIVE_HISTORY_TARGET_BYTES = 512_000
-_NATIVE_HISTORY_MIN_BLOCKS = 6
-_NATIVE_TOOL_CLIP_BYTES = 8_000
-_NATIVE_TOOL_CLIP_KEEP = 3_000
-
-
-def _history_bytes(messages: list[dict[str, Any]]) -> int:
-    return len(
-        json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode()
-    )
-
-
-def _history_blocks(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Group an assistant tool-call message with the tool results it owns."""
-
-    blocks: list[list[dict[str, Any]]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        block = [message]
-        if (
-            isinstance(message, dict)
-            and message.get("role") == "assistant"
-            and message.get("tool_calls")
-        ):
-            call_ids = {
-                str(call.get("id"))
-                for call in message.get("tool_calls") or []
-                if isinstance(call, dict)
-            }
-            index += 1
-            while index < len(messages):
-                candidate = messages[index]
-                if (
-                    isinstance(candidate, dict)
-                    and candidate.get("role") == "tool"
-                    and str(candidate.get("tool_call_id")) in call_ids
-                ):
-                    block.append(candidate)
-                    index += 1
-                    continue
-                break
-            blocks.append(block)
-            continue
-        index += 1
-        blocks.append(block)
-    return blocks
-
-
-def _clip_message_content(message: dict[str, Any], limit: int) -> None:
-    content = message.get("content")
-    if isinstance(content, str) and len(content) > limit:
-        message["content"] = content[:limit] + "\n[older output elided]"
-
-
-def compact_native_history(
-    messages: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
-    """Deterministically shrink a provider-native transcript to fit context.
-
-    Long tool outputs are elided first; when the transcript is still over the
-    target, the oldest complete blocks (an assistant tool-call message plus
-    its tool results) are dropped while the first user message and the most
-    recent exchanges stay intact so the next turn can continue.
-    """
-
-    kept = [dict(message) for message in messages]
-    for message in kept:
-        _clip_message_content(message, _NATIVE_TOOL_CLIP_BYTES)
-    if _history_bytes(kept) <= _NATIVE_HISTORY_TARGET_BYTES:
-        return "elided older tool outputs from the native history", kept
-
-    blocks = _history_blocks(kept)
-    head = blocks[:1]
-    tail = blocks[1:]
-    summary = "dropped the oldest native conversation blocks to fit the provider context"
-    while (
-        len(tail) > _NATIVE_HISTORY_MIN_BLOCKS
-        and _history_bytes(head + tail) > _NATIVE_HISTORY_TARGET_BYTES
-    ):
-        tail.pop(0)
-    compacted = [message for block in head + tail for message in block]
-    if _history_bytes(compacted) > _NATIVE_HISTORY_TARGET_BYTES:
-        for message in compacted:
-            _clip_message_content(message, _NATIVE_TOOL_CLIP_KEEP)
-    return summary, compacted
-
 
 class BaseMember:
     role_blurb = "a versatile CTF solver"
@@ -222,6 +162,30 @@ class BaseMember:
         self._session_runner: SessionRunner | None = None
         self._recon_subscriber: ReconSubscriber | None = None
         self._session_recording_failed = False
+        self._job_service: Any | None = None
+
+    def _jobs(self):
+        """Return the detached-job service, or None when it cannot be backed.
+
+        A job needs a durable row to be pollable across restarts, so without a
+        store the tools report themselves unavailable instead of starting work
+        whose result nothing can read back.
+        """
+        if self._job_service is not None:
+            return self._job_service
+        store = getattr(self.deps, "job_store", None)
+        if store is None or not hasattr(self.deps.sandbox, "exec_detached"):
+            return None
+        assignment = self.deps.competition_assignment
+        session_id = (
+            assignment.get("session_id") if isinstance(assignment, dict) else None
+        )
+        if not session_id:
+            return None
+        from backend.agent.job_service import JobService
+
+        self._job_service = JobService(store, self.deps.sandbox, session_id)
+        return self._job_service
 
     def _competition_session(self) -> SessionRunner | None:
         if self._session_runner is not None:
@@ -239,6 +203,24 @@ class BaseMember:
             tools=[],
         )
         return self._session_runner
+
+    def _renew_session_writer(self, runner=None) -> bool:
+        """Extend this worker's own liveness lease (P5b).
+
+        The coordinator's heartbeat only proves the coordinator is ticking.
+        This is the signal that proves the *worker* is still turning, which is
+        what ``heartbeat_run_assignments`` gates the seat renewal on. Failure
+        is deliberately not fatal: the seat may legitimately have moved on, and
+        the write fence - not this call - is what rejects a stale writer.
+        """
+        writer = getattr(runner or self._session_runner, "writer", None)
+        renew = getattr(writer, "renew", None)
+        if not callable(renew):
+            return False
+        try:
+            return bool(renew())
+        except Exception:
+            return False
 
     def _record_competition_event(self, callback) -> bool:
         runner = self._competition_session()
@@ -721,6 +703,13 @@ class BaseMember:
 
     @staticmethod
     def _native_action_tool() -> dict[str, Any]:
+        """The legacy single tool, kept for callers that pass one tool.
+
+        Superseded by :data:`backend.members.member_tools.MEMBER_TOOLS`, which
+        gives each action its own schema so the provider validates arguments
+        and the runtime can tell reads from side effects. Retained because a
+        provider that rejects a 14-tool schema can still be driven with this.
+        """
         return {
             "name": "member_action",
             "description": (
@@ -742,10 +731,38 @@ class BaseMember:
             },
         }
 
+    def _semantic_compressor(self):
+        """Summarize dropped history with this Member's own model.
+
+        Reusing the Member's configured endpoint keeps compaction inside the
+        credentials and rate limits the deployment already granted it. The
+        runtime falls back to a deterministic projection if this fails, so a
+        summarizer outage never ends a task.
+        """
+        from backend.agent.compaction import summarize
+
+        def request(prompt: str, dropped: list[dict[str, Any]]) -> str:
+            rendered = json.dumps(dropped, ensure_ascii=False)[:400_000]
+            return self.adapter.chat(
+                [{"role": "user", "content": rendered}],
+                system_prompt=prompt,
+                temperature=0.0,
+            )
+
+        def compress(messages: list[dict[str, Any]]):
+            return summarize(messages, request=request)
+
+        return compress
+
     def _make_native_runner(self, tools: list[dict[str, Any]]) -> SessionRunner:
         factory = self.deps.competition_conversation_factory
+        runtime_config = getattr(self.deps, "runtime", None)
         if factory is None:
-            adapter = ConversationAdapter(self.adapter.config)
+            adapter = ConversationAdapter(
+                self.adapter.config,
+                max_output_tokens=getattr(runtime_config, "max_output_tokens", 32768),
+                read_timeout=getattr(runtime_config, "provider_read_timeout", 300),
+            )
         else:
             adapter = factory(self.adapter.config)
         runner = SessionRunner(
@@ -753,12 +770,18 @@ class BaseMember:
             adapter,
             None,  # installed by _solve_with_native_session below
             assignment=self.deps.competition_assignment,
-            compressor=compact_native_history,
+            compressor=self._semantic_compressor(),
+            context_token_limit=getattr(runtime_config, "context_token_limit", 0),
+            compaction_trigger_ratio=getattr(
+                runtime_config, "compaction_trigger_ratio", 0.75
+            ),
+            max_turns=getattr(runtime_config, "max_turns", 0),
             system=(
                 f"You are Member {self.name}, a persistent {self.role_blurb}. "
-                "Use the member_action function for every investigation step. "
-                "Continue until the challenge is solved, a real flag is verified, "
-                "or evidence is genuinely exhausted."
+                "Each action is its own tool; call the one that matches what "
+                "you want to do. Read-only tools may be called together in one "
+                "turn. Continue until the challenge is solved, a real flag is "
+                "verified, or evidence is genuinely exhausted."
             ),
             tools=tools,
             cancel=self._stop,
@@ -767,6 +790,8 @@ class BaseMember:
                 member=self.name, text=text[:2000],
             ),
             before_turn=self._drain_competition_recon,
+            parallel_safe=is_parallel_safe,
+            is_terminal=is_terminal,
         )
         return runner
 
@@ -801,7 +826,7 @@ class BaseMember:
         }
         tool = self._native_action_tool()
         try:
-            runner = self._make_native_runner([tool])
+            runner = self._make_native_runner(list(MEMBER_TOOLS))
         except Exception as exc:
             self._release(project_id, intent_id)
             return SolveResult(
@@ -813,16 +838,25 @@ class BaseMember:
         class Executor:
             async def execute(_self, name, arguments, *, idempotency_key):
                 del idempotency_key
-                if name != "member_action":
-                    state["error"] = f"unsupported provider tool: {name}"
+                try:
+                    # One tool per action now, so the provider has already
+                    # validated the arguments against a real schema; this only
+                    # maps the tool name back onto the legacy action kind that
+                    # the dispatcher and graph bookkeeping are keyed on.
+                    raw = (
+                        action_payload(name, arguments)
+                        if name != tool["name"] else dict(arguments or {})
+                    )
+                except ValueError as exc:
+                    state["error"] = str(exc)
                     runner.cancel.set()
                     return {"status": "rejected", "error": state["error"]}
-                raw = dict(arguments or {})
-                nested = raw.pop("args", None)
-                if isinstance(nested, dict):
-                    merged = dict(nested)
-                    merged.update(raw)
-                    raw = merged
+                if name == tool["name"]:
+                    nested = raw.pop("args", None)
+                    if isinstance(nested, dict):
+                        merged = dict(nested)
+                        merged.update(raw)
+                        raw = merged
                 try:
                     action = MemberAction.from_obj(raw)
                 except (TypeError, ValueError) as exc:
@@ -835,6 +869,10 @@ class BaseMember:
                     state["error"] = "intent lease lost"
                     runner.cancel.set()
                     return {"status": "lease_lost"}
+                # Prove this worker is alive at tool granularity, not just once
+                # per provider response. A single tool can run for minutes, and
+                # the watchdog must be able to tell that from a stopped worker.
+                member._renew_session_writer(runner)
                 loop_status = member._record_action_signature(action)
                 if loop_status == "warn":
                     member._observe(
@@ -924,8 +962,7 @@ class BaseMember:
                             f"New assigned intent {intent_id}. The previous attempt "
                             "ended without a verified flag. Do not repeat an earlier "
                             "final answer or candidate flag; choose a different "
-                            "concrete analysis or exploit action now with the "
-                            "member_action tool."
+                            "concrete analysis or exploit action now."
                         ),
                         event_key=f"session:user:{intent_id}",
                     )
@@ -1018,6 +1055,23 @@ class BaseMember:
                 text = "[invalid bash action omitted: missing non-empty `command`]"
                 self._observe(text)
                 return DispatchResult(invalid_action=True, observation=text)
+            violation = host_path_violation(cmd)
+            if violation is not None:
+                d.logger.project(
+                    "host_path_command_blocked",
+                    project_id,
+                    member=self.name,
+                    intent=intent_id,
+                    command=cmd[:2000],
+                    reason=violation,
+                )
+                text = f"[command blocked: {violation}]"
+                self._observe(text)
+                return DispatchResult(
+                    invalid_action=True,
+                    invalid_knowledge=["host_path_command_blocked"],
+                    observation=text,
+                )
             res = d.sandbox.exec(cmd, timeout=60)
             text = f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip()
             self._observe(text)
@@ -1038,6 +1092,10 @@ class BaseMember:
                     invalid_action=True, invalid_knowledge=knowledge, observation=text
                 )
             return DispatchResult(observation=text)
+        if kind in ("job_start", "job_status", "job_logs", "job_cancel"):
+            return self._dispatch_job(project_id, intent_id, action)
+        if kind == "install":
+            return self._install_packages(project_id, intent_id, action)
         if kind == "tool":
             server = self._string_arg(action.args.get("server", ""))
             tool = self._string_arg(action.args.get("tool", ""))
@@ -1344,7 +1402,8 @@ class BaseMember:
             "-------------------------\n"
             f"- available now: {available}\n"
             f"- missing now: {missing}\n"
-            "- If a command is missing, switch to an available fallback or call tool_search/MCP instead of retrying it."
+            "- If a command is missing, install it into this container with the install action, "
+            "switch to an available fallback, or call tool_search/MCP. Never run a host binary."
         )
 
     def _record_unavailable_cli(self, project_id: str, intent_id: str, command_name: str) -> list[str]:
@@ -1357,8 +1416,9 @@ class BaseMember:
         count = self._missing_tool_counts.get(command_name, 0) + 1
         self._missing_tool_counts[command_name] = count
         self._observe(
-            f"[tool unavailable:{command_name}] This command is missing in the sandbox. "
-            "Use `cat tools.txt` to choose an installed fallback, or call tool_search/MCP."
+            f"[tool unavailable:{command_name}] This command is missing in this container. "
+            "Install it with the install action (manager: apt|pip|gem|npm|go), pick an installed "
+            "fallback from `cat tools.txt`, or call tool_search/MCP. Do not use a host tool."
         )
         self.deps.logger.project(
             "sandbox_tool_unavailable",
@@ -1369,6 +1429,145 @@ class BaseMember:
             count=count,
         )
         return [f"unavailable_cli_tool:{command_name}"]
+
+    def _install_packages(self, project_id, intent_id, action: MemberAction) -> DispatchResult:
+        """Install a missing package inside this task's own container.
+
+        A missing library previously pushed members toward a host interpreter or
+        a host-installed tool. Installing into the container keeps every file and
+        every runtime inside the sandbox.
+        """
+        d = self.deps
+        manager = self._string_arg(action.args.get("manager", "")).strip().lower()
+        raw_packages = action.args.get("packages", [])
+        packages = [str(p).strip() for p in raw_packages] if isinstance(raw_packages, list) else []
+        packages = [p for p in packages if p]
+        problem: str | None = None
+        if manager not in _INSTALL_MANAGERS:
+            problem = (
+                f"unsupported manager {manager!r}; use one of "
+                f"{', '.join(sorted(_INSTALL_MANAGERS))}"
+            )
+        elif not packages:
+            problem = "missing non-empty `packages` list"
+        elif len(packages) > _MAX_INSTALL_PACKAGES:
+            problem = f"install is limited to {_MAX_INSTALL_PACKAGES} packages per action"
+        else:
+            invalid = [p for p in packages if not _PACKAGE_NAME_RE.fullmatch(p)]
+            if invalid:
+                problem = f"invalid package name(s): {', '.join(invalid[:3])}"
+        if problem is not None:
+            d.logger.project(
+                "invalid_install_action",
+                project_id,
+                member=self.name,
+                intent=intent_id,
+                manager=manager,
+                reason=problem,
+            )
+            text = f"[invalid install action omitted: {problem}]"
+            self._observe(text)
+            return DispatchResult(invalid_action=True, observation=text)
+
+        command = f"{_INSTALL_MANAGERS[manager]} {' '.join(shlex.quote(p) for p in packages)}"
+        res = d.sandbox.exec(command, timeout=_INSTALL_TIMEOUT)
+        text = f"$ {command}\n{res.stdout}\n{res.stderr}".strip()
+        self._observe(text)
+        d.logger.tool(
+            "install",
+            project_id,
+            member=self.name,
+            manager=manager,
+            packages=packages,
+            command=command,
+            exit_code=res.exit_code,
+            stdout=res.stdout[:4000],
+            stderr=res.stderr[:4000],
+        )
+        if res.ok:
+            self._tool_availability = None
+            self._missing_tool_counts.clear()
+            return DispatchResult(observation=text)
+        return DispatchResult(
+            invalid_action=True,
+            invalid_knowledge=[f"install_failed:{manager}:{','.join(packages[:3])}"],
+            observation=text,
+        )
+
+    def _dispatch_job(
+        self, project_id: str, intent_id: str, action: MemberAction
+    ) -> DispatchResult:
+        """Run one of the four detached-job actions.
+
+        These are the escape from the 60s ``bash`` ceiling.  Everything that
+        enforces safety on ``bash`` still applies: ``JobService.start`` runs the
+        same ``host_path_violation`` check, so a long job cannot be used to run
+        a command the foreground path refuses.
+        """
+        service = self._jobs()
+        kind = action.kind
+        if service is None:
+            text = (
+                "[job tools unavailable: this session has no durable job store, "
+                "so background work could not be polled. Use bash for commands "
+                "that finish within 60 seconds.]"
+            )
+            self._observe(text)
+            return DispatchResult(invalid_action=True, observation=text)
+
+        if kind == "job_start":
+            command = self._string_arg(action.args.get("command", ""))
+            if not command.strip():
+                text = "[invalid job_start omitted: missing non-empty `command`]"
+                self._observe(text)
+                return DispatchResult(invalid_action=True, observation=text)
+            result = service.start(command)
+        else:
+            job_id = self._string_arg(action.args.get("job_id", "")).strip()
+            if kind == "job_status" and not job_id:
+                # Listing is the useful default: a model that lost track of its
+                # job ids can still find its own work.
+                result = service.jobs()
+            elif not job_id:
+                text = f"[invalid {kind} omitted: missing `job_id`]"
+                self._observe(text)
+                return DispatchResult(invalid_action=True, observation=text)
+            elif kind == "job_status":
+                result = service.status(job_id)
+            elif kind == "job_cancel":
+                result = service.cancel(job_id)
+            else:
+                stream = self._string_arg(action.args.get("stream", "stdout")) or "stdout"
+                raw_offset = action.args.get("offset")
+                offset = None
+                if isinstance(raw_offset, (int, float)) and not isinstance(raw_offset, bool):
+                    offset = int(raw_offset)
+                elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
+                    offset = int(raw_offset.strip())
+                raw_limit = action.args.get("limit")
+                limit = int(raw_limit) if isinstance(raw_limit, (int, float)) else INLINE_LIMIT
+                result = service.logs(
+                    job_id, stream=stream, offset=offset, limit=limit
+                )
+
+        text = f"[{kind}] " + json.dumps(result, ensure_ascii=False, default=str)
+        self._observe(text)
+        # A job poll is the one place a worker is demonstrably alive while
+        # doing nothing the transcript would otherwise show, so it is also a
+        # liveness point (P5b).
+        self._renew_session_writer()
+        self.deps.logger.tool(
+            kind,
+            project_id,
+            member=self.name,
+            intent=intent_id,
+            job_id=result.get("job_id"),
+            state=result.get("state"),
+            ok=bool(result.get("ok", True)),
+        )
+        if not result.get("ok", True):
+            return DispatchResult(invalid_action=True, observation=text)
+        return DispatchResult(observation=text)
 
     def _missing_command_from_result(self, command: str, stderr: str) -> str | None:
         text = stderr or ""
@@ -1653,7 +1852,7 @@ class BaseMember:
         )
 
     def _record_action_signature(self, action: MemberAction) -> str | None:
-        if action.kind not in {"bash", "tool", "tool_search", "memory"}:
+        if action.kind not in {"bash", "tool", "tool_search", "memory", "install"}:
             return None
         sig = action.kind + ":" + json.dumps(action.args, sort_keys=True, ensure_ascii=False)
         self._recent_action_sigs.append(sig)
@@ -1831,8 +2030,12 @@ class BaseMember:
             for attachment in attachments:
                 attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
         runtime_notes = [
-            "If sandbox_backend is LocalSandbox, use host shell-compatible commands only.",
-            "If sandbox_backend is MemberSandbox, use Linux commands inside the shared task container.",
+            "All work happens inside this challenge's Linux task container. Only container paths exist.",
+            "Never touch host paths: no Windows drive paths, no /host, no host interpreter, and no path "
+            "inside the IPC deployment itself (source tree, data/, artifacts/, exports/, writeups, .qa-artifacts). "
+            "Reading a solution or writeup file instead of solving the challenge invalidates the run.",
+            "If a CLI tool or Python library is missing, use the install action to add it to this container "
+            "(manager: apt|pip|gem|npm|go), then retry. Do not substitute a host tool.",
             "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
             "If attachment_true is true, inspect the listed attachments before blind target probing.",
             (

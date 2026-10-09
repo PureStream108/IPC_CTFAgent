@@ -635,7 +635,7 @@ TARGET_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
     ),
     "mem_counter": ("name", "value"),
-    "sessions": ("id", "title", "created_at", "updated_at", "claude_session_id"),
+    "sessions": ("id", "title", "created_at", "updated_at"),
     "messages": ("id", "session_id", "role", "content", "created_at"),
     "runs": (
         "id",

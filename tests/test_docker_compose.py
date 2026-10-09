@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-def test_compose_persists_app_exports_and_claude_native_sessions():
+def test_compose_persists_app_exports_and_postgres_state():
     raw = Path("docker-compose.yml").read_text(encoding="utf-8")
     compose = yaml.safe_load(raw)
     app = compose["services"]["ipc-app"]
@@ -14,14 +14,11 @@ def test_compose_persists_app_exports_and_claude_native_sessions():
     # ./data is the app's host bind mount for durable IPC state and exports.
     assert binds.get("./data") == "/app/data"
 
-    # PostgreSQL and Claude native sessions use their own named volumes. Large
-    # solver artifacts are shared through the host's ./data bind mount.
-    assert set(compose.get("volumes", {})) == {
-        "ipc_claude_home",
-        "ipc_postgres_data",
-    }
-    runner_volumes = compose["services"]["ipc-claude-runner"]["volumes"]
-    assert "ipc_claude_home:/home/node/.claude" in runner_volumes
+    # PostgreSQL is the only named volume. Every agent runs in-process through
+    # the unified runtime, so there is no sidecar session store to persist.
+    assert set(compose.get("volumes", {})) == {"ipc_postgres_data"}
+    assert "ipc-claude-runner" not in compose["services"]
+    assert "claude" not in raw.lower()
     assert {src for src in binds if not src.startswith((".", "/"))} == set()
     for legacy in ("ipc_data", "ipc_memory", "ipc_wp", "ipc_runtime_logs", "ipc_projects"):
         assert legacy not in raw
@@ -58,6 +55,34 @@ def test_task_image_contains_ctf_and_container_mcp_runtimes():
     assert "alembic upgrade head" in app_dockerfile
     assert "chromium" not in app_dockerfile
     assert "rg/ripgrep" in inventory
+    # The inventory is the Member's quick reference, so it has to describe the
+    # 60s bash ceiling and the detached-job escape from it. A model that does
+    # not know job_start exists will keep splitting long work into short
+    # commands and losing intermediate progress.
+    assert "bash is killed after 60 seconds" in inventory
+    for tool in ("job_start", "job_status", "job_logs", "job_cancel"):
+        assert tool in inventory
+    # And that "lost" is not success, which is the one job state a model can
+    # most damagingly misread.
+    assert "Never treat lost as" in inventory
+
+
+def test_build_context_excludes_nested_bytecode_and_local_virtualenvs():
+    """A bare ``__pycache__`` entry only matches the repository root.
+
+    Without the recursive form, bytecode for modules that were deleted from the
+    tree still ships inside the image, so ``backend/ops/__pycache__`` keeps a
+    ``claude_runner`` artifact long after the source is gone.
+    """
+    patterns = [
+        line.strip()
+        for line in Path(".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert "**/__pycache__" in patterns
+    assert "**/*.pyc" in patterns
+    # A local virtualenv would otherwise be copied over the installed package.
+    assert ".venv" in patterns
 
 
 def test_compose_builds_task_image_and_app_depends_on_it():

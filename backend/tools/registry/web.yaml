@@ -24,12 +24,6 @@ tools:
     exec: python commix.py
     tags: [command-injection, rce, web]
     when_to_use: Parameter reflected into a shell command; OS command injection.
-  - name: whatwaf
-    description: Detect and bypass web application firewalls.
-    path: tools/WhatWaf
-    exec: python -m whatwaf
-    tags: [waf, bypass, recon, web]
-    when_to_use: Payloads are being blocked; identify the WAF and find a bypass.
   - name: fenjing
     description: Jinja2/Flask SSTI automatic exploitation (中文 SSTI 工具).
     path: tools/Fenjing

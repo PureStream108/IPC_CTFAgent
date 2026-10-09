@@ -39,15 +39,33 @@ def test_index_served(client):
     assert "First-time setup" not in body
     assert 'await this.authRequest("POST","/auth/setup"' not in body
     assert 'await this.authRequest("POST","/auth/login"' not in body
-    assert "Claude Code action agent with native session context" not in body
     assert "OpenAI-compatible action agent with durable IPC history" not in body
-    assert "Claude Code (native)" in body
+    # The Claude Code sidecar was removed: it must not be offerable as a format.
+    assert "claudecode" not in body
+    assert "Claude Code" not in body
     assert "OpenAI-compatible API" in body
     assert "IPC live log" in body
     assert "Archived" in body
-    assert "Interrupt & Send" in body
+    assert "Interrupt IPC" in body
     assert "/api/ops/chat/interrupt" in body
     assert "interruptOpsRun" in body
+    assert "onOpsInputEnter" in body
+    assert "autoGrowOpsInput" in body
+    assert "Enter to send · Shift+Enter for newline" in body
+    assert "Ctrl+Enter to send" not in body
+    assert 'showOps=false;openIPCConfig()' in body
+    assert '@click="openSkills()"' in body
+    assert "flex flex-col gap-1.5 pb-2 mb-2" in body
+    assert "this.opsWorkflowId===workflowId ? null : workflowId" in body
+    assert "IPC will individually adapt a new platform" in body
+    assert "workflow_id:this.opsWorkflowId" in body
+    assert "skillSearchResults" in body
+    assert "installSkillSpec" in body
+    assert "uploadSkillFile" in body
+    assert "skillDrop(folder)" in body
+    assert "/skills/upload" in body
+    assert '"/skills/move"' in body
+    assert '"/skills/add"' in body
     assert "credentials for IPC" in body
     assert "pollOpsRun" in body
     assert "token/value (never added to chat history)" not in body
@@ -90,6 +108,31 @@ def test_index_served(client):
     assert 'etype:"producer"' not in body
     assert 'etype:kind' in body
     assert 'taxi-direction' not in body
+    # Session-level observability (P6). The console used to render four
+    # different facts as one green dot: API up, coordinator ticking, worker
+    # holding the seat, and the task actually progressing. Each is now
+    # separately visible, and the dot reflects the watchdog's own verdict so
+    # the UI cannot disagree with the system about a stalled session.
+    assert '"/api/agent/sessions?kind=competition"' in body
+    assert '"/api/agent/events?kind=competition"' in body
+    assert "memberHealthDot(item)" in body
+    assert "memberActivity(item)" in body
+    assert "loadSessionHealth" in body
+    assert "connectSessionEvents" in body
+    # Run and session events merge by time rather than being concatenated.
+    assert "mergedEvents()" in body
+    assert "eventSourceFilter" in body
+    # A session with a running job is quiet on purpose, so it must not be
+    # presented as a problem.
+    assert "health.running_jobs>0" in body
+    # Quiet time has its own formatter: the pre-existing formatDuration takes
+    # milliseconds and renders hh:mm:ss, so reusing that name silently shadowed
+    # this one and printed "00:00:00" for every card.
+    assert "formatQuietSeconds" in body
+    assert body.count("formatDuration(ms)") == 1
+    # The graded watchdog outcomes are visible in the run stream.
+    for kind in ("assignment.stalled", "session.handed_off", "session.diagnose"):
+        assert kind in body
     # category options
     for cat in ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint"):
         assert cat in body

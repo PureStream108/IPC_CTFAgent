@@ -30,7 +30,7 @@ class FakeSession:
 
     def post(self, url, **kwargs):
         self.calls.append(("post", url, kwargs))
-        if url.endswith("/api/Account/LogIn"):
+        if url.endswith("/api/account/login"):
             if kwargs["json"]["password"] != "correct":
                 return FakeResponse(
                     401,
@@ -52,7 +52,7 @@ class FakeSession:
 
 
 def test_gzctf_login_failure_raises(monkeypatch):
-    monkeypatch.setattr("backend.platform.gzctf.requests.Session", FakeSession)
+    monkeypatch.setattr("backend.platform.gzctf.adapter.requests.Session", FakeSession)
     client = GZCTFClient(
         base_url="https://ctf.test",
         username="user",
@@ -64,7 +64,7 @@ def test_gzctf_login_failure_raises(monkeypatch):
 
 
 def test_gzctf_authenticated_flow(monkeypatch):
-    monkeypatch.setattr("backend.platform.gzctf.requests.Session", FakeSession)
+    monkeypatch.setattr("backend.platform.gzctf.adapter.requests.Session", FakeSession)
     client = GZCTFClient(
         base_url="https://ctf.test",
         username="user",
@@ -88,7 +88,7 @@ def test_gzctf_authenticated_flow(monkeypatch):
     assert submission["id"] == 1234
     assert status == {"ok": True}
     urls = [call[1] for call in client.session.calls]
-    assert any(url.endswith("/api/Account/LogIn") for url in urls)
+    assert any(url.endswith("/api/account/login") for url in urls)
     assert any(url.endswith("/api/Game/2/Check") for url in urls)
     assert any(url.endswith("/api/Game/2/Challenges/7") for url in urls)
     assert any(url.endswith("/api/Game/2/Challenges/7/Status/1234") for url in urls)
@@ -97,11 +97,7 @@ def test_gzctf_authenticated_flow(monkeypatch):
         for call in client.session.calls
         if call[1].endswith("/api/Game/2/Challenges/7")
     )
-    assert submit_call[2]["json"] == {
-        "flag": "flag{demo}",
-        "level": 2,
-        "trackId": "track-1",
-    }
+    assert submit_call[2]["json"] == {"flag": "flag{demo}"}
     client.close()
 
 

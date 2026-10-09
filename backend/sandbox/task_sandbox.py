@@ -22,6 +22,10 @@ from backend.sandbox.webui_proxy import webui_proxy_manager
 WORKSPACE = "/workspace"
 ATTACHMENTS_DIR = f"{WORKSPACE}/attachments"
 SHARED_DIR = f"{WORKSPACE}/shared"
+# Detached job state. Deliberately inside the workspace volume: a docker exec
+# id dies with a container restart, while these files survive it, so a job's
+# fate stays knowable.
+JOBS_DIR = f"{WORKSPACE}/.ipc/jobs"
 
 
 def _safe_segment(value: str) -> str:
@@ -29,6 +33,132 @@ def _safe_segment(value: str) -> str:
 
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
     return text or "workspace"
+
+
+def job_dir(job_id: str) -> str:
+    return f"{JOBS_DIR}/{_safe_segment(job_id)}"
+
+
+# The detached-job shell text lives in module functions rather than inline in
+# the methods so it can be tested against a real bash without Docker. Quoting
+# is the whole risk here: the command is model-supplied and is nested two
+# levels deep (bash -c 'bash -lc "<command>"').
+
+
+def job_launch_script(directory: str, command: str, workdir: str) -> str:
+    """Shell that starts ``command`` detached and records its exit status.
+
+    Two details carry the durability:
+
+    * ``set -m`` enables job control, which puts the background job in its own
+      process group.  That is what lets ``job_cancel_script`` kill the whole
+      tree with one negative PID instead of orphaning grandchildren that still
+      hold the output files open.  ``setsid`` would do the same but is not
+      present in every shell the tests and dev sandboxes use, and a silent
+      ``command not found`` there means the job never starts at all.
+    * The supervisor writes ``status`` only after the real command exits, so a
+      missing ``status`` file means "did not finish", never "succeeded".
+
+    Written as separate statements rather than one ``&&`` chain on purpose:
+    ``&`` binds more loosely than ``&&``, so a single chain ending in ``&``
+    backgrounds the *whole* chain - including the ``mkdir`` - and the following
+    write of the pid file then races a directory that does not exist yet.
+    """
+    quoted = shlex.quote(directory)
+    supervisor = (
+        f"bash -lc {shlex.quote(command)} "
+        f"> {quoted}/stdout 2> {quoted}/stderr < /dev/null; "
+        f"printf '%s' \"$?\" > {quoted}/status"
+    )
+    return "\n".join((
+        "set -e",
+        f"mkdir -p {quoted}",
+        f"cd {shlex.quote(workdir)}",
+        "set -m",
+        f"nohup bash -c {shlex.quote(supervisor)} >/dev/null 2>&1 < /dev/null &",
+        "child=$!",
+        f"printf '%s' \"$child\" > {quoted}/pid",
+        # The process start time, recorded so a recycled pid cannot be
+        # mistaken for this job. A container restart resets pids to low
+        # numbers, so a stale pid file very plausibly matches some unrelated
+        # process - and a dead job would then read as 'running' forever.
+        f"(sed 's/.*) //' /proc/$child/stat 2>/dev/null | awk '{{print $20}}' "
+        f"|| true) > {quoted}/starttime",
+        f"cat {quoted}/pid",
+    ))
+
+
+def job_probe_script(directory: str) -> str:
+    """Shell that reports a job's pid, recorded status and liveness.
+
+    Liveness requires both that the pid exists *and* that its start time still
+    matches what was recorded at launch. Without the second check a recycled
+    pid - routine after a container restart, where pids begin again from low
+    numbers - makes a long-dead job look like it is still running.
+    """
+    quoted = shlex.quote(directory)
+    return (
+        f"pid=$(cat {quoted}/pid 2>/dev/null || true); "
+        f"status=$(cat {quoted}/status 2>/dev/null || true); "
+        f"want=$(cat {quoted}/starttime 2>/dev/null || true); "
+        f"alive=no; "
+        f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=yes; fi; '
+        # Only downgrade when both start times are actually known: an
+        # unreadable /proc must not turn a live job into a lost one.
+        f"have=$(sed 's/.*) //' /proc/$pid/stat 2>/dev/null | awk '{{print $20}}' || true); "
+        f'if [ "$alive" = yes ] && [ -n "$want" ] && [ -n "$have" ] '
+        f'&& [ "$want" != "$have" ]; then alive=no; fi; '
+        f"out=$(wc -c < {quoted}/stdout 2>/dev/null || echo 0); "
+        f"err=$(wc -c < {quoted}/stderr 2>/dev/null || echo 0); "
+        f"printf 'pid=%s status=%s alive=%s stdout=%s stderr=%s' "
+        f'"$pid" "$status" "$alive" "$out" "$err"'
+    )
+
+
+def job_cancel_script(directory: str) -> str:
+    """Shell that kills a job's whole process group, then the leader.
+
+    Same reasoning as the exec timeout path (commit 3612261): killing only the
+    leader leaves grandchildren alive holding the output files open. The
+    negative PID targets the process group that ``set -m`` created in
+    ``job_launch_script`` for exactly this.
+    """
+    quoted = shlex.quote(directory)
+    return (
+        f"pid=$(cat {quoted}/pid 2>/dev/null || true); "
+        f'if [ -z "$pid" ]; then exit 1; fi; '
+        f'kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true; '
+        f"sleep 2; "
+        f'kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; '
+        f"exit 0"
+    )
+
+
+def parse_job_probe(output: str) -> dict:
+    """Turn ``job_probe_script`` output into a state dict.
+
+    ``lost`` is deliberate: a pid that is gone with no recorded status means
+    the container restarted or something outside killed the process, and
+    reporting that as ``exited 0`` would hand the model a fabricated success.
+    """
+    fields = dict(
+        item.split("=", 1) for item in (output or "").split() if "=" in item
+    )
+    status = fields.get("status", "").strip()
+    alive = fields.get("alive") == "yes"
+    if status:
+        state = "exited"
+    elif alive:
+        state = "running"
+    else:
+        state = "lost"
+    return {
+        "state": state,
+        "exit_code": int(status) if status.lstrip("-").isdigit() else None,
+        "pid": int(fields["pid"]) if fields.get("pid", "").isdigit() else None,
+        "stdout_bytes": int(fields.get("stdout", "0") or 0),
+        "stderr_bytes": int(fields.get("stderr", "0") or 0),
+    }
 
 
 def task_container_name(project_id: str) -> str:
@@ -40,12 +170,6 @@ def member_workdir(member: str) -> str:
 
 
 class TaskSandbox:
-    """One Docker container per CTF task (project), shared by all its Members.
-
-    Members use the same /workspace/shared working directory. The complete
-    workspace lives on a named volume that survives container removal. The container is not
-    memory-capped; concurrency is bounded by the task-slot limiter instead.
-    """
 
     def __init__(
         self,
@@ -284,6 +408,70 @@ class TaskSandbox:
         timed_out = res.exit_code in (124, 137)
         return ExecResult(res.exit_code if res.exit_code is not None else -1, stdout, stderr, timed_out)
 
+    # ---- detached jobs ----
+
+    def exec_detached(self, job_id: str, command: str, workdir: str) -> int:
+        """Start ``command`` with no timeout and return its process-group PID.
+
+        No ``timeout`` wrapper: removing the 60s ceiling is the point. The
+        durable handle is the PID and output files under ``job_dir``, not a
+        docker exec id, because an exec id dies with a container restart while
+        the workspace volume survives it.
+        """
+        if self._container is None:
+            self.start()
+        result = self._raw_exec(
+            job_launch_script(job_dir(job_id), command, workdir),
+            workdir=workdir,
+            timeout=20,
+        )
+        if not result.ok:
+            raise RuntimeError(
+                f"failed to start detached job: {(result.stderr or result.stdout).strip()}"
+            )
+        try:
+            return int(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError(
+                f"detached job reported no pid: {result.stdout.strip()!r}"
+            ) from exc
+
+    def job_state(self, job_id: str) -> dict:
+        """Report a detached job's liveness and exit status from its files."""
+        result = self._raw_exec(
+            job_probe_script(job_dir(job_id)), workdir=WORKSPACE, timeout=15
+        )
+        return parse_job_probe(result.stdout)
+
+    def job_output(
+        self, job_id: str, stream: str = "stdout", *, offset: int = 0,
+        limit: int = 32_768,
+    ) -> tuple[str, int]:
+        """Read a job's output incrementally; returns ``(text, next_offset)``.
+
+        Byte offsets rather than line counts so a partially written line cannot
+        shift the cursor and duplicate output on the next poll.
+        """
+        if stream not in {"stdout", "stderr"}:
+            raise ValueError("stream must be stdout or stderr")
+        path = f"{job_dir(job_id)}/{stream}"
+        quoted = shlex.quote(path)
+        result = self._raw_exec(
+            f"tail -c +{max(0, offset) + 1} {quoted} 2>/dev/null | head -c {max(1, limit)}",
+            workdir=WORKSPACE,
+            timeout=20,
+        )
+        text = result.stdout or ""
+        return text, max(0, offset) + len(text.encode("utf-8", errors="replace"))
+
+    def job_cancel(self, job_id: str) -> bool:
+        """Kill a job's whole process group; see ``job_cancel_script``."""
+        result = self._raw_exec(
+            job_cancel_script(job_dir(job_id)), workdir=WORKSPACE, timeout=20
+        )
+        return result.ok
+
+
     def write_file(self, workdir: str, rel_path: str, content: str) -> None:
         if self._container is None:
             self.start()
@@ -338,6 +526,23 @@ class MemberSandbox:
 
     def exec(self, command: str, timeout: int = 60) -> ExecResult:
         return self._task.exec(command, workdir=self.workdir, timeout=timeout)
+
+    # ---- detached jobs (see TaskSandbox for the durability reasoning) ----
+
+    def exec_detached(self, job_id: str, command: str) -> int:
+        return self._task.exec_detached(job_id, command, workdir=self.workdir)
+
+    def job_state(self, job_id: str) -> dict:
+        return self._task.job_state(job_id)
+
+    def job_output(
+        self, job_id: str, stream: str = "stdout", *, offset: int = 0,
+        limit: int = 32_768,
+    ) -> tuple[str, int]:
+        return self._task.job_output(job_id, stream, offset=offset, limit=limit)
+
+    def job_cancel(self, job_id: str) -> bool:
+        return self._task.job_cancel(job_id)
 
     def write_file(self, rel_path: str, content: str) -> None:
         self._task.write_file(self.workdir, rel_path, content)

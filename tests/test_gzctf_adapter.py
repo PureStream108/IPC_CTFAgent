@@ -70,6 +70,15 @@ class _Client:
     def get_profile(self):
         return {"userName": "fixture"}
 
+    def get_public_scoreboard(self, game_id):
+        assert game_id == 7
+        return {
+            "challenges": {
+                "Web": [{"id": 11, "title": "Web level", "score": 100}],
+                "Crypto": [{"id": 13, "title": "RSA", "score": 200}],
+            }
+        }
+
     def get_game(self, game_id):
         assert game_id == 7
         return {"id": game_id}
@@ -118,6 +127,15 @@ def test_gzctf_adapter_normalizes_track_level_and_refreshes_live_state():
     assert first.platform_data["files"][0]["name"] == "web.zip"
 
 
+def test_gzctf_adapter_normalizes_public_scoreboard_without_login():
+    adapter = _adapter(_Client())
+    rows = adapter.fetch_public_scoreboard(limit=2)
+    assert [(row.external_id, row.title, row.category) for row in rows] == [
+        ("13", "RSA", "crypto"),
+        ("11", "Web level", "web"),
+    ]
+
+
 def test_gzctf_adapter_submission_and_query_verdict_contract():
     client = _Client()
     adapter = _adapter(client)
@@ -132,6 +150,35 @@ def test_gzctf_adapter_submission_and_query_verdict_contract():
     rejected = adapter.submit("11", "locked")
     assert rejected["verdict"] == "rejected"
     assert "locked" in rejected["reason"]
+
+
+def test_gzctf_adapter_handles_bare_answer_result_verdicts():
+    class _BareClient(_Client):
+        def submit_level(self, game_id, challenge_id, flag, *, level, track_id):
+            if flag == "bare":
+                return "WrongAnswer"
+            return {"id": 66896}
+
+        def get_submission_status(self, game_id, challenge_id, submission_id):
+            return {
+                66896: "WrongAnswer",
+                1: "CorrectAnswer",
+                2: "CheatDetected",
+                3: "Accepted",
+                4: "Pending",
+            }[int(submission_id)]
+
+    adapter = _adapter(_BareClient())
+    adapter.fetch_challenges()
+
+    assert adapter.submit("11", "bare") == {"verdict": "wrong", "submission_id": None}
+    submitted = adapter.submit("11", "candidate")
+    assert submitted == {"verdict": "unknown", "submission_id": "66896"}
+    assert adapter.query("11", "66896") == {"verdict": "wrong", "submission_id": "66896"}
+    assert adapter.query("11", "1") == {"verdict": "correct", "submission_id": "1"}
+    assert adapter.query("11", "2") == {"verdict": "rejected", "submission_id": "2"}
+    assert adapter.query("11", "3") == {"verdict": "correct", "submission_id": "3"}
+    assert adapter.query("11", "4") == {"verdict": "pending", "submission_id": "4"}
 
 
 def test_gzctf_adapter_downloads_and_enforces_attachment_limit(tmp_path: Path):

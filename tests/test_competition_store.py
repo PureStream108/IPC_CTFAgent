@@ -77,7 +77,9 @@ def test_engine_lease_fences_legacy_and_competition_schedulers(store):
     legacy = store.claim_engine_lease(project_id, "legacy", "legacy-a", seconds=30)
     assert legacy["engine_epoch"] == competition["engine_epoch"] + 1
     # A stale competition owner cannot clear the new legacy lease.
-    assert not store.release_engine_lease(project_id, "competition", "coordinator-a")
+    assert not store.release_engine_lease(
+        project_id, "competition", "coordinator-a", epoch=competition["engine_epoch"]
+    )
     assert store.engine_lease(project_id)["engine_kind"] == "legacy"
 
     # Reclaiming an expired lease with the same owner still fences the old
@@ -89,6 +91,18 @@ def test_engine_lease_fences_legacy_and_competition_schedulers(store):
         )
     reclaimed = store.claim_engine_lease(project_id, "legacy", "legacy-a", seconds=30)
     assert reclaimed["engine_epoch"] == legacy["engine_epoch"] + 1
+    assert not store.renew_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=legacy["engine_epoch"], seconds=30
+    )
+    assert store.renew_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=reclaimed["engine_epoch"], seconds=30
+    )
+    assert not store.release_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=legacy["engine_epoch"]
+    )
+    assert store.release_engine_lease(
+        project_id, "legacy", "legacy-a", epoch=reclaimed["engine_epoch"]
+    )
 
 
 def test_run_observation_tracks_replay_pressure_and_engine_lease(store):
@@ -247,6 +261,177 @@ def test_session_events_are_idempotent_and_stale_writer_is_fenced(store):
     assert len(store.events(assignment["session_id"])) == 1
 
 
+def writer_is_live(store, session_id):
+    """Ask Postgres, not Python: the DSN returns timestamps as strings here."""
+    with store.db.connect() as connection:
+        return bool(connection.execute(
+            """SELECT 1 FROM agent_session_writers
+               WHERE session_id=%s AND lease_expires_at>now()""",
+            (session_id,),
+        ).fetchone())
+
+
+def test_assign_projects_the_seat_onto_the_agent_session_writer(store):
+    """A seat must come with the writer row its worker renews (P5a)."""
+
+    run = running(store)
+    challenge = ready(store, run, "writer-projection")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "worker-1")
+
+    writer = store.agent_session_writer(assignment["session_id"])
+    assert writer is not None
+    assert writer["worker_kind"] == "competition-assignment"
+    # Owner and epoch mirror the assignment: the two fences must never name
+    # different holders, or the Member would be unable to write.
+    assert writer["owner"] == assignment["lease_owner"]
+    assert writer["epoch"] == assignment["epoch"]
+    assert writer_is_live(store, assignment["session_id"]) is True
+
+    # Releasing the seat retires the liveness row rather than leaving a
+    # future expiry that would report a worker which has already gone.
+    assert store.release(assignment["id"], "worker-1", assignment["epoch"])
+    assert writer_is_live(store, assignment["session_id"]) is False
+
+
+def test_assignment_writer_follows_recovery_and_refuses_stale_renewal(store):
+    """Recovery moves both fences; a superseded owner cannot renew (P5a)."""
+    run = running(store)
+    challenge = ready(store, run, "writer-recovery")
+    original = store.assign(run["id"], challenge["id"], "amber", "old-coordinator")
+    assert store.renew_assignment_writer(original) is True
+
+    with store.db.connect() as connection:
+        connection.execute(
+            "UPDATE competition_assignments SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
+            (original["id"],),
+        )
+    recovered = store.recover_assignment(original["id"], "new-coordinator")
+
+    writer = store.agent_session_writer(original["session_id"])
+    assert writer["owner"] == "new-coordinator"
+    assert writer["epoch"] == recovered["epoch"]
+    # The displaced worker holds the old epoch; letting it renew would keep a
+    # seat warm that another worker now owns.
+    assert store.renew_assignment_writer(original) is False
+    assert store.renew_assignment_writer(recovered) is True
+
+
+def test_competition_turns_record_usage_for_calibration(store):
+    """Competition writes agent_turns so token calibration has real data (P5a)."""
+    run = running(store)
+    challenge = ready(store, run, "turn-usage")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "worker-1")
+
+    store.record_turn(assignment, 1, "running")
+    finished = store.record_turn(
+        assignment, 1, "completed",
+        usage={"prompt_tokens": 1200, "output_tokens": 300},
+    )
+    assert finished["prompt_tokens"] == 1200
+    assert finished["output_tokens"] == 300
+    assert finished["finished_at"] is not None
+    assert finished["owner"] == assignment["lease_owner"]
+
+    # A later turn with no usage report must not erase what was recorded.
+    assert store.record_turn(assignment, 1, "completed")["prompt_tokens"] == 1200
+
+    store.save_token_budget(assignment["session_id"], {"calibration_ratio": 1.25})
+    assert store.session(assignment["session_id"])["token_budget"] == {
+        "calibration_ratio": 1.25
+    }
+
+
+def test_heartbeat_refuses_to_prop_up_a_seat_whose_worker_went_silent(store):
+    """The run4/run6 failure: renewal proved the coordinator, not the worker (P5b).
+
+    An unconditional heartbeat let a Member that had silently stopped hold a
+    challenge for its whole deadline, because renewing the lease only showed
+    the coordinator was still ticking.
+    """
+    run = running(store)
+    working = ready(store, run, "worker-alive")
+    silent = ready(store, run, "worker-silent")
+    alive = store.assign(run["id"], working["id"], "amber", "coordinator")
+    stalled = store.assign(run["id"], silent["id"], "agate", "coordinator")
+
+    # Both seats renew while both workers are turning.
+    assert store.heartbeat_run_assignments(run["id"], "coordinator") == 2
+    assert store.stalled_run_assignments(run["id"]) == []
+
+    # One worker stops proving it is alive.
+    with store.db.connect() as connection:
+        connection.execute(
+            """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
+               WHERE session_id=%s""",
+            (stalled["session_id"],),
+        )
+        # Wind both seats back so the next renewal is observable as movement
+        # rather than being masked by the one above.
+        connection.execute(
+            """UPDATE competition_assignments SET lease_expires_at=now()+interval '5 seconds'
+               WHERE run_id=%s""",
+            (run["id"],),
+        )
+
+    assert store.heartbeat_run_assignments(run["id"], "coordinator") == 1
+    reported = store.stalled_run_assignments(run["id"])
+    assert [row["id"] for row in reported] == [stalled["id"]]
+
+    # The live worker's seat was renewed; the silent one's was left to expire.
+    with store.db.connect() as connection:
+        extended = {
+            row["id"]: row["extended"]
+            for row in connection.execute(
+                """SELECT id, lease_expires_at>now()+interval '30 seconds' AS extended
+                   FROM competition_assignments WHERE run_id=%s""",
+                (run["id"],),
+            ).fetchall()
+        }
+    assert extended[alive["id"]] is True
+    assert extended[stalled["id"]] is False
+
+    # Renewing again revives the seat: a stall is recoverable, not terminal.
+    assert store.renew_assignment_writer(stalled) is True
+    assert store.heartbeat_run_assignments(run["id"], "coordinator") == 2
+
+
+def test_heartbeat_still_renews_a_seat_that_has_no_writer_row(store):
+    """Absence of a writer row must never be read as a dead worker (P5b).
+
+    Wrongly declaring a live seat dead loses in-flight exploit work, so an
+    unmodelled shape is renewed rather than killed.
+    """
+    run = running(store)
+    challenge = ready(store, run, "no-writer-row")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "coordinator")
+    with store.db.connect() as connection:
+        connection.execute(
+            "DELETE FROM agent_session_writers WHERE session_id=%s",
+            (assignment["session_id"],),
+        )
+
+    assert store.heartbeat_run_assignments(run["id"], "coordinator") == 1
+    assert store.stalled_run_assignments(run["id"]) == []
+
+
+def test_heartbeat_tolerates_a_handoff_in_progress(store):
+    """A writer row at another epoch is a handoff, not a stall (P5b)."""
+    run = running(store)
+    challenge = ready(store, run, "handoff-in-flight")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "coordinator")
+    with store.db.connect() as connection:
+        connection.execute(
+            """UPDATE agent_session_writers
+               SET owner='another-worker',epoch=epoch+5,
+                   lease_expires_at=now()-interval '1 second'
+               WHERE session_id=%s""",
+            (assignment["session_id"],),
+        )
+
+    assert store.heartbeat_run_assignments(run["id"], "coordinator") == 1
+    assert store.stalled_run_assignments(run["id"]) == []
+
+
 def test_run_events_snapshots_and_member_capacity(store):
     run = running(store)
     challenge = ready(store, run)
@@ -349,6 +534,151 @@ def test_pair_messages_are_authorized_idempotent_and_replayable(store):
     changed = message.model_copy(update={"payload": {"task": "different"}})
     with pytest.raises(CompetitionConflict, match="different message"):
         store.claim_message(changed)
+
+
+def test_recon_persists_concurrently_without_a_global_lock(store):
+    """Recon is the highest-volume writer: it must not serialize on one lock.
+
+    The assertion is structural rather than timing-based: a second connection
+    holding the run shard still lets a recon insert commit, which is only true
+    once ``persist_recon_message`` relies on UNIQUE (run_id,request_id) instead
+    of the database-wide advisory lock.
+    """
+    import threading
+
+    run = running(store)
+    challenge = ready(store, run, "concurrent-recon")
+    sender = store.assign(run["id"], challenge["id"], "amber", "worker-a")
+    receiver = store.assign(
+        run["id"], challenge["id"], "agate", "worker-b", role="helper"
+    )
+    now = datetime.now(timezone.utc)
+
+    def message(request_id: str) -> Envelope:
+        return Envelope(
+            run_id=run["id"], challenge_id=challenge["id"],
+            sender_member_id="amber", receiver_member_id="agate",
+            sender_session_id=sender["session_id"],
+            receiver_session_id=receiver["session_id"],
+            request_id=request_id, lease_epoch=sender["epoch"],
+            created_at=now, deadline_at=now + timedelta(minutes=5),
+            message_type="recon", payload={"value": request_id},
+        )
+
+    holding = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def hold_the_run_shard() -> None:
+        try:
+            with store.db.connect() as connection:
+                store._lock(connection, run["id"])
+                holding.set()
+                release.wait(10)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+            holding.set()
+
+    holder = threading.Thread(target=hold_the_run_shard, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(10)
+        assert not failure
+        # Would block until `release` if recon still took the shared lock.
+        record = store.persist_recon_message(message("free-recon"))
+        assert record["status"] == "done"
+    finally:
+        release.set()
+        holder.join(10)
+    assert not failure
+
+
+def test_concurrent_recon_of_one_request_id_stays_idempotent(store):
+    """Without the lock, two writers race the unique key; both must succeed."""
+    import threading
+
+    run = running(store)
+    challenge = ready(store, run, "racing-recon")
+    sender = store.assign(run["id"], challenge["id"], "amber", "worker-a")
+    receiver = store.assign(
+        run["id"], challenge["id"], "agate", "worker-b", role="helper"
+    )
+    now = datetime.now(timezone.utc)
+    envelope = Envelope(
+        run_id=run["id"], challenge_id=challenge["id"],
+        sender_member_id="amber", receiver_member_id="agate",
+        sender_session_id=sender["session_id"],
+        receiver_session_id=receiver["session_id"],
+        request_id="raced", lease_epoch=sender["epoch"],
+        created_at=now, deadline_at=now + timedelta(minutes=5),
+        message_type="recon", payload={"value": "raced"},
+    )
+
+    start = threading.Barrier(4)
+    results: list[dict] = []
+    failures: list[BaseException] = []
+    lock = threading.Lock()
+
+    def persist() -> None:
+        try:
+            start.wait(10)
+            record = store.persist_recon_message(envelope)
+            with lock:
+                results.append(record)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            with lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=persist, daemon=True) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+
+    assert not failures
+    assert len(results) == 4
+    # One row, one sequence: every racing writer observed the same record.
+    assert len({record["sequence"] for record in results}) == 1
+
+
+def test_two_runs_do_not_contend_on_the_same_lock_shard(store):
+    """A finished run's shard must not block a new run's slot transitions."""
+    import threading
+
+    first = running(store, "first-run")
+    store.transition_run(
+        first["id"], "stopped", revision=first["revision"], permit_active=True
+    )
+    second = running(store, "second-run")
+    challenge = ready(store, second, "sharded")
+
+    holding = threading.Event()
+    release = threading.Event()
+    failure: list[BaseException] = []
+
+    def hold_first_run_shard() -> None:
+        try:
+            with store.db.connect() as connection:
+                store._lock(connection, first["id"])
+                holding.set()
+                release.wait(10)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+            holding.set()
+
+    holder = threading.Thread(target=hold_first_run_shard, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(10)
+        assert not failure
+        assignment = store.assign(
+            second["id"], challenge["id"], "amber", "worker-a"
+        )
+        assert assignment["member"] == "amber"
+    finally:
+        release.set()
+        holder.join(10)
+    assert not failure
 
 
 def test_recon_postgres_publisher_replays_across_offline_and_restart(store):
@@ -617,3 +947,145 @@ def test_shared_workspace_rejects_disk_shortage_before_creating_metadata(
             (challenge["id"], "blocked.txt"),
         ).fetchone() is None
     assert not (tmp_path / challenge["id"] / "shared" / "blocked.txt").exists()
+
+
+def test_session_health_separates_the_four_signals_the_ui_merged(store):
+    """Health must distinguish coordinator liveness from actual progress (P5c)."""
+    run = running(store)
+    challenge = ready(store, run, "health-signals")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "coordinator")
+
+    fresh = store.session_health(assignment["session_id"])
+    assert fresh["worker_live"] is True
+    assert fresh["event_count"] == 0
+    assert fresh["quiet_seconds"] >= 0
+
+    store.append_event(
+        assignment["session_id"], "call-1", "tool_call", {"command": "id"},
+        assignment_id=assignment["id"], owner=assignment["lease_owner"],
+        epoch=assignment["epoch"],
+    )
+    store.record_turn(assignment, 1, "running")
+
+    active = store.session_health(assignment["session_id"])
+    assert active["event_count"] == 1
+    assert active["last_event_kind"] == "tool_call"
+    assert active["current_turn"] == 1
+    assert active["turn_status"] == "running"
+    assert active["current_turn_started_at"] is not None
+
+    # A lapsed worker lease is visible as a separate fact from event activity:
+    # that distinction is what the single green dot used to hide.
+    with store.db.connect() as connection:
+        connection.execute(
+            """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
+               WHERE session_id=%s""",
+            (assignment["session_id"],),
+        )
+    assert store.session_health(assignment["session_id"])["worker_live"] is False
+
+
+def test_run_session_health_is_one_query_ordered_by_quiet_time(store):
+    run = running(store)
+    first = ready(store, run, "health-1")
+    second = ready(store, run, "health-2")
+    one = store.assign(run["id"], first["id"], "amber", "coordinator")
+    two = store.assign(run["id"], second["id"], "agate", "coordinator")
+
+    with store.db.connect() as connection:
+        # Make one session visibly older so the ordering is deterministic.
+        connection.execute(
+            """UPDATE agent_sessions SET created_at=now()-interval '10 minutes'
+               WHERE id=%s""",
+            (one["session_id"],),
+        )
+        connection.execute(
+            """UPDATE agent_session_writers
+               SET last_renewed_at=now()-interval '10 minutes'
+               WHERE session_id=%s""",
+            (one["session_id"],),
+        )
+
+    rows = store.run_session_health(run["id"])
+    assert {row["session_id"] for row in rows} == {one["session_id"], two["session_id"]}
+    # Quietest first, so the thing most needing attention is at the top.
+    assert rows[0]["session_id"] == one["session_id"]
+    assert rows[0]["quiet_seconds"] > rows[1]["quiet_seconds"]
+    assert rows[0]["assignment_id"] == one["id"]
+    assert rows[0]["member"] == "amber"
+    assert rows[1]["member"] == "agate"
+
+
+def test_handoff_moves_both_fences_so_the_new_member_can_write(store):
+    """The easiest thing to get wrong in P5c.
+
+    Competition writes are fenced by the assignment lease while a handoff moves
+    the writer row. Advancing only one leaves the incoming Member holding one
+    fence and rejected by the other, unable to append a single event.
+    """
+    run = running(store)
+    challenge = ready(store, run, "handoff-fences")
+    original = store.assign(run["id"], challenge["id"], "amber", "coordinator")
+    store.append_event(
+        original["session_id"], "finding-1", "tool_result", {"evidence": "port 8080"},
+        assignment_id=original["id"], owner=original["lease_owner"],
+        epoch=original["epoch"],
+    )
+
+    # A live worker keeps its seat: a handoff is not a way to preempt one.
+    with pytest.raises(CompetitionConflict, match="still live"):
+        store.handoff_assignment(original["id"], "agate", "coordinator")
+
+    with store.db.connect() as connection:
+        connection.execute(
+            """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
+               WHERE session_id=%s""",
+            (original["session_id"],),
+        )
+
+    moved = store.handoff_assignment(original["id"], "agate", "coordinator")
+    assert moved["member"] == "agate"
+    assert moved["epoch"] == original["epoch"] + 1
+    # The session id is preserved, so the replacement inherits the findings.
+    assert moved["session_id"] == original["session_id"]
+
+    writer = store.agent_session_writer(moved["session_id"])
+    assert writer["owner"] == moved["lease_owner"]
+    assert writer["epoch"] == moved["epoch"]
+
+    # The real assertion: the new Member can actually write.
+    store.append_event(
+        moved["session_id"], "finding-2", "tool_result", {"evidence": "took over"},
+        assignment_id=moved["id"], owner=moved["lease_owner"], epoch=moved["epoch"],
+    )
+    kinds = [row["kind"] for row in store.events(moved["session_id"])]
+    # The prior finding, the recorded handoff, and the new Member's write.
+    assert kinds == ["tool_result", "handoff", "tool_result"]
+
+    # And the displaced Member can no longer write to the transcript.
+    with pytest.raises(CompetitionConflict):
+        store.append_event(
+            moved["session_id"], "stale", "tool_call", {},
+            assignment_id=original["id"], owner=original["lease_owner"],
+            epoch=original["epoch"],
+        )
+
+
+def test_handoff_refuses_a_member_that_already_holds_a_seat(store):
+    run = running(store)
+    one = ready(store, run, "occupied-1")
+    two = ready(store, run, "occupied-2")
+    stalled = store.assign(run["id"], one["id"], "amber", "coordinator")
+    store.assign(run["id"], two["id"], "agate", "coordinator")
+    with store.db.connect() as connection:
+        connection.execute(
+            """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
+               WHERE session_id=%s""",
+            (stalled["session_id"],),
+        )
+
+    with pytest.raises(CompetitionConflict, match="already occupied"):
+        store.handoff_assignment(stalled["id"], "agate", "coordinator")
+    # A handoff back to the same Member is allowed: it is a turn reset, and the
+    # occupancy check must not reject the seat's own current holder.
+    assert store.handoff_assignment(stalled["id"], "amber", "coordinator")["member"] == "amber"

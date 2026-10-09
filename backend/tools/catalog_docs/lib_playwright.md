@@ -1,10 +1,10 @@
-# Playwright / Chromium
+# Playwright browser automation
 
-自动化真实 Chromium 页面、JavaScript、Cookie、截图和前端交互。
+使用 Playwright Python 包自动化页面、JavaScript、Cookie、截图和前端交互。浏览器可执行文件由部署环境显式提供，任务镜像不会下载浏览器。
 
 ## 用途与适用场景
 
-先确认输入与目标，再使用 Playwright / Chromium 完成针对性分析。
+先确认输入与目标，再使用 Playwright 完成针对性分析。
 
 ## 版本检查
 
@@ -26,7 +26,7 @@ python3 -c "import playwright; print(playwright)" --version
 ## 可执行示例
 
 ```bash
-python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()"
+IPC_PLAYWRIGHT_EXECUTABLE=/path/to/browser python3 -c "import os; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, executable_path=os.environ['IPC_PLAYWRIGHT_EXECUTABLE']); print(b.version); b.close(); p.stop()"
 ```
 
 ## 输出解释

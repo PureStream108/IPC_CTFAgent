@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.api import agent as agent_router
 from backend.api import auth as auth_router
 from backend.api import config as config_router
 from backend.api import competition as competition_router
@@ -120,6 +121,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     app.include_router(memory_router.router)
     app.include_router(config_router.router)
     app.include_router(competition_router.router)
+    app.include_router(agent_router.router)
     app.include_router(logs_router.router)
     app.include_router(wp_router.router)
     app.include_router(platform_router.router)

@@ -14,9 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
 
 # Supported LLM wire formats. base_url is always user-provided.
-# ``anthropic`` is the raw Messages API; ``claudecode`` keeps the separate
-# Claude Code action runtime used by IPC.
-ApiFormat = Literal["openai", "anthropic", "claudecode", "deepseek", "pi", "mock"]
+# ``anthropic`` is the raw Messages API. There is no separate sidecar runtime:
+# every agent runs through the unified loop in backend/agent/runtime.py.
+ApiFormat = Literal["openai", "anthropic", "deepseek", "pi", "mock"]
 ApiSurface = Literal["auto", "chat_completions", "responses"]
 ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 SelectedReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -93,8 +93,21 @@ class RuntimeConfig(BaseModel):
     # Max extra Members Diamond may add per difficulty report.
     max_members_per_report: int = Field(default=3, gt=0)
     sandbox_backend: Literal["local", "docker"] = "docker"
+    sandbox_backend_forced: bool = False
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
+    # Agent runtime budgets. A long investigation is normal work, so none of
+    # these impose a hard step ceiling: convergence comes from the provider
+    # finishing, repeated-batch detection, cancellation and the watchdog.
+    # ``max_turns = 0`` means no ceiling.
+    max_output_tokens: int = Field(default=32768, gt=0)
+    # 0 infers the window from the model instead of guessing a fixed number.
+    context_token_limit: int = Field(default=0, ge=0)
+    compaction_trigger_ratio: float = Field(default=0.75, gt=0.0, le=0.95)
+    max_turns: int = Field(default=0, ge=0)
+    # Chunk-gap timeout for streamed turns. Long reasoning can precede the
+    # first token, so this is deliberately generous.
+    provider_read_timeout: int = Field(default=300, ge=30)
     browser_event_limit: int = Field(default=200, gt=0, le=1000)
     browser_console_limit: int = Field(default=100, gt=0, le=1000)
     browser_error_limit: int = Field(default=50, gt=0, le=1000)
@@ -184,6 +197,16 @@ class AppConfig(BaseModel):
             errors.append("At least one Member must have api_key and base_url to start.")
         return errors
 
+    def startup_warnings(self) -> list[str]:
+        """Non-blocking notices about how the runtime adjusted the configuration."""
+        warnings: list[str] = []
+        if self.runtime.sandbox_backend_forced:
+            warnings.append(
+                "Sandbox backend 'local' runs solver commands on the host filesystem and was "
+                "upgraded to 'docker'. Set IPC_ALLOW_LOCAL_SANDBOX=1 only for offline development."
+            )
+        return warnings
+
     def available_members(self) -> list[MemberConfig]:
         """Members that have credentials — the upper bound on parallelism."""
         return [] if self.member_config_conflict else [m for m in self.members if m.configured]
@@ -211,6 +234,31 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
 # so an existing config.yaml/limits.yaml does not fail extra="forbid" validation.
 _LEGACY_LIMIT_KEYS = ("total_memory_gb", "total_disk_gb", "per_agent_memory_gb")
 
+LOCAL_SANDBOX_ENV = "IPC_ALLOW_LOCAL_SANDBOX"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _enforce_container_sandbox(cfg: AppConfig) -> None:
+    """Refuse the host-backed sandbox unless it was explicitly opted into.
+
+    ``local`` executes member commands as subprocesses in the application's own
+    filesystem namespace. A solver can then read host paths outside the task
+    workspace (observed: reading an exported writeup PDF from the host artifact
+    tree) and invoke host interpreters instead of the ones installed in the task
+    image. Containment is the default; the opt-in stays for offline unit tests.
+    """
+    if cfg.runtime.sandbox_backend != "local":
+        cfg.runtime.sandbox_backend_forced = False
+        return
+    if _env_flag(LOCAL_SANDBOX_ENV):
+        cfg.runtime.sandbox_backend_forced = False
+        return
+    cfg.runtime.sandbox_backend = "docker"
+    cfg.runtime.sandbox_backend_forced = True
+
 
 def _strip_legacy_limits(limits: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in limits.items() if k not in _LEGACY_LIMIT_KEYS}
@@ -233,6 +281,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
 
     cfg = AppConfig.model_validate(raw)
     _apply_models_defaults(cfg, models)
+    _enforce_container_sandbox(cfg)
 
     # Allow env override of the log switch (handy for docker / tests).
     env_log = os.environ.get("IPC_LOG_ENABLED")
@@ -250,7 +299,7 @@ def save_config(cfg: AppConfig, config_dir: Path | None = None) -> None:
         "member": cfg.member.model_dump() if cfg.member is not None else None,
         "member_config_conflict": cfg.member_config_conflict,
         "members": [m.model_dump() for m in cfg.members] if cfg.member_config_conflict else [],
-        "runtime": cfg.runtime.model_dump(),
+        "runtime": cfg.runtime.model_dump(exclude={"sandbox_backend_forced"}),
         "limits": cfg.limits.model_dump(),
     }
     # Serialize before touching disk, then publish a complete file on the same

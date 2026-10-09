@@ -154,6 +154,9 @@ class _FixtureOrchestrator:
     def active_member_owners(self) -> dict[str, str]:
         return dict(self.owners)
 
+    def startup_in_progress(self, _project_id: str) -> bool:
+        return False
+
     def start_project_async(self, project_id: str) -> dict[str, str]:
         self.started.append(project_id)
         self._refresh_owners()
@@ -705,5 +708,262 @@ def test_wp_dispatch_caps_concurrency_under_archive_pressure(tmp_path, monkeypat
         assert counters["maximum"] <= 2
     finally:
         gate.set()
+        service.shutdown()
+        db.close()
+
+
+def test_resume_restores_original_member_challenge_pairing(tmp_path):
+    platform = FixturePlatform(
+        [
+            PlatformChallenge(
+                external_id=f"resume-{index}", title=f"Resume {index}",
+                category="misc", description="resume fixture",
+            )
+            for index in range(4)
+        ],
+        flags={f"resume-{index}": f"flag{{resume-{index}}}" for index in range(4)},
+        remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "resume"
+    )
+    try:
+        snapshot = service.start(workflow_id, "resume-run")
+        run_id = snapshot["run"]["id"]
+        service.tick()
+        service.tick()
+        original = {
+            item["challenge_id"]: (item["member"], item["session_id"])
+            for item in service.store.assignments(run_id, active_only=True)
+        }
+        assert len(original) == 4
+
+        paused = service.control(
+            run_id, "pause", service.store.get_run(run_id)["revision"]
+        )
+        assert paused["run"]["status"] == "paused"
+        assert service.store.assignments(run_id, active_only=True) == []
+
+        with db.connect() as connection:
+            rows = connection.execute(
+                "SELECT id,metadata FROM competition_challenges"
+            ).fetchall()
+            ordered = sorted(
+                rows,
+                key=lambda row: (str(row["metadata"].get("ready_at") or ""), row["id"]),
+            )
+            for index, row in enumerate(reversed(ordered)):
+                connection.execute(
+                    """UPDATE competition_challenges
+                       SET metadata = jsonb_set(metadata, '{ready_at}', to_jsonb(%s::text), true)
+                       WHERE id=%s""",
+                    (f"2026-01-01T00:00:0{index}+00:00", row["id"]),
+                )
+
+        resumed = service.control(
+            run_id, "resume", service.store.get_run(run_id)["revision"]
+        )
+        assert resumed["run"]["status"] == "running"
+        service.tick()
+
+        restored = {
+            item["challenge_id"]: (item["member"], item["session_id"])
+            for item in service.store.assignments(run_id, active_only=True)
+        }
+        assert restored == original
+        with db.connect() as connection:
+            restored_events = connection.execute(
+                """SELECT count(*) AS count FROM competition_run_events
+                   WHERE run_id=%s AND kind='assignment.restored'""",
+                (run_id,),
+            ).fetchone()
+        assert restored_events["count"] == 4
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_a_silent_worker_is_reported_as_stalled_instead_of_quietly_expiring(tmp_path):
+    """P5b end to end: the coordinator stops propping up a dead worker.
+
+    Previously the tick renewed every seat it owned, so a Member that had
+    stopped turning held its challenge until the deadline with nothing in the
+    event stream to explain it. Now the stall is both refused a renewal and
+    recorded.
+    """
+    platform = FixturePlatform(
+        [
+            PlatformChallenge(
+                external_id="stall-1", title="Stall 1", category="misc",
+                description="stall fixture",
+            )
+        ],
+        flags={"stall-1": "flag{stall-1}"},
+        remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "stall"
+    )
+    try:
+        snapshot = service.start(workflow_id, "stall-run")
+        run_id = snapshot["run"]["id"]
+        service.tick()
+        service.tick()
+        active = service.store.assignments(run_id, active_only=True)
+        assert active, "fixture produced no assignment to stall"
+        seat = active[0]
+
+        # assign() gave the seat a writer row; expire it to represent a worker
+        # that stopped proving it is alive.
+        with db.connect() as connection:
+            assert connection.execute(
+                """SELECT 1 FROM agent_session_writers
+                   WHERE session_id=%s AND worker_kind='competition-assignment'""",
+                (seat["session_id"],),
+            ).fetchone(), "assign() did not create a writer row"
+            connection.execute(
+                """UPDATE agent_session_writers
+                   SET lease_expires_at=now()-interval '1 second'
+                   WHERE session_id=%s""",
+                (seat["session_id"],),
+            )
+            connection.execute(
+                """UPDATE competition_assignments
+                   SET lease_expires_at=now()+interval '5 seconds' WHERE id=%s""",
+                (seat["id"],),
+            )
+
+        service.tick()
+
+        with db.connect() as connection:
+            stalled_events = connection.execute(
+                """SELECT payload FROM competition_run_events
+                   WHERE run_id=%s AND kind='assignment.stalled'""",
+                (run_id,),
+            ).fetchall()
+            extended = connection.execute(
+                """SELECT lease_expires_at>now()+interval '30 seconds' AS extended
+                   FROM competition_assignments WHERE id=%s""",
+                (seat["id"],),
+            ).fetchone()
+        assert len(stalled_events) == 1
+        assert stalled_events[0]["payload"]["assignment_id"] == seat["id"]
+        # The seat was not renewed: liveness now means the worker, not the tick.
+        assert extended["extended"] is False
+
+        # A second tick must not duplicate the report.
+        service.tick()
+        with db.connect() as connection:
+            again = connection.execute(
+                """SELECT count(*) AS count FROM competition_run_events
+                   WHERE run_id=%s AND kind='assignment.stalled'""",
+                (run_id,),
+            ).fetchone()
+        assert again["count"] == 1
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_watchdog_hands_a_dead_seat_to_another_member_keeping_the_findings(tmp_path):
+    """P5c end to end: a quiet seat escalates to a handoff, not a restart.
+
+    Keeping the session id is the point. A reassignment would throw away every
+    finding the stalled Member recorded and start the challenge from nothing.
+    """
+    platform = FixturePlatform(
+        [
+            PlatformChallenge(
+                external_id="wd-1", title="Watchdog 1", category="misc",
+                description="watchdog fixture",
+            )
+        ],
+        flags={"wd-1": "flag{wd-1}"},
+        remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "watchdog"
+    )
+    try:
+        snapshot = service.start(workflow_id, "watchdog-run")
+        run_id = snapshot["run"]["id"]
+        service.tick()
+        service.tick()
+        active = service.store.assignments(run_id, active_only=True)
+        # A challenge can carry a primary and a helper seat; stall the primary
+        # so the assertions below are about one unambiguous seat.
+        primaries = [item for item in active if item["role"] == "primary"]
+        assert primaries, "fixture produced no primary assignment to stall"
+        seat = primaries[0]
+
+        # A finding the replacement must inherit.
+        service.store.append_event(
+            seat["session_id"], "evidence-1", "tool_result",
+            {"evidence": "found an admin panel"},
+            assignment_id=seat["id"], owner=seat["lease_owner"],
+            epoch=seat["epoch"],
+        )
+
+        # Represent a worker that died: its own lease lapsed and nothing has
+        # made progress for long enough to exhaust every escalation step.
+        with db.connect() as connection:
+            connection.execute(
+                """UPDATE agent_session_writers
+                   SET lease_expires_at=now()-interval '1 hour',
+                       last_renewed_at=now()-interval '1 hour'
+                   WHERE session_id=%s""",
+                (seat["session_id"],),
+            )
+            connection.execute(
+                """UPDATE agent_sessions SET created_at=now()-interval '1 hour'
+                   WHERE id=%s""",
+                (seat["session_id"],),
+            )
+            connection.execute(
+                """UPDATE agent_events SET created_at=now()-interval '1 hour'
+                   WHERE session_id=%s""",
+                (seat["session_id"],),
+            )
+
+        service.tick()
+
+        moved = service.store.find_assignment(
+            run_id, seat["challenge_id"], seat["member"]
+        )
+        current = [
+            item for item in service.store.assignments(run_id, active_only=True)
+            if item["challenge_id"] == seat["challenge_id"]
+            and item["position"] == seat["position"]
+        ]
+        assert len(current) == 1
+        taken = current[0]
+        assert moved is None, "the stalled Member still holds the seat"
+        assert taken["member"] != seat["member"]
+        # The transcript carried over rather than restarting.
+        assert taken["session_id"] == seat["session_id"]
+
+        with db.connect() as connection:
+            events = connection.execute(
+                """SELECT kind, payload FROM competition_run_events
+                   WHERE run_id=%s AND kind IN ('session.handoff','session.handed_off')
+                   ORDER BY created_at""",
+                (run_id,),
+            ).fetchall()
+            inherited = connection.execute(
+                """SELECT count(*) AS count FROM agent_events
+                   WHERE session_id=%s AND event_key='evidence-1'""",
+                (seat["session_id"],),
+            ).fetchone()
+        assert any(row["kind"] == "session.handed_off" for row in events)
+        assert inherited["count"] == 1, "the handoff lost the prior finding"
+
+        # The replacement can actually write: both fences moved together.
+        service.store.append_event(
+            taken["session_id"], "evidence-2", "tool_result",
+            {"evidence": "continued from the panel"},
+            assignment_id=taken["id"], owner=taken["lease_owner"],
+            epoch=taken["epoch"],
+        )
+    finally:
         service.shutdown()
         db.close()

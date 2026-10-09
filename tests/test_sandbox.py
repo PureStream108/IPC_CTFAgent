@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -46,6 +47,22 @@ def test_local_sandbox_timeout(tmp_path):
     res = sb.exec(f'"{sys.executable}" -c "import time; time.sleep(5)"', timeout=1)
     assert res.timed_out
     assert res.exit_code == 124
+
+
+def test_local_sandbox_timeout_kills_grandchildren_holding_pipes(tmp_path):
+    sb = LocalSandbox("m1", tmp_path / "ws")
+    sb.start()
+    code = (
+        "import subprocess,sys,time;"
+        "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']);"
+        "print('spawned', flush=True);"
+        "time.sleep(30)"
+    )
+    started = time.monotonic()
+    res = sb.exec(f'"{sys.executable}" -c "{code}"', timeout=2)
+    elapsed = time.monotonic() - started
+    assert res.timed_out
+    assert elapsed < 20, f"exec blocked on a grandchild pipe for {elapsed:.1f}s"
 
 
 def test_local_sandbox_exposes_webui_via_proxy(tmp_path):

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import base64
+import hashlib
+import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,8 +11,7 @@ from urllib.parse import urljoin, urlsplit, unquote
 
 import requests
 
-from backend.core.config import CATEGORIES
-from backend.filename_util import numbered_filename, safe_stem
+from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
@@ -42,8 +44,6 @@ def _track_entries(challenge: dict[str, Any]) -> list[dict[str, Any]]:
         for item in entries:
             if not isinstance(item, dict) or not _track_id(item):
                 continue
-            # GZCTF exposes track metadata and per-level state as sibling
-            # arrays.  Join them here so preflight sees one uniform shape.
             joined = dict(item)
             if not isinstance(joined.get("levels"), list):
                 joined["levels"] = [
@@ -146,7 +146,22 @@ def validate_submission(
     tracks = _track_entries(challenge)
     enabled = [item for item in tracks if item.get("isEnabled", item.get("is_enabled", True))]
     if not enabled:
-        raise GZCTFPreflightError("live challenge has no enabled track state")
+        if not isinstance(challenge.get("context"), dict):
+            raise GZCTFPreflightError("live challenge has no enabled track state")
+        if bool(challenge.get("isSolved", challenge.get("solved", False))):
+            raise GZCTFPreflightError("challenge is already solved")
+        cooldown = _active_cooldown(challenge)
+        if cooldown:
+            raise GZCTFPreflightError(f"submission cooldown active until {cooldown}")
+        return {
+            "ok": True,
+            "challenge_id": challenge.get("id"),
+            "track_id": str(track_id or "") or None,
+            "level": level,
+            "answer": normalized_answer,
+            "status": "unsolved",
+            "current_level": None,
+        }
     if track_id:
         track = next((item for item in enabled if _track_id(item) == str(track_id)), None)
         if track is None:
@@ -223,15 +238,37 @@ class GZCTFClient:
         base_url: str = "",
         username: str = "",
         password: str = "",
+        token: str = "",
         *,
         timeout: float = 30,
     ) -> None:
         self.base_url = (base_url or os.getenv("IPC_GZ_BASE_URL", "")).rstrip("/")
         self.username = username or os.getenv("IPC_GZ_USERNAME", "")
         self.password = password or os.getenv("IPC_GZ_PASSWORD", "")
+        self.token = token or os.getenv("IPC_GZ_TOKEN", "")
         self.timeout = timeout
         self.session = requests.Session()
         self.logged_in = False
+        self._api_public_key: str | None = None
+        if self.token:
+            self._install_token(self.token)
+            self.logged_in = True
+
+    def _install_token(self, token: str) -> None:
+        value = str(token).strip()
+        for prefix in ("GZCTF_Token:", "GZCTF_Token="):
+            if value.lower().startswith(prefix.lower()):
+                value = value[len(prefix):].strip()
+                break
+        if ";" in value:
+            value = value.split(";", 1)[0].strip()
+        if not value:
+            return
+        hostname = urlsplit(self.base_url).hostname
+        if hostname:
+            self.session.cookies.set("GZCTF_Token", value, domain=hostname, path="/")
+        else:
+            self.session.cookies.set("GZCTF_Token", value, path="/")
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
@@ -240,13 +277,66 @@ class GZCTFClient:
         if not self.base_url:
             raise GZCTFError("GZCTF base_url is not configured; set IPC_GZ_BASE_URL")
 
+    def _encrypt_api_data(self, value: str) -> str:
+        """Encrypt password/flag payloads when the deployment enables it.
+
+        GZCTF publishes an X25519 public key through ``/api/config``. The
+        browser derives an AES-GCM key from an ephemeral X25519 exchange and
+        sends ``ephemeral_public || nonce || ciphertext_and_tag`` as standard
+        base64. Keep this wire detail inside the native adapter so credentials
+        and flags never enter workflow templates or generic HTTP code.
+        """
+
+        if self._api_public_key is None:
+            response = self.session.get(self._url("/api/config"), timeout=self.timeout)
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise GZCTFError("GZCTF config endpoint did not return JSON") from exc
+            key = payload.get("apiPublicKey") if isinstance(payload, dict) else None
+            self._api_public_key = str(key or "")
+        if not self._api_public_key:
+            return value
+        try:
+            from cryptography.hazmat.primitives.asymmetric.x25519 import (
+                X25519PrivateKey,
+                X25519PublicKey,
+            )
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            from cryptography.hazmat.primitives.serialization import (
+                Encoding,
+                PublicFormat,
+            )
+
+            recipient = X25519PublicKey.from_public_bytes(
+                base64.b64decode(self._api_public_key)
+            )
+            ephemeral = X25519PrivateKey.generate()
+            shared_secret = ephemeral.exchange(recipient)
+            aes_key = hashlib.sha256(shared_secret).digest()
+            nonce = secrets.token_bytes(12)
+            encrypted = AESGCM(aes_key).encrypt(nonce, value.encode("utf-8"), None)
+            public_bytes = ephemeral.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+            return base64.b64encode(public_bytes + nonce + encrypted).decode("ascii")
+        except (ValueError, TypeError) as exc:
+            raise GZCTFError("GZCTF API encryption key is invalid") from exc
+        except ImportError as exc:
+            raise GZCTFError(
+                "GZCTF API encryption requires the cryptography package"
+            ) from exc
+
     def login(self) -> None:
         self._require_base_url()
+        if self.token:
+            self._install_token(self.token)
+            self.logged_in = True
+            return
         if not self.username or not self.password:
             raise GZCTFLoginError("GZCTF username/password are not configured")
         response = self.session.post(
-            self._url("/api/Account/LogIn"),
-            json={"userName": self.username, "password": self.password},
+            self._url("/api/account/login"),
+            json={"userName": self.username, "password": self._encrypt_api_data(self.password)},
             timeout=self.timeout,
         )
         if response.status_code != 200:
@@ -261,9 +351,18 @@ class GZCTFClient:
         self._require_base_url()
         if not self.logged_in:
             self.login()
-        response = self.session.get(
-            self._url(path), params=params, timeout=self.timeout
-        )
+        response = self.session.get(self._url(path), params=params, timeout=self.timeout)
+        if response.status_code == 401:
+            self.logged_in = False
+            self.token = ""
+            if self.username and self.password:
+                self.login()
+                response = self.session.get(self._url(path), params=params, timeout=self.timeout)
+            if response.status_code == 401:
+                raise GZCTFLoginError("GZCTF_Token is invalid or expired; provide a new token")
+        if response.status_code == 403:
+            self.logged_in = False
+            raise GZCTFLoginError("GZCTF account is not authorized for this GZCTF game")
         response.raise_for_status()
         return response.json()
 
@@ -283,6 +382,19 @@ class GZCTFClient:
             params=params,
             timeout=self.timeout,
         )
+        if response.status_code == 401:
+            self.logged_in = False
+            self.token = ""
+            if self.username and self.password:
+                self.login()
+                response = self.session.post(
+                    self._url(path), json=json or {}, params=params, timeout=self.timeout
+                )
+            if response.status_code == 401:
+                raise GZCTFLoginError("GZCTF_Token is invalid or expired; provide a new token")
+        if response.status_code == 403:
+            self.logged_in = False
+            raise GZCTFLoginError("GZCTF account is not authorized for this GZCTF game")
         if response.status_code >= 400:
             # Keep the platform's validation reason in the exception.  A bare
             # ``raise_for_status`` only exposed ``400 Bad Request`` and made
@@ -357,6 +469,19 @@ class GZCTFClient:
                     if isinstance(candidate.get(key), list):
                         candidate = candidate[key]
                         break
+                else:
+                    for key in ("challenges", "items", "results", "data"):
+                        grouped = candidate.get(key)
+                        if isinstance(grouped, dict):
+                            flattened = [
+                                item
+                                for values in grouped.values()
+                                if isinstance(values, list)
+                                for item in values
+                                if isinstance(item, dict)
+                            ]
+                            if flattened:
+                                return flattened
             if isinstance(candidate, list):
                 return [item for item in candidate if isinstance(item, dict)]
         return []
@@ -380,7 +505,7 @@ class GZCTFClient:
                 and any(key in payload for key in ("challenges", "items", "data", "results"))
             ):
                 return items
-        except requests.HTTPError:
+        except (requests.HTTPError, ValueError):
             pass
         details = self.get_game_details(selected)
         items = self._items(details)
@@ -396,6 +521,29 @@ class GZCTFClient:
 
     def get_scoreboard(self, game_id: int) -> dict[str, Any]:
         return self._authorized_get(f"/api/Game/{game_id}/Scoreboard")
+
+    def get_public_scoreboard(self, game_id: int) -> dict[str, Any]:
+        """Read the public scoreboard without creating a participant session.
+
+        GZCTF exposes scoreboard metadata for practice games without login,
+        while challenge details and submissions still require the normal
+        participant cookie. Keeping this explicitly read-only prevents a
+        discovery smoke test from pretending it can submit flags.
+        """
+
+        self._require_base_url()
+        response = self.session.get(
+            self._url(f"/api/Game/{int(game_id)}/Scoreboard"),
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GZCTFError("public GZCTF scoreboard did not return JSON") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("challenges"), dict):
+            raise GZCTFError("public GZCTF scoreboard has no challenge categories")
+        return payload
 
     def get_challenge(
         self,
@@ -464,14 +612,14 @@ class GZCTFClient:
         level: int = 1,
         track_id: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"flag": flag, "level": level}
-        if track_id:
-            body["trackId"] = track_id
+        body: dict[str, Any] = {"flag": self._encrypt_api_data(flag)}
         result = self._authorized_post(
             f"/api/Game/{game_id}/Challenges/{challenge_id}",
             body,
         )
-        if not isinstance(result, dict):
+        if isinstance(result, int):
+            result = {"id": result, "status": "pending"}
+        if not isinstance(result, (dict, str)):
             raise GZCTFError(
                 f"GZCTF submit_flag returned unexpected type: {type(result).__name__}"
             )
@@ -539,8 +687,34 @@ def _as_bool(value: Any) -> bool:
     return False
 
 
+_ANSWER_RESULT_VERDICTS = {
+    "correctanswer": "correct",
+    "wronganswer": "wrong",
+    "cheatdetected": "rejected",
+    "pending": "pending",
+    "correct": "correct",
+    "accepted": "correct",
+    "solved": "correct",
+    "success": "correct",
+    "complete": "correct",
+    "completed": "correct",
+    "wrong": "wrong",
+    "incorrect": "wrong",
+    "failed": "wrong",
+    "fail": "wrong",
+    "rejected": "rejected",
+    "queued": "pending",
+    "judging": "pending",
+    "processing": "pending",
+    "running": "pending",
+}
+
+
 def _normalise_gz_verdict(payload: Any, *, submission_id: str | None = None) -> dict[str, Any]:
     """Convert GZCTF's version-dependent result object to the competition contract."""
+    if isinstance(payload, str):
+        verdict = _ANSWER_RESULT_VERDICTS.get(payload.strip().lower())
+        return {"verdict": verdict or "unknown", "submission_id": submission_id}
     if not isinstance(payload, dict):
         return {"verdict": "unknown", "submission_id": submission_id}
     identifier = submission_id
@@ -553,10 +727,12 @@ def _normalise_gz_verdict(payload: Any, *, submission_id: str | None = None) -> 
             return {"verdict": "correct" if payload[key] else "wrong", "submission_id": identifier}
     raw = _first_value(payload, "verdict", "status", "state", "result", default="")
     status = str(raw).strip().lower()
-    if status in {"correct", "accepted", "solved", "success", "complete", "completed"}:
+    if status in {"correct", "accepted", "solved", "success", "complete", "completed", "correctanswer"}:
         verdict = "correct"
-    elif status in {"wrong", "incorrect", "failed", "rejected", "fail"}:
+    elif status in {"wrong", "incorrect", "failed", "fail", "wronganswer"}:
         verdict = "wrong"
+    elif status in {"rejected", "cheatdetected"}:
+        verdict = "rejected"
     elif status in {"pending", "queued", "judging", "processing", "running"}:
         verdict = "pending"
     else:
@@ -573,6 +749,8 @@ class GZCTFAdapter(PlatformAdapter):
         mapping: FieldMapping,
         *,
         max_attachment_bytes: int | None = None,
+        competition_id: str = "",
+        team_id: str = "",
     ) -> None:
         if mapping.platform != "gzctf":
             raise ValueError("GZCTFAdapter requires a gzctf FieldMapping")
@@ -582,11 +760,73 @@ class GZCTFAdapter(PlatformAdapter):
         self.mapping = mapping
         self.game_id = int(mapping.game_id)
         self.max_attachment_bytes = max_attachment_bytes
+        self.competition_id = str(competition_id or "")
+        self.team_id = str(team_id or "")
+        self.account_identity = ""
+        self.team_identity = ""
         self._by_id: dict[str, PlatformChallenge] = {}
 
     @property
     def identity(self) -> str:
-        return f"{self.client.base_url}/game/{self.game_id}"
+        scope = f"{self.client.base_url}/game/{self.game_id}"
+        if self.competition_id:
+            scope += f"/competition/{self.competition_id}"
+        if self.team_id:
+            scope += f"/team/{self.team_id}"
+        if self.account_identity:
+            scope += f"/account/{self.account_identity}"
+        return scope
+
+    @staticmethod
+    def _ids(value: Any) -> set[str]:
+        result: set[str] = set()
+        if isinstance(value, dict):
+            for key in (
+                "id", "teamId", "team_id", "teamID", "teamName", "team_name",
+                "name", "userId", "user_id",
+            ):
+                item = value.get(key)
+                if item is not None:
+                    result.add(str(item))
+            for key in ("team", "teams", "participation", "participations", "data", "items"):
+                if key in value:
+                    result.update(GZCTFAdapter._ids(value[key]))
+        elif isinstance(value, list):
+            for item in value:
+                result.update(GZCTFAdapter._ids(item))
+        return result
+
+    def _verify_scope(self) -> None:
+        profile = self.client.get_profile()
+        account = _first_value(profile, "id", "userId", "user_id", "userName", "username", default="")
+        if account:
+            self.account_identity = str(account)
+        if not self.team_id:
+            return
+        game_getter = getattr(self.client, "get_game", None)
+        if callable(game_getter):
+            game = game_getter(self.game_id)
+            if self.team_id in self._ids(game):
+                self.team_identity = self.team_id
+                return
+        participation_getter = getattr(self.client, "get_game_participation", None)
+        if not callable(participation_getter):
+            return
+        participation = participation_getter(self.game_id)
+        team_ids = self._ids(participation)
+        if self.team_id not in team_ids:
+            raise GZCTFPreflightError(
+                f"current GZCTF account is not a member of team {self.team_id} for game {self.game_id}"
+            )
+        self.team_identity = self.team_id
+
+    @property
+    def supports_submit(self) -> bool:
+        return True
+
+    @property
+    def supports_instances(self) -> bool:
+        return False
 
     def _normalise_files(self, raw: Any) -> tuple[list[str], list[dict[str, Any]]]:
         if raw is None:
@@ -619,7 +859,7 @@ class GZCTFAdapter(PlatformAdapter):
             return None
         category_raw = str(_first_value(raw, self.mapping.category_field, "category", "type", default="misc"))
         category = self.mapping.category_map.get(category_raw, category_raw).strip().lower()
-        if category not in CATEGORIES:
+        if category not in PLATFORM_CATEGORIES:
             category = "misc"
         files, descriptors = self._normalise_files(
             _first_value(raw, self.mapping.attachments_field, "files", "attachments", default=[])
@@ -647,15 +887,66 @@ class GZCTFAdapter(PlatformAdapter):
     def fetch_challenges(self) -> list[PlatformChallenge]:
         result: list[PlatformChallenge] = []
         seen: set[str] = set()
-        for raw in self.client.list_challenges(self.game_id):
-            challenge = self._normalise(raw)
+        refreshed: dict[str, PlatformChallenge] = {}
+        raw_challenges = self.client.list_challenges(self.game_id)
+        if self.mapping.max_challenges:
+            raw_challenges = raw_challenges[: self.mapping.max_challenges]
+        for raw in raw_challenges:
+            enriched = dict(raw)
+            getter = getattr(self.client, "get_challenge", None)
+            if callable(getter):
+                try:
+                    challenge_id = _first_value(raw, "id", "challengeId", "challenge_id")
+                    detail = getter(self.game_id, int(challenge_id))
+                except (GZCTFError, requests.RequestException, ValueError, TypeError):
+                    detail = None
+                if isinstance(detail, dict):
+                    enriched.update({key: value for key, value in detail.items() if value is not None})
+                    context = detail.get("context")
+                    if (
+                        isinstance(context, dict)
+                        and context.get("url")
+                        and not any(enriched.get(key) for key in ("files", "attachments"))
+                    ):
+                        enriched["files"] = [{"url": str(context["url"])}]
+            challenge = self._normalise(enriched)
             if challenge is None:
                 continue
             if challenge.external_id in seen:
                 raise GZCTFError(f"duplicate GZCTF challenge id: {challenge.external_id}")
             seen.add(challenge.external_id)
-            self._by_id[challenge.external_id] = challenge
+            refreshed[challenge.external_id] = challenge
             result.append(challenge)
+        self._by_id = refreshed
+        return result
+
+    def fetch_public_scoreboard(self, *, limit: int | None = None) -> list[PlatformChallenge]:
+        """Normalize public scoreboard rows using the normal GZCTF mapping.
+
+        This method is discovery-only. It intentionally does not populate
+        participant challenge state or enable submit/attachment operations.
+        """
+
+        payload = self.client.get_public_scoreboard(self.game_id)
+        result: list[PlatformChallenge] = []
+        seen: set[str] = set()
+        for category, values in payload["challenges"].items():
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                raw = {**value, "category": value.get("category", category)}
+                challenge = self._normalise(raw)
+                if challenge is None or challenge.external_id in seen:
+                    continue
+                seen.add(challenge.external_id)
+                result.append(challenge)
+        result.sort(key=lambda item: (item.category, item.external_id))
+        if limit is not None:
+            if not 1 <= int(limit) <= 10:
+                raise ValueError("public scoreboard limit must be between 1 and 10")
+            result = result[: int(limit)]
         return result
 
     def _challenge(self, external_id: str) -> PlatformChallenge:
@@ -667,7 +958,7 @@ class GZCTFAdapter(PlatformAdapter):
         return challenge
 
     def preflight(self) -> list[PlatformChallenge]:
-        self.client.get_profile()
+        self._verify_scope()
         self.client.get_game(self.game_id)
         return self.fetch_challenges()
 
@@ -708,7 +999,11 @@ class GZCTFAdapter(PlatformAdapter):
             absolute = str(url) if str(url).startswith(("http://", "https://")) else urljoin(self.client.base_url + "/", str(url).lstrip("/"))
             parsed = urlsplit(absolute)
             base = urlsplit(self.client.base_url)
-            if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != base.netloc.lower():
+            allowed_origins = {base.netloc.lower()}
+            attachment_base = urlsplit(self.mapping.attachment_base_url)
+            if attachment_base.netloc:
+                allowed_origins.add(attachment_base.netloc.lower())
+            if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in allowed_origins:
                 raise ValueError("GZCTF attachment URL must stay on the configured platform origin")
             source = Path(unquote(parsed.path)).name or str(descriptor.get("name") or f"attachment-{index}")
             target = destination / numbered_filename(
@@ -788,8 +1083,6 @@ class GZCTFAdapter(PlatformAdapter):
         return _normalise_gz_verdict(result, submission_id=submission_id)
 
     def instances(self) -> list[dict[str, Any]]:
-        # GZCTF's participant API does not expose a portable lifecycle
-        # contract.  Never pretend that a challenge instance was started.
         return []
 
     def start_instance(self, _external_id: str) -> dict[str, Any]:

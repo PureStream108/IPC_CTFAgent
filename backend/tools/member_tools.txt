@@ -9,14 +9,34 @@ but this file lists the broader base image so agents know what to reach for.
 
 Execution model
 ---------------
-- Use action "bash" to run commands in the current Member sandbox.
+- Use the "bash" tool to run commands in the current Member sandbox.
+- bash is killed after 60 seconds. For work that legitimately takes longer -
+  brute force, large file analysis, slow scans, symbolic execution - use
+  "job_start" {command} instead. It runs with no timeout; poll it with
+  "job_status" {job_id} and read its output incrementally with "job_logs"
+  {job_id, stream, offset}, and stop it with "job_cancel" {job_id}. Do other
+  useful work between polls rather than waiting.
+  A job reported as "lost" has an unknown result, not a successful one: its
+  process disappeared without recording an exit status. Never treat lost as
+  success; re-run the work or verify it another way.
+- Every command runs inside this challenge's task container. Only container
+  paths exist: work under /workspace/shared, /workspace/attachments and /tmp.
+  Never reference a host path (Windows drive paths, /host, a host interpreter
+  such as /d/Language/Python314/python) or any directory belonging to the IPC
+  deployment itself (its source tree, data/, artifacts/, exports/, writeups,
+  .qa-artifacts). Such commands are blocked, and reading a writeup or solution
+  file instead of solving the challenge invalidates the run. The same block
+  applies to job_start, so a long job is not a way around it.
+- If a CLI tool or library is missing, use the "install" tool with
+  {manager: apt|pip|gem|npm|go, packages: ["name"]} to add it to this
+  container, then retry. Never substitute a tool from the host.
 - In Docker mode each Member works in /workspace/shared.
 - Extra cloned tools are under /workspace/tools, which points to
   /opt/ipc-tools/tools.
 - Coordinate writes to shared scripts; use a Member-specific scratch directory
   for temporary output.
-- Use action "tool" only for helpers listed in the current `available_mcps`:
-  memory, tool_search, browser, reverse, or the
+- Use the "mcp_tool" tool only for helpers listed in the current
+  `available_mcps`: memory, tool_search, browser, reverse, or the
   virtual "tools" server with list_tools/get_tool.
 - Browser and reverse run inside the shared task container.
   Browser tools are navigate, click,
@@ -65,8 +85,6 @@ Network and web tools
   /workspace/tools/dirsearch/dirsearch.
 - commix: command injection detection/exploitation. Path:
   /workspace/tools/commix.
-- WhatWaf: WAF/CDN fingerprinting and simple bypass guidance. Path:
-  /workspace/tools/WhatWaf.
 - Fenjing: Jinja2/Flask SSTI exploitation helper. Path:
   /workspace/tools/Fenjing, also installed as a Python package when build
   succeeds.
@@ -162,7 +180,7 @@ Common first moves by challenge shape
 -------------------------------------
 - Unknown attachment: file, ls -la, strings, xxd/head, binwalk, exiftool.
 - Web URL/service: curl -i, nmap -sV, directory discovery, then targeted tools
-  such as sqlmap, Fenjing, commix, or WhatWaf only when evidence points there.
+  such as sqlmap, Fenjing, or commix only when evidence points there.
 - Python pyjail/sandbox: read source, run small probes, then use
   `from Typhon import bypassREAD, bypassRCE` to generate payloads or continue
   scripted object-graph exploration.

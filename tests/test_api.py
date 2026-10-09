@@ -280,7 +280,7 @@ def test_complete_marks_flag(client):
     detail = client.get(f"/projects/{pid}").json()
     # Flag verification is durable; writeup/memory/archive run asynchronously.
     assert detail["project"]["status"] in ("flag_found", "solved")
-    assert detail["project"]["flag"] == "flag{win}"
+    assert detail["project"]["flag"].startswith("sha256:")
 
 
 def test_complete_same_flag_is_idempotent(client):

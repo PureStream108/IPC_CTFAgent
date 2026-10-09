@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from backend.api.deps import get_state
 from backend.core.state import AppState
-from backend.blackboard import graph_store
 from backend.core.redaction import redact_object
 from backend.memory.exporter.obsidian import export_obsidian
 from backend.memory.memory_search import search as mem_search

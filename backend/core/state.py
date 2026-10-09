@@ -16,7 +16,7 @@ from backend.mcp.mcp_client import MCPRegistry
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
 from backend.platform.ret2shell import Ret2ShellClient
-from backend.platform.ret2shell_mcp import build_ret2shell_mcp
+from backend.platform.ret2shell.mcp import build_ret2shell_mcp
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter

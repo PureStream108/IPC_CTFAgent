@@ -454,6 +454,108 @@ def test_member_stalls_after_repeated_unavailable_cli_tool(deps, tmp_path):
     assert sum(1 for entry in entries if entry["event"] == "sandbox_tool_unavailable") == 2
 
 
+def test_member_bash_cannot_reach_host_paths(deps, tmp_path):
+    """A solver that reaches for the host is refused before the command runs.
+
+    The scripted commands are the two escapes seen in a real run: reading an
+    exported writeup from the deployment tree, and calling a host interpreter.
+    """
+
+    class RecordingSandbox(LocalSandbox):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.commands: list[str] = []
+
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            self.commands.append(command)
+            return super().exec(command, timeout=timeout)
+
+    db, d, reports, flags = deps
+    sandbox = RecordingSandbox("host-escape", tmp_path / "host-escape")
+    sandbox.start()
+    d.sandbox = sandbox
+    d.max_actions_per_task = 5
+    pid, iid = _project(db)
+    writeup = (
+        "python3 -c \"p='D:/Desktop/Codex/IPC_CTFAgent/.qa-artifacts/run/artifacts/"
+        "projects/proj_104/sandbox/shared/ISCTF2025-WriteUp.pdf'\""
+    )
+    host_python = "cd /workspace/shared && /d/Language/Python314/python solve.py"
+    script = [
+        {"action": "bash", "command": writeup},
+        {"action": "bash", "command": host_python},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    result = member.solve(pid, iid, "web", is_initial=False)
+
+    assert result.status == "stalled"
+    assert writeup not in sandbox.commands
+    assert host_python not in sandbox.commands
+    assert "host_path_command_blocked" in reports[0].knowledge
+    entries = d.logger.read_log("project", pid, None)
+    blocked = [e for e in entries if e["event"] == "host_path_command_blocked"]
+    assert len(blocked) == 2
+    assert any("command blocked" in o for o in member.observations)
+
+
+def test_member_installs_a_missing_library_into_its_container(deps, tmp_path):
+    """A missing library is fixed by installing it, not by using a host tool."""
+
+    class InstallSandbox(LocalSandbox):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.commands: list[str] = []
+
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            self.commands.append(command)
+            if "pip install" in command:
+                return ExecResult(0, "Successfully installed pymupdf-1.24.0", "")
+            return super().exec(command, timeout=timeout)
+
+    db, d, reports, flags = deps
+    sandbox = InstallSandbox("installer", tmp_path / "installer")
+    sandbox.start()
+    d.sandbox = sandbox
+    pid, iid = _project(db)
+    script = [
+        {"action": "install", "manager": "pip", "packages": ["pymupdf"]},
+        {"action": "conclude", "description": "pymupdf is available in the container"},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    result = member.solve(pid, iid, "misc", is_initial=False)
+
+    assert result.status == "concluded"
+    assert any(
+        c.startswith("python3 -m pip install --no-cache-dir") and "pymupdf" in c
+        for c in sandbox.commands
+    )
+    entries = d.logger.read_log("tool", pid, None)
+    installs = [e for e in entries if e["event"] == "install"]
+    assert len(installs) == 1
+    assert installs[0]["manager"] == "pip"
+    assert installs[0]["exit_code"] == 0
+
+
+def test_member_install_rejects_an_unsupported_manager(deps):
+    db, d, reports, flags = deps
+    d.max_actions_per_task = 5
+    pid, iid = _project(db)
+    script = [
+        {"action": "install", "manager": "curl | sh", "packages": ["x"]},
+        {"action": "install", "manager": "pip", "packages": []},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    result = member.solve(pid, iid, "misc", is_initial=False)
+
+    assert result.status == "stalled"
+    assert "invalid_action_contract" in reports[0].knowledge
+    entries = d.logger.read_log("project", pid, None)
+    assert sum(1 for e in entries if e["event"] == "invalid_install_action") == 2
+
+
 def test_scripted_member_category_tools_mcp(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)

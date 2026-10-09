@@ -43,6 +43,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, pattern=r"^ops_[a-f0-9]{16}$")
     secrets: dict[str, str] = Field(default_factory=dict)
     attachments: list[str] = Field(default_factory=list, max_length=10)
+    workflow_id: str | None = Field(default=None, max_length=200)
 
     @field_validator("attachments")
     @classmethod
@@ -157,6 +158,7 @@ def chat(body: ChatRequest, service: OpsAgentService = Depends(get_ops_service))
         session_id=body.session_id,
         secrets_values=body.secrets,
         attachments=body.attachments,
+        workflow_id=body.workflow_id,
     )
 
 
@@ -168,6 +170,7 @@ def chat_stream(body: ChatRequest, service: OpsAgentService = Depends(get_ops_se
             session_id=body.session_id,
             secrets_values=body.secrets,
             attachments=body.attachments,
+            workflow_id=body.workflow_id,
         ):
             yield json.dumps(event, ensure_ascii=False) + "\n"
 

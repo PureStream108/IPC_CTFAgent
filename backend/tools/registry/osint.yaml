@@ -18,9 +18,3 @@ tools:
     exec: exiftool
     tags: [metadata, osint]
     when_to_use: Geolocation/author hints from media metadata.
-  - name: whatwaf
-    description: Identify front-facing WAF/CDN of a target.
-    path: tools/WhatWaf
-    exec: python -m whatwaf
-    tags: [recon, waf, osint]
-    when_to_use: Fingerprint defensive infrastructure.

@@ -114,7 +114,8 @@ def test_platform_preview_import_and_flag_query(client, monkeypatch):
     flag = client.get(f"/api/flags/{project_id}")
     assert flag.status_code == 200
     assert flag.json()["external_id"] == "42"
-    assert flag.json()["flag"] == "flag{platform}"
+    assert flag.json()["flag"].startswith("sha256:")
+    assert client.get(f"/api/flags/{project_id}?reveal=true").json()["flag"] == "flag{platform}"
     assert flag.json()["submitted"] is True
     assert client.get("/api/flags").json()[0]["project_id"] == project_id
 

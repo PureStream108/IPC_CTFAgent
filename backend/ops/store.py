@@ -16,7 +16,6 @@ from backend.ops.models import PlatformWorkflowSpec, validate_secret_name
 from backend.persistence.database import Database, PostgresDatabase
 from psycopg.errors import UniqueViolation
 
-_CLAUDE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
 _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
 
@@ -38,6 +37,9 @@ class OpsStore:
         self.db = database or Database()
         self._owns_db = database is None
         self._lock = threading.RLock()
+        # Set when a stored config used a format that no longer exists; the
+        # API surfaces it as a startup warning instead of failing to load.
+        self.migrated_api_format: str | None = None
         self._configure_database()
 
     def _configure_database(self) -> None:
@@ -51,8 +53,20 @@ class OpsStore:
         with self._lock:
             public = self._read_json(self.config_path, {})
             secret_data = self._read_secrets()
+        api_format = public.get("api_format", "openai")
+        if api_format == "claudecode":
+            # The Claude Code sidecar was removed; its endpoint was always an
+            # Anthropic Messages API. Rewriting it here keeps an existing
+            # deployment loadable, since LLMConfig rejects unknown formats
+            # outright and would otherwise fail every startup.
+            api_format = "anthropic"
+            self.migrated_api_format = (
+                "IPC api_format 'claudecode' was migrated to 'anthropic': the "
+                "separate Claude Code runtime no longer exists and every agent "
+                "now uses the unified runtime."
+            )
         data = {
-            "api_format": public.get("api_format", "openai"),
+            "api_format": api_format,
             "api_surface": public.get("api_surface", "auto"),
             "reasoning_effort": public.get("reasoning_effort", "auto"),
             "base_url": public.get("base_url", ""),
@@ -137,24 +151,23 @@ class OpsStore:
             self._delete_secret_namespace("sessions", session_id)
         return bool(cursor.rowcount)
 
-    def claude_session_id(self, session_id: str) -> str | None:
+    def agent_session_id(self, session_id: str) -> str | None:
+        """Return the unified agent session backing this conversation, if any."""
         self.get_session(session_id)
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT claude_session_id FROM sessions WHERE id = %s",
+                "SELECT agent_session_id FROM sessions WHERE id = %s",
                 (session_id,),
             ).fetchone()
-        value = row["claude_session_id"] if row is not None else None
+        value = row["agent_session_id"] if row is not None else None
         return str(value) if value else None
 
-    def set_claude_session_id(self, session_id: str, claude_session_id: str | None) -> None:
+    def set_agent_session_id(self, session_id: str, agent_session_id: str | None) -> None:
         self.get_session(session_id)
-        value = str(claude_session_id).strip() if claude_session_id else None
-        if value is not None and not _CLAUDE_SESSION_ID_RE.fullmatch(value):
-            raise ValueError("invalid Claude session id")
+        value = str(agent_session_id).strip() if agent_session_id else None
         with self._lock, self._connect() as connection:
             connection.execute(
-                "UPDATE sessions SET claude_session_id = %s, updated_at = %s WHERE id = %s",
+                "UPDATE sessions SET agent_session_id = %s, updated_at = %s WHERE id = %s",
                 (value, _now(), session_id),
             )
 

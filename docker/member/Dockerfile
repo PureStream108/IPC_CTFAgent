@@ -131,7 +131,6 @@ RUN mkdir -p /opt/ipc-tools/tools \
     && git clone --depth=1 ${GITHUB_MIRROR}/sqlmapproject/sqlmap.git /opt/ipc-tools/tools/sqlmap/sqlmapproject-sqlmap-03be590 \
     && git clone --depth=1 ${GITHUB_MIRROR}/maurosoria/dirsearch.git /opt/ipc-tools/tools/dirsearch/dirsearch \
     && git clone --depth=1 ${GITHUB_MIRROR}/commixproject/commix.git /opt/ipc-tools/tools/commix \
-    && git clone --depth=1 ${GITHUB_MIRROR}/Ekultek/WhatWaf.git /opt/ipc-tools/tools/WhatWaf \
     && git clone --depth=1 ${GITHUB_MIRROR}/Marven11/Fenjing.git /opt/ipc-tools/tools/Fenjing \
     && mkdir -p /opt/ipc-tools/tools/RSASIGN /opt/ipc-tools/tools/shiro550 \
     && git clone --depth=1 --branch release ${GITHUB_MIRROR}/silentsignal/rsa_sign2n.git /opt/ipc-tools/tools/RSASIGN/rsa_sign2n-release \

@@ -8,6 +8,7 @@ import shlex
 from typing import Any
 
 from backend.blackboard import graph_store
+from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.docker_manager import _load_docker_sdk
 
 
@@ -184,6 +185,11 @@ class OpsToolExecutor:
         timeout: int = 60,
     ) -> dict[str, Any]:
         command, timeout = _validate_command(command, timeout)
+        violation = host_path_violation(command)
+        if violation is not None:
+            raise OpsToolError(
+                f"task sandbox commands must stay inside the container: {violation}"
+            )
         sandbox = self._task_sandbox(project_id)
         result = sandbox.exec(command, timeout=timeout)
         return self._exec_result(result, sandbox=sandbox, project_id=project_id)

@@ -234,3 +234,229 @@ def test_truncated_json_recovers_only_complete_values():
 
     with pytest.raises(ValueError, match="no JSON action"):
         _extract_json('{"action":"bash","command":"echo flag')
+
+
+# ---------------------------------------------------------------------------
+# Streaming usage capture and provider session affinity (unified runtime).
+
+
+class _StreamResponse:
+    """Minimal SSE response for ConversationAdapter."""
+
+    def __init__(self, payloads, *, done: bool = True):
+        self.payloads = payloads
+        self.done = done
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_lines(self):
+        for payload in self.payloads:
+            yield ("data: " + payload).encode()
+            yield b""
+        if self.done:
+            yield b"data: [DONE]"
+            yield b""
+
+
+def _conversation(api_format="openai", surface="auto", **kwargs):
+    from backend.competition.conversation import ConversationAdapter
+
+    return ConversationAdapter(
+        LLMConfig(
+            api_format=api_format,
+            api_surface=surface,
+            api_key="k",
+            base_url="https://provider.invalid/v1",
+            model="m",
+        ),
+        **kwargs,
+    )
+
+
+def _run(adapter, request):
+    import threading
+
+    adapter.request = request
+    return adapter.turn(
+        [{"role": "user", "content": "go"}], "system", [], lambda _t: None,
+        threading.Event(),
+    )
+
+
+def test_chat_completions_usage_is_requested_and_parsed():
+    """A streamed chat completion omits usage unless stream_options asks."""
+    bodies = []
+
+    def request(url, **kwargs):
+        bodies.append(kwargs["json"])
+        return _StreamResponse([
+            '{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+            '{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":34,'
+            '"completion_tokens_details":{"reasoning_tokens":12}}}',
+        ])
+
+    turn = _run(_conversation(), request)
+
+    assert bodies[0]["stream_options"] == {"include_usage": True}
+    assert turn.usage == {
+        "prompt_tokens": 1200, "output_tokens": 34, "reasoning_tokens": 12
+    }
+
+
+def test_stream_options_are_dropped_when_the_provider_rejects_them():
+    """Losing usage reporting is acceptable; failing the turn is not."""
+    attempts = []
+
+    class Rejecting:
+        status_code = 400
+        text = "Unrecognized request argument supplied: stream_options"
+
+    def request(url, **kwargs):
+        attempts.append(dict(kwargs["json"]))
+        if "stream_options" in kwargs["json"]:
+            error = requests.HTTPError("400 Bad Request")
+            error.response = Rejecting()
+            raise error
+        return _StreamResponse([
+            '{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+        ])
+
+    adapter = _conversation()
+    turn = _run(adapter, request)
+
+    assert len(attempts) == 2
+    assert "stream_options" in attempts[0]
+    assert "stream_options" not in attempts[1]
+    assert turn.text == "ok"
+    assert turn.usage is None
+    # The degradation sticks, so the next turn does not repeat the failure.
+    assert adapter._stream_usage_supported is False
+    _run(adapter, request)
+    assert "stream_options" not in attempts[2]
+
+
+def test_an_unrelated_400_is_not_swallowed_as_a_stream_options_problem():
+    class Rejecting:
+        status_code = 400
+        text = "model not found"
+
+    def request(url, **kwargs):
+        error = requests.HTTPError("400 Bad Request")
+        error.response = Rejecting()
+        raise error
+
+    with pytest.raises(requests.HTTPError):
+        _run(_conversation(), request)
+
+
+def test_anthropic_usage_is_merged_across_start_and_delta_events():
+    """Anthropic splits input and output counts across two events."""
+    def request(url, **kwargs):
+        return _StreamResponse(
+            [
+                '{"type":"message_start","message":{"usage":{"input_tokens":900,'
+                '"cache_read_input_tokens":100}}}',
+                '{"type":"content_block_start","index":0,'
+                '"content_block":{"type":"text","text":""}}',
+                '{"type":"content_block_delta","index":0,'
+                '"delta":{"type":"text_delta","text":"hello"}}',
+                '{"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                '"usage":{"output_tokens":42}}',
+                '{"type":"message_stop"}',
+            ],
+            done=False,
+        )
+
+    turn = _run(_conversation(api_format="anthropic"), request)
+
+    # Cached prompt tokens still occupy the context window, so they count.
+    assert turn.usage["prompt_tokens"] == 1000
+    assert turn.usage["output_tokens"] == 42
+    assert turn.text == "hello"
+
+
+def test_responses_usage_is_read_from_the_completed_event():
+    def request(url, **kwargs):
+        return _StreamResponse(
+            [
+                '{"type":"response.output_text.delta","delta":"done"}',
+                '{"type":"response.completed","response":{"output":[],'
+                '"usage":{"input_tokens":777,"output_tokens":21,'
+                '"output_tokens_details":{"reasoning_tokens":9}}}}',
+            ],
+            done=False,
+        )
+
+    turn = _run(_conversation(surface="responses"), request)
+
+    assert turn.usage == {
+        "prompt_tokens": 777, "output_tokens": 21, "reasoning_tokens": 9
+    }
+
+
+def test_a_truncated_turn_still_reports_its_usage():
+    from backend.competition.conversation import TurnTruncated
+
+    def request(url, **kwargs):
+        return _StreamResponse([
+            '{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{},"finish_reason":"length"}],'
+            '"usage":{"prompt_tokens":50,"completion_tokens":4096}}',
+        ])
+
+    with pytest.raises(TurnTruncated) as caught:
+        _run(_conversation(), request)
+
+    assert caught.value.turn.usage["output_tokens"] == 4096
+
+
+def test_provider_session_id_is_stable_across_rebuilt_adapters():
+    """Session affinity must survive a reconnect, not be reinvented."""
+    durable = "ipc-session-abc123"
+    first = _conversation(provider_session_id=durable)
+    second = _conversation(provider_session_id=durable)
+    assert first.provider_session_id == second.provider_session_id == durable
+    # Without an explicit id each adapter still gets its own.
+    assert _conversation().provider_session_id != _conversation().provider_session_id
+
+
+def test_member_adapter_accepts_a_durable_provider_session_id():
+    durable = "ipc-agent-stable99"
+    adapter = OpenAICompatibleAdapter(
+        LLMConfig(
+            api_format="openai", api_key="k",
+            base_url="https://provider.invalid/v1", model="m",
+        ),
+        name="amber",
+        provider_session_id=durable,
+    )
+    assert adapter.provider_session_id == durable
+
+
+def test_output_budget_and_read_timeout_come_from_configuration():
+    captured = {}
+
+    def request(url, **kwargs):
+        captured.update(kwargs)
+        return _StreamResponse([
+            '{"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+            '{"type":"message_stop"}',
+        ], done=False)
+
+    adapter = _conversation(
+        api_format="anthropic", max_output_tokens=32768, read_timeout=300
+    )
+    _run(adapter, request)
+
+    assert captured["json"]["max_tokens"] == 32768
+    # The read timeout is a chunk gap, so a long silent reasoning phase before
+    # the first token must not kill the turn.
+    assert captured["timeout"] == (15, 300)

@@ -4,6 +4,7 @@ import os
 import json
 import hashlib
 import inspect
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -120,6 +121,8 @@ class CompetitionService:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        self._supervisor: threading.Thread | None = None
+        self._start_lock = threading.Lock()
         self._tick_lock = threading.Lock()
         self._starting_projects: set[str] = set()
         # A project can have a primary and a helper assignment.  The legacy
@@ -147,6 +150,12 @@ class CompetitionService:
         self._engine_epochs: dict[str, int] = {}
         self.observation_interval = 10.0
         self._last_observation_at = 0.0
+        # Seats already reported as stalled, so each stall is one event rather
+        # than one per tick.
+        self._reported_stalls: set[str] = set()
+        # (assignment_id, level) pairs already acted on, so an escalation
+        # happens once per level instead of every tick.
+        self._watchdog_actions: set[tuple[str, str]] = set()
 
     @property
     def ops(self) -> OpsAgentService:
@@ -162,10 +171,12 @@ class CompetitionService:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop, name="ipc-competition", daemon=True
-        )
-        self._thread.start()
+        self._start_loop_thread()
+        if self._supervisor is None or not self._supervisor.is_alive():
+            self._supervisor = threading.Thread(
+                target=self._supervise, name="ipc-competition-sup", daemon=True
+            )
+            self._supervisor.start()
         if os.name == "posix" and self._pair is None:
             socket_path = self.state.artifact_root / "ipc" / "pair.sock"
             self._pair = PairCoordinator(
@@ -193,11 +204,48 @@ class CompetitionService:
                     self._recon = None
                     self._recon_endpoint = None
 
+    def _start_loop_thread(self) -> None:
+        """Start the coordinator loop unless one is already running."""
+        with self._start_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run_loop, name="ipc-competition", daemon=True
+            )
+            self._thread.start()
+
+    def _supervise(self) -> None:
+        """Revive the coordinator if its loop thread ever dies unexpectedly.
+
+        A silent thread death strands every seat until an operator restarts
+        the application, so the supervisor stays deliberately independent of
+        the loop it watches and never clears ``_stop`` on its own.
+        """
+        while not self._stop.wait(30):
+            if self._thread is not None and self._thread.is_alive():
+                continue
+            print(
+                "[ipc-competition] coordinator thread is not alive; restarting",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                self._start_loop_thread()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[ipc-competition] supervisor restart failed:"
+                    f" {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
     def shutdown(self) -> None:
         self._stop.set()
         self._wake.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=30)
+        if self._supervisor and self._supervisor.is_alive():
+            self._supervisor.join(timeout=5)
         if self._pair is not None:
             self._pair.close()
             self._pair = None
@@ -452,6 +500,29 @@ class CompetitionService:
                     with suppress(Exception):
                         orchestrator.stop_project(challenge["project_id"])
                 self._release_project_engine(challenge["project_id"])
+        self._resolve_orphaned_jobs(run_id)
+
+    def _resolve_orphaned_jobs(self, run_id: str) -> None:
+        """Mark detached jobs 'lost' once their container is known to be gone.
+
+        Deliberately ``lost`` and not ``exited``: the exit status was never
+        recorded, so claiming one here would invent evidence. A reader must be
+        able to tell "we do not know how this ended" from "it succeeded".
+        """
+        from backend.agent.jobs import AgentJobStore
+
+        jobs = AgentJobStore(self.state.db)
+        for assignment in self.store.assignments(run_id):
+            with suppress(Exception):
+                for job in jobs.mark_lost_for_session(assignment["session_id"]):
+                    self.store.append_run_event(
+                        run_id, "job.lost",
+                        {
+                            "job_id": job["id"],
+                            "session_id": job["session_id"],
+                            "command": job["command"][:500],
+                        },
+                    )
 
     def _claim_project_engine(self, run: dict, project_id: str) -> bool:
         try:
@@ -674,8 +745,11 @@ class CompetitionService:
         while not self._stop.is_set():
             try:
                 self.tick()
-            except Exception as exc:
-                run = self.store.active_run()
+            except BaseException as exc:  # noqa: BLE001 - the loop must survive
+                try:
+                    run = self.store.active_run()
+                except Exception:
+                    run = None
                 if run:
                     with suppress(Exception):
                         self.store.schedule_next_sync(
@@ -685,6 +759,11 @@ class CompetitionService:
                             run["id"], "coordinator.error",
                             {"error": f"{type(exc).__name__}: {exc}"},
                         )
+                print(
+                    f"[ipc-competition] tick failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             self._wake.wait(self.tick_interval)
             self._wake.clear()
 
@@ -696,6 +775,11 @@ class CompetitionService:
             run = self.store.active_run()
             if run is None or not self.store.claim_run_lease(run["id"], self.owner):
                 return
+            # Renew seats before the platform refresh.  A sync that outlives
+            # the seat lease used to expire every seat and restart its Member
+            # session even though the work was healthy.
+            if run["status"] in {"running", "paused", "draining"}:
+                self.store.heartbeat_run_assignments(run["id"], self.owner)
             if run["status"] in {"running", "paused"}:
                 due = _timestamp(run.get("next_sync_at"))
                 if due is None or due <= datetime.now(timezone.utc):
@@ -735,6 +819,7 @@ class CompetitionService:
             self.store.reconcile_inflight_submissions(run["id"])
             self._stop_expired_challenges(run)
             self.store.heartbeat_run_assignments(run["id"], self.owner)
+            self._report_stalled_assignments(run)
             self._renew_project_engines(run)
             if run["status"] == "running":
                 self._sync_orchestrator_assignments(run)
@@ -751,6 +836,166 @@ class CompetitionService:
             self._record_observation(current)
         finally:
             self._tick_lock.release()
+
+    def _report_stalled_assignments(self, run: dict) -> None:
+        """Grade every live seat and act on the ones that stopped progressing.
+
+        Two distinct signals feed this:
+
+        * ``stalled_run_assignments`` -- the worker's own lease lapsed, which
+          ``heartbeat_run_assignments`` already declined to renew. Recording it
+          turns an otherwise unexplained expiry into a diagnosable event.
+        * the health view -- graded quiet time, which can escalate to
+          cancelling a turn or handing the session to another Member.
+
+        Everything here is best-effort: observability and recovery must never
+        interrupt judging or release a live lease, so failures are logged and
+        the next tick retries.
+        """
+        try:
+            stalled = self.store.stalled_run_assignments(run["id"])
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_stall_probe_failed", run["id"],
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        for assignment in stalled:
+            if assignment["id"] in self._reported_stalls:
+                continue
+            self._reported_stalls.add(assignment["id"])
+            self.store.append_run_event(
+                run["id"], "assignment.stalled",
+                {
+                    "assignment_id": assignment["id"],
+                    "challenge_id": assignment["challenge_id"],
+                    "member": assignment["member"],
+                    "role": assignment["role"],
+                    "last_renewed_at": str(assignment.get("last_renewed_at")),
+                },
+            )
+        live = {assignment["id"] for assignment in stalled}
+        # Forget seats that recovered or were released, so a later stall on the
+        # same seat is reported again instead of being suppressed forever.
+        self._reported_stalls &= live
+        self._run_session_watchdog(run)
+
+    def _run_session_watchdog(self, run: dict) -> None:
+        """Escalate quiet sessions: diagnose, then cancel, then hand off."""
+        from backend.agent.watchdog import classify, diagnosis
+
+        try:
+            rows = self.store.run_session_health(run["id"])
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_health_probe_failed", run["id"],
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        for row in rows:
+            if row.get("role") == "wp":
+                # A WP attempt is one long model call with no turn loop, so it
+                # has no progress signal to grade; its own 10 minute seat
+                # deadline is what bounds it.
+                continue
+            verdict = classify(row)
+            if not verdict.actionable:
+                continue
+            key = (row["assignment_id"], verdict.level)
+            if key in self._watchdog_actions:
+                continue
+            self._watchdog_actions.add(key)
+            # The evidence is recorded before acting, so a postmortem can tell
+            # "we killed a working Member" from "the Member was gone".
+            self.store.append_run_event(
+                run["id"], f"session.{verdict.level}",
+                {
+                    **diagnosis(row),
+                    "assignment_id": row["assignment_id"],
+                    "member": row.get("member"),
+                    "challenge_id": row.get("challenge_id"),
+                    "reason": verdict.reason,
+                },
+            )
+            if verdict.level == "cancel":
+                self._cancel_stalled_member(run, row)
+            elif verdict.level == "handoff":
+                self._handoff_stalled_seat(run, row)
+        current = {row["assignment_id"] for row in rows}
+        self._watchdog_actions = {
+            item for item in self._watchdog_actions if item[0] in current
+        }
+
+    def _cancel_stalled_member(self, run: dict, row: dict) -> None:
+        """Stop the in-flight turn, leaving the seat and transcript in place.
+
+        The gentlest escalation that can actually change anything: the Member
+        keeps its session and its findings and starts a fresh turn. If it was
+        wedged in one provider call or tool, this is enough.
+        """
+        member = row.get("member")
+        orchestrator = getattr(self.state, "orchestrator", None)
+        stop = getattr(orchestrator, "stop_member", None) if orchestrator else None
+        if not callable(stop) or not member:
+            return
+        try:
+            stop(member)
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_turn_cancel_failed", run["id"],
+                member=member, error=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _handoff_stalled_seat(self, run: dict, row: dict) -> None:
+        """Move the seat to an idle Member, keeping the session id.
+
+        Keeping the session is the entire point: the replacement inherits every
+        finding the stalled Member recorded instead of restarting the challenge
+        from nothing.
+        """
+        replacement = self._idle_member(run)
+        if replacement is None:
+            self.store.append_run_event(
+                run["id"], "session.handoff_skipped",
+                {
+                    "assignment_id": row["assignment_id"],
+                    "reason": "no idle Member available to take the seat",
+                },
+            )
+            return
+        try:
+            moved = self.store.handoff_assignment(
+                row["assignment_id"], replacement, self.owner
+            )
+        except (CompetitionConflict, ValueError) as exc:
+            self.store.append_run_event(
+                run["id"], "session.handoff_failed",
+                {"assignment_id": row["assignment_id"], "error": str(exc)},
+            )
+            return
+        self.store.append_run_event(
+            run["id"], "session.handed_off",
+            {
+                "assignment_id": moved["id"],
+                "session_id": moved["session_id"],
+                "previous_member": row.get("member"),
+                "member": moved["member"],
+                "epoch": moved["epoch"],
+            },
+        )
+
+    def _idle_member(self, run: dict) -> str | None:
+        """Pick a Member holding no seat in this run."""
+        from backend.core.config import MEMBER_NAMES
+
+        taken = {
+            assignment["member"]
+            for assignment in self.store.assignments(run["id"], active_only=True)
+        }
+        for name in MEMBER_NAMES:
+            if name not in taken:
+                return name
+        return None
 
     def _expire_at_competition_end(self, run: dict) -> None:
         value = run["config_snapshot"]["workflow_spec"].get("ends_at")
