@@ -28,15 +28,10 @@ AGENT_SCHEMA = (
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )""",
-    # One live root session per task. Helper seats attach as child sessions
-    # (parent_session_id IS NOT NULL) so they never contend for this slot.
     """CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_session_active_task
        ON agent_sessions(task_key)
        WHERE state='active' AND parent_session_id IS NULL""",
     "CREATE INDEX IF NOT EXISTS ix_agent_sessions_task ON agent_sessions(task_key,created_at)",
-    # "Who may write" is deliberately decoupled from member identity: a
-    # handoff replaces the owner of an existing session instead of starting a
-    # new transcript.
     """CREATE TABLE IF NOT EXISTS agent_session_writers (
         session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id) ON DELETE CASCADE,
         worker_kind TEXT NOT NULL,
@@ -77,7 +72,6 @@ AGENT_SCHEMA = (
         PRIMARY KEY (session_id, sequence),
         UNIQUE (session_id, event_key)
     )""",
-    # event_id is globally monotonic and drives SSE cursors across sessions.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_event_id ON agent_events(event_id)",
     """CREATE TABLE IF NOT EXISTS agent_compactions (
         compaction_id BIGSERIAL PRIMARY KEY,
@@ -90,14 +84,6 @@ AGENT_SCHEMA = (
     )""",
     """CREATE INDEX IF NOT EXISTS ix_agent_compactions_session
        ON agent_compactions(session_id, up_to_sequence DESC)""",
-    # Long-running sandbox work. The 60s exec ceiling made brute force, large
-    # file analysis and slow scans impossible, so a job outlives the turn that
-    # started it and is polled instead of awaited.
-    #
-    # The handle is deliberately the PID file plus the output files in the
-    # workspace volume, not a docker exec id: an exec id dies with a container
-    # restart while the volume survives, and a job whose fate is unknown must
-    # be reported as 'lost' rather than guessed to have exited 0.
     """CREATE TABLE IF NOT EXISTS agent_jobs (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
@@ -120,17 +106,6 @@ AGENT_SCHEMA = (
        ON agent_jobs(session_id, started_at DESC)""",
     """CREATE INDEX IF NOT EXISTS ix_agent_jobs_running
        ON agent_jobs(session_id) WHERE state='running'""",
-    # "Is this session actually progressing" is four different questions that
-    # the UI used to render as one green dot: the API is up, the coordinator
-    # ticks, a worker holds the seat, and the task advances. Each column below
-    # answers exactly one of them, so a stall can be told apart from slow work.
-    #
-    # Deliberately a view, not a table: every input is already durable, and a
-    # cached copy would be one more thing to invalidate - stale health data is
-    # worse than none.
-    # Dropped first because CREATE OR REPLACE VIEW cannot rename, reorder or
-    # retype columns: replacing it in place fails once the column list changes.
-    # Nothing holds a durable reference to this view, so a drop is free.
     "DROP VIEW IF EXISTS agent_session_health",
     """CREATE OR REPLACE VIEW agent_session_health AS
        SELECT s.id AS session_id,
@@ -197,9 +172,6 @@ AGENT_SCHEMA = (
                 max(last_progress_at) AS last_job_progress_at
          FROM agent_jobs GROUP BY session_id
        ) j ON j.session_id = s.id""",
-    # Ops conversations point at their agent session. The column lives on
-    # ``sessions``, which is created earlier, so the reference is added here
-    # once the target table exists.
     "ALTER TABLE IF EXISTS sessions ADD COLUMN IF NOT EXISTS agent_session_id TEXT",
     """DO $$ BEGIN
        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='sessions_agent_session_fk') THEN

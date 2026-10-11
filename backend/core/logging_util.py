@@ -73,7 +73,6 @@ class IPCLogger:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    # convenience wrappers
     def project(self, event: str, project_id: str, **f) -> None:
         self.log("project", event, project_id, **f)
 

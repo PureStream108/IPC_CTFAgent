@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 
-# These additive patches run before the create statements.  On a fresh
-# database ``ALTER TABLE IF EXISTS`` is a no-op; on an existing PostgreSQL
-# deployment it fills in columns introduced after the first persistent build
-# before indexes or runtime queries can reference them.
 SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS external_id TEXT",
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'misc'",
@@ -100,9 +96,6 @@ SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_projects_lease ON projects(lease_expires_at) WHERE lease_owner IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_projects_engine_lease ON projects(engine_lease_expires_at) WHERE engine_owner IS NOT NULL",
-    # Existing databases created before the platform column keep working:
-    # configure() runs these statements on every startup, so the idempotent
-    # ALTER upgrades them in place.
     "ALTER TABLE projects ADD COLUMN IF NOT EXISTS platform TEXT",
     """
     CREATE TABLE IF NOT EXISTS facts (
@@ -133,10 +126,6 @@ SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intents_claim ON intents(project_id, concluded_at, lease_expires_at, created_at)",
-    # Goal completion is serialized through the project row lock.  Do not add
-    # an unconditional runtime unique index here: an imported legacy database
-    # may contain duplicate historical goal rows and must be audited instead of
-    # failing every application bootstrap or silently deleting evidence.
     """
     CREATE TABLE IF NOT EXISTS intent_sources (
         intent_id TEXT NOT NULL,
@@ -374,5 +363,4 @@ from backend.competition.schema import COMPETITION_SCHEMA
 
 SCHEMA_STATEMENTS = (*SCHEMA_STATEMENTS, *COMPETITION_SCHEMA, *AGENT_SCHEMA)
 
-# One ordered contract is consumed by both runtime bootstrap and Alembic.
 SCHEMA_CONTRACT_STATEMENTS = (*SCHEMA_COMPATIBILITY_STATEMENTS, *SCHEMA_STATEMENTS)

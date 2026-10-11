@@ -54,8 +54,6 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             if request.url.path.startswith("/auth/"):
                 response.headers["Cache-Control"] = "no-store"
             return response
-        # No administrator setup/login is required for normal browser/API
-        # requests.  Keep the state marker for handlers that inspect it.
         request.state.authenticated = True
         return await call_next(request)
 

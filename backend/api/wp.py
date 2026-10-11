@@ -102,8 +102,6 @@ def derive_wp(state: AppState = Depends(get_state)):
                     with (target / filename).open("x", encoding="utf-8") as fh:
                         fh.write(item["content"])
                 except FileExistsError:
-                    # Another process may have exported after our directory
-                    # scan. Reserve that name and retry with the next suffix.
                     used.add(filename)
                     continue
                 used.add(filename)

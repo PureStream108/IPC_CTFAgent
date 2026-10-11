@@ -8,10 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class FieldMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # ``http_json`` fetches any JSON list endpoint with static headers.
-    # ``ret2shell`` and ``gzctf`` use authenticated clients. Their credentials
-    # come from the deployment environment or the separate workflow secret
-    # store, never from a run snapshot.
     platform: Literal["http_json", "ret2shell", "gzctf"] = "http_json"
     game_id: int | None = None
     list_url: str = ""
@@ -24,17 +20,10 @@ class FieldMapping(BaseModel):
     remote_field: str = ""
     solved_field: str = ""
     hints_field: str = ""
-    # GZCTF submissions are level based.  These values are deliberately
-    # metadata rather than credentials and are safe to persist in a run
-    # snapshot.  ``*_field`` permits a challenge list fixture to override the
-    # defaults per challenge.
     level: int = 1
     track_id: str = ""
     level_field: str = ""
     track_id_field: str = ""
-    # Optional cursor pagination for list endpoints.  The configured path
-    # must resolve to the next URL (or null); an empty path keeps the original
-    # single-request behavior.
     pagination_path: str = ""
     max_pages: int = 100
     max_challenges: int = 0
@@ -97,7 +86,4 @@ class PlatformChallenge(BaseModel):
     remote: bool = False
     solved: bool = False
     hints: list[str] = Field(default_factory=list)
-    # Adapter-specific, non-secret state (for example a GZCTF track/level or
-    # attachment descriptor).  Competition snapshots only copy the selected
-    # public fields, so this never becomes a credential transport.
     platform_data: dict[str, object] = Field(default_factory=dict)

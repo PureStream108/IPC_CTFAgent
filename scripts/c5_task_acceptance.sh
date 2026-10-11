@@ -16,10 +16,6 @@ ysoserial_dir=/workspace/tools/ysoserial-master
 if [[ -d "$ysoserial_dir" ]]; then
   ysoserial_jar="$(find "$ysoserial_dir" -type f -name 'ysoserial-*-all.jar' -print -quit)"
   if [[ -z "$ysoserial_jar" ]]; then
-    # Upstream still targets Java 6, which modern JDKs no longer accept. The
-    # task image uses JDK 21, which also removed the RMI Activation API used by
-    # these optional listener helpers. Keep the payload generators and exclude
-    # only the obsolete listener entry points from this compatibility build.
     rm -f \
       "$ysoserial_dir/src/main/java/ysoserial/payloads/JRMPListener.java" \
       "$ysoserial_dir/src/main/java/ysoserial/exploit/JenkinsListener.java" \

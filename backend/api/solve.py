@@ -119,13 +119,11 @@ def submit_report(project_id: str, body: ReportRequest, state: AppState = Depend
             conn, project_id, body.member, body.progress, body.difficulty,
             body.node_id, body.steps, body.directions, body.knowledge,
         )
-        # draw the report line Member -> Diamond
         graph_store.add_link(conn, project_id, body.member, "diamond", "report")
     state.logger.project(
         "difficulty_report", project_id, member=body.member,
         difficulty=body.difficulty, directions=body.directions,
     )
-    # Let Diamond react (assign more members) if orchestrator is live.
     if state.orchestrator is not None:
         state.orchestrator.handle_report(project_id, report)
     return report

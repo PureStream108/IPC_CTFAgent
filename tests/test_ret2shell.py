@@ -109,7 +109,6 @@ def login_ok(url, token="token-1"):
     return None
 
 
-# ---- auth ----
 
 
 def test_login_captures_set_token_header_and_uses_bearer():
@@ -184,12 +183,11 @@ def test_expired_token_relogins_once():
     client = make_client(router, authed=False)
     assert client.get_profile()["account"] == "user"
     first_post = next(call for call in client.session.calls if call[0] == "POST")
-    assert first_post[1].endswith("/api/account/login")  # login before any data call
+    assert first_post[1].endswith("/api/account/login")
     assert client.session.calls[-1][2]["headers"]["Authorization"] == "Bearer token-2"
     client.close()
 
 
-# ---- challenges / attachments ----
 
 
 def test_list_challenges_parses_items_total_tuple():
@@ -272,7 +270,6 @@ def test_download_file_streams_to_disk(tmp_path):
     client.close()
 
 
-# ---- instances ----
 
 
 def test_instance_lifecycle_and_wait_for_endpoints():
@@ -323,7 +320,6 @@ def test_wait_for_instance_times_out():
     client.close()
 
 
-# ---- submission ----
 
 
 def _submit_router(submissions):
@@ -423,11 +419,10 @@ def test_rate_limiter_enforces_shared_quota():
     with pytest.raises(Ret2ShellRateLimitError, match="retry in 300s"):
         limiter.reserve()
     clock["now"] = 301.0
-    limiter.reserve()  # window expired
+    limiter.reserve()
     assert limiter.used() == 1
 
 
-# ---- MCP ----
 
 
 class StubPlatformClient:
@@ -488,7 +483,6 @@ def test_ret2shell_mcp_exposes_instance_tools():
     assert status["solved"] is False and status["solves"] == 3
 
 
-# ---- wsrx tunneling ----
 
 
 class FakeProcess:
@@ -556,7 +550,6 @@ def test_wsrx_manager_spawns_idempotent_and_cleans_up():
     assert spawns[0].remote == remote
     assert spawns[0].local_port == 21430
 
-    # Repeated ensure for the same challenge reuses the live tunnel.
     second = manager.ensure(1430, [remote])
     assert second["endpoints"] == ["ipc-app:21430"]
     assert second["started"] == []
@@ -578,12 +571,11 @@ def test_wsrx_manager_restarts_dead_tunnel_and_binds_one_port_each():
     assert result["endpoints"] == ["ipc-app:20007", "ipc-app:20008"]
     assert len(spawns) == 2
 
-    spawns[0].returncode = 1  # process died behind our back
+    spawns[0].returncode = 1
     result = manager.ensure(7, remotes)
     assert result["endpoints"] == ["ipc-app:20007", "ipc-app:20008"]
     assert result["started"] == [remotes[0]]
     assert len(spawns) == 3
-    # Only the two live tunnels remain tracked.
     assert manager.endpoints(7) == ["ipc-app:20007", "ipc-app:20008"]
 
 
@@ -598,7 +590,6 @@ def test_instance_start_tunnels_wsrx_remotes_to_local_port():
     ]
     assert ("start", 1430) in stub.calls
 
-    # Idempotent: a repeated start must not spawn a second tunnel.
     again = _call_tool(server, "instance_start", challenge_id=1430)
     assert again["endpoints"] == ["ipc-app:21430"]
     assert len(spawns) == 1
@@ -615,7 +606,6 @@ def test_instance_start_tunnels_wsrx_remotes_to_local_port():
 
 
 def test_instance_start_passes_direct_endpoints_through():
-    # GZCTF-style direct host:port exposure needs no wsrx at all.
     spawns = []
     stub = StubPlatformClient()
     server = build_ret2shell_mcp(stub, tunnel_manager=_fake_manager(spawns))
@@ -625,7 +615,6 @@ def test_instance_start_passes_direct_endpoints_through():
     assert spawns == []
 
 
-# ---- API import integration ----
 
 
 @pytest.fixture
@@ -689,8 +678,6 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
     item = imported.json()["imported"][0]
     assert item["category"] == "pwn"
     with api_client.app.state.ipc.db.connect() as conn:
-        # The challenge description must land in the origin fact so the
-        # Member context exposes it (connection commands, flag format...).
         facts = {f.id: f.description for f in graph_store.project_detail(conn, item["project_id"]).facts}
         assert "nc target 1337" in facts.get("origin", "")
         graph_store.set_flag(conn, item["project_id"], "flag{r2s}")

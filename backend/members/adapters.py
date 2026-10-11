@@ -13,25 +13,21 @@ from urllib.parse import urlsplit, urlunsplit
 
 from backend.core.config import LLMConfig
 
-# Action kinds a member/diamond can emit.
 ACTION_KINDS = (
-    "tool",        # call an MCP tool: {server, tool, args}
-    "bash",        # run a command in the sandbox: {command}
+    "tool",
+    "bash",
     "install",
-    "memory",      # search memory: {query}
-    "tool_search", # search the tool catalog: {query}
-    "report",      # difficulty report to Diamond: {progress,difficulty,steps,directions,knowledge}
-    "intent",      # declare a new exploration intent: {from, description}
-    "conclude",    # conclude the assigned intent: {description}
-    "flag",        # claim a flag: {flag, description, from}
-    "done",        # give up / nothing more to do: {reason}
-    # Detached work. `bash` is capped at 60s, which cannot finish a brute
-    # force, a large file analysis or a slow scan; these four run it in the
-    # background and poll instead.
-    "job_start",   # start a detached command: {command}
-    "job_status",  # poll one job or list them: {job_id?}
-    "job_logs",    # read output incrementally: {job_id, stream?, offset?, limit?}
-    "job_cancel",  # kill a job's process tree: {job_id}
+    "memory",
+    "tool_search",
+    "report",
+    "intent",
+    "conclude",
+    "flag",
+    "done",
+    "job_start",
+    "job_status",
+    "job_logs",
+    "job_cancel",
 )
 
 
@@ -71,8 +67,6 @@ class MemberAction:
             elif isinstance(packages, list):
                 args["packages"] = [str(part) for part in packages if str(part).strip()]
         if kind == "job_start":
-            # Same aliases as bash: a model that has learned to say "cmd" for a
-            # foreground command says it for a background one too.
             for alias in ("cmd", "shell", "script", "command_line"):
                 if "command" not in args and alias in args:
                     args["command"] = args.pop(alias)
@@ -245,8 +239,6 @@ _ACTION_JSON_SCHEMA: dict[str, Any] = {
         "action": {"type": "string", "enum": list(ACTION_KINDS)},
     },
     "required": ["action"],
-    # Action-specific fields intentionally remain open. Tool arguments and CTF
-    # reports are dynamic and cannot be represented by one strict schema.
     "additionalProperties": True,
 }
 
@@ -285,9 +277,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
         self._last_response_meta: dict[str, Any] = {}
         self._surface_cache: str | None = None
         self._profile_cache: dict[tuple[Any, ...], _OpenAIProfile] = {}
-        # Session affinity has to outlive this object: a rebuilt adapter that
-        # invents a new id loses whatever routing or cache the provider had
-        # associated with the conversation.
         self._provider_session = (
             provider_session_id or f"ipc-{name}-{uuid.uuid4().hex[:16]}"
         )
@@ -345,9 +334,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
             messages,
             system_prompt=_SYSTEM_PROMPT,
             temperature=0.0 if deepseek else (None if reasoning_model else 0.4),
-            # Output length is intentionally uncapped: a reasoning model may
-            # spend the whole budget on hidden reasoning before emitting the
-            # action JSON, so the provider decides the generation length.
             max_tokens=None,
             structured=True,
             reasoning_effort=reasoning_effort,
@@ -403,8 +389,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
         if configured != "auto":
             return configured
         if decision and _is_reasoning_model(self.config.model):
-            # Member decisions are short routing actions. Avoid spending the
-            # output budget on hidden reasoning unless the operator opts in.
             return "none"
         return None
 
@@ -433,12 +417,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
         thinking: str | None,
     ) -> _OpenAIProfile:
         reasoning_model = _is_reasoning_model(self.config.model)
-        # Reasoning-model names alone do not guarantee that a compatible
-        # gateway implements OpenAI's strict JSON Schema wire shape.  When an
-        # operator explicitly selects Chat Completions on a non-native
-        # endpoint, prefer the broadly supported JSON Object mode (and its
-        # matching token parameter).  Native OpenAI keeps the strict schema
-        # profile used by Responses/Chat reasoning models.
         native_or_reasoning = _is_native_openai(self.config.base_url) or (
             reasoning_model and self.config.api_surface == "auto"
         )
@@ -622,8 +600,6 @@ def _openai_request_body(
 def _openai_response_text(payload: Any, surface: str) -> tuple[str, dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError(f"LLM response must be a JSON object, got {type(payload).__name__}")
-    # Several compatibility gateways expose Responses at a custom path but
-    # still return a Chat-shaped payload. Detect the actual wire shape.
     if isinstance(payload.get("choices"), list):
         return _chat_response_text(payload)
     if surface == "responses" or isinstance(payload.get("output"), list):
@@ -847,8 +823,6 @@ def _provider_error_from_response(response: Any, provider: str) -> ProviderError
     status = _response_status(response)
     retry_after = _retry_after_seconds(response)
     error_type = RetryableProviderError if _is_retryable_status(status) else NonRetryableProviderError
-    # Surface the gateway's own reason (rate limit, content filter, schema
-    # rejection...) — a bare "HTTP 400" is undiagnosable from logs.
     detail = (getattr(response, "text", "") or "").strip()[:500]
     message = f"{provider} endpoint returned HTTP {status}"
     if detail:
@@ -964,7 +938,6 @@ def _http_error_summary(exc: Exception) -> str:
 
 def _is_reasoning_model(model: str) -> bool:
     name = (model or "").strip().lower().rsplit("/", 1)[-1]
-    # Kimi For Coding always thinks; give it the reasoning-model budget.
     if "kimi-for-coding" in name or name.startswith("kimi-k"):
         return True
     if name.startswith("gpt-"):
@@ -1039,8 +1012,6 @@ class ClaudeAdapter(BaseAdapter):
         return _anthropic_endpoint(self.config.base_url)
 
     def _headers(self) -> dict[str, str]:
-        # Anthropic uses x-api-key. Keep Bearer too for compatible gateways
-        # (including Claude Code proxy surfaces) that expect OpenAI-style auth.
         return {
             "x-api-key": self.config.api_key,
             "Authorization": f"Bearer {self.config.api_key}",
@@ -1234,10 +1205,6 @@ def _extract_json_value(text: Any, *, depth: int) -> dict:
         elif isinstance(obj, list):
             candidates.extend(item for item in obj if isinstance(item, dict))
 
-    # A provider can stop immediately after emitting a complete value while
-    # omitting only the final container delimiters. Close those delimiters,
-    # but never invent or terminate string content: a cut-off command or
-    # argument must go through the normal model-repair path instead.
     for source in _truncated_object_slices(text):
         for loader in (json.loads, ast.literal_eval):
             try:
@@ -1335,8 +1302,6 @@ def _close_truncated_containers(candidate: str) -> str | None:
                 return None
             expected.pop()
             if not expected:
-                # The root object was already closed. A normal raw decode or
-                # literal parse owns this case; it is not EOF truncation.
                 return None
     if quote is not None or not expected:
         return None

@@ -159,9 +159,6 @@ class MCPRegistrySession:
     async def __aenter__(self) -> MCPRegistrySession:
         await self._stack.__aenter__()
         self._open = True
-        # Servers backed by ``docker exec`` are comparatively expensive to
-        # initialise.  Open only the server a Member actually calls instead of
-        # spawning every browser/reverse/tool process before its first action.
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

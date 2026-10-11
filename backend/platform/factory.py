@@ -40,10 +40,6 @@ def build_adapter(
         if source_url:
             parsed = urlsplit(source_url)
             if parsed.scheme and parsed.netloc:
-                # Standalone preview callers commonly provide the concrete
-                # ``/api/Game/...`` endpoint as list_url. Native GZCTF URLs
-                # are rooted at the deployment origin, so never append the
-                # client API paths below an already-qualified endpoint.
                 if not resolved_base_url or parsed.path.lower().startswith("/api/"):
                     resolved_base_url = f"{parsed.scheme}://{parsed.netloc}"
         return GZCTFAdapter(

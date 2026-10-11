@@ -86,7 +86,6 @@ def test_expire_workers_releases_stale_claims(db):
     with db.connect() as conn:
         pid = graph_store.create_project(conn, "T", "o", "g", "misc")
         intent = edge_store.create_intent(conn, pid, ["origin"], "x", "diamond", worker="pearl")
-        # backdate heartbeat
         conn.execute(
             "UPDATE intents SET last_heartbeat_at = '2000-01-01T00:00:00Z' WHERE id = %s",
             (intent.id,),

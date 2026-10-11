@@ -61,7 +61,6 @@ def _client_key(request: Request) -> str:
 
 @router.get("/status")
 def auth_status(request: Request, manager: AuthManager = Depends(get_auth_manager)) -> dict:
-    # Authentication is intentionally disabled for the trusted Docker UI.
     return {
         "setup_required": False,
         "authenticated": True,

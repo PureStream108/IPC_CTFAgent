@@ -79,7 +79,6 @@ class _SubmitRateLimiter:
 
 
 def _error_detail(response: requests.Response) -> str:
-    # ret2shell errors are plain-text bodies, not JSON.
     detail = response.text.strip().replace("\r", " ").replace("\n", " ")
     if len(detail) > 500:
         detail = detail[:500] + "..."
@@ -128,7 +127,6 @@ class Ret2ShellClient:
         self._token = token or os.getenv("IPC_R2S_TOKEN", "")
         self._limiter = _SubmitRateLimiter(monotonic=monotonic)
 
-    # ---- low-level request handling ----
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}/api{path}"
@@ -194,7 +192,6 @@ class Ret2ShellClient:
                 f"unexpected non-JSON response from {path}: {response.text[:200]!r}"
             ) from exc
 
-    # ---- auth ----
 
     @staticmethod
     def solve_pow(challenge: str, *, max_attempts: int = 5_000_000) -> str:
@@ -218,8 +215,6 @@ class Ret2ShellClient:
         raise Ret2ShellError(f"pow challenge not solved within {max_attempts} attempts")
 
     def _fresh_captcha(self) -> dict[str, str]:
-        # The CLI endpoint always issues a PoW (difficulty 4), which the
-        # agent can solve autonomously — unlike the browser image captcha.
         response = self.session.get(self._url("/account/captcha/cli"), timeout=self.timeout)
         if response.status_code != 200:
             raise Ret2ShellAuthError(f"captcha fetch failed: {_error_detail(response)}")
@@ -227,8 +222,6 @@ class Ret2ShellClient:
         if not isinstance(payload, dict) or not payload.get("id"):
             raise Ret2ShellAuthError("captcha response has no id")
         challenge = str(payload.get("challenge", ""))
-        # A non-PoW challenge (image/hcaptcha) cannot be solved by the agent;
-        # pass it through and let login fail with the platform's reason.
         answer = self.solve_pow(challenge) if "#" in challenge else ""
         return {"captcha_id": str(payload["id"]), "captcha_answer": answer}
 
@@ -244,9 +237,6 @@ class Ret2ShellClient:
             "captcha_id": "",
             "captcha_answer": "",
         }
-        # The platform may enable captchas (410 "captcha is outdate" otherwise).
-        # The CLI PoW endpoint works headlessly, so try to pre-solve one; if
-        # the deployment disabled captchas the fields are simply ignored.
         try:
             body.update(self._fresh_captcha())
         except Ret2ShellAuthError:
@@ -260,7 +250,6 @@ class Ret2ShellClient:
         if response.status_code != 200 or not self._token:
             raise Ret2ShellAuthError(f"ret2shell login failed: {_error_detail(response)}")
 
-    # ---- games / challenges ----
 
     def ping(self) -> str:
         response = self.session.get(self._url("/ping"), timeout=self.timeout)
@@ -315,7 +304,6 @@ class Ret2ShellClient:
             return False
         return bool(payload)
 
-    # ---- attachments ----
 
     def list_files(self, challenge_id: int, game_id: int | None = None) -> list[dict[str, Any]]:
         payload = self._request_ok(
@@ -369,7 +357,6 @@ class Ret2ShellClient:
             raise
         return target
 
-    # ---- dynamic instances ----
 
     def list_instances(self, game_id: int | None = None) -> list[dict[str, Any]]:
         payload = self._request_ok("GET", f"/game/{game_id or self.game_id}/instance")
@@ -430,7 +417,6 @@ class Ret2ShellClient:
                 )
             self._sleep(interval)
 
-    # ---- flag submission (async judged) ----
 
     def get_submission(
         self,
@@ -491,7 +477,6 @@ class Ret2ShellClient:
             submission = self.get_submission(challenge_id, submission_id, game_id)
         return submission
 
-    # ---- lifecycle ----
 
     def close(self) -> None:
         self.session.close()
@@ -557,9 +542,6 @@ class Ret2ShellAdapter(PlatformAdapter):
         for raw in self.client.list_challenges(self.game_id):
             if not isinstance(raw, dict) or raw.get("id") is None:
                 continue
-            # The list endpoint returns content: null; the full statement
-            # (connection commands, flag format hints) only comes from the
-            # per-challenge detail endpoint.
             content = raw.get("content")
             if not content:
                 try:
@@ -638,8 +620,6 @@ class Ret2ShellAdapter(PlatformAdapter):
         challenge: PlatformChallenge,
         dest_dir: str | Path,
     ) -> list[Path]:
-        # ret2shell attachments are listed per challenge via the file API, so
-        # there are no attachment URLs at fetch time.
         destination = Path(dest_dir)
         destination.mkdir(parents=True, exist_ok=True)
         downloaded: list[Path] = []

@@ -9,9 +9,6 @@ branch_labels = None
 depends_on = None
 
 
-# The migration intentionally uses fixed SQL instead of importing the mutable
-# runtime schema contract. Existing installations must all execute the same
-# cleanup before the partial unique index is created.
 GOAL_INTENT_UNIQUENESS_UPGRADE_STATEMENTS = (
     "LOCK TABLE intents IN SHARE ROW EXCLUSIVE MODE",
     """
@@ -229,7 +226,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Duplicate rows removed during upgrade remain available in audit_events,
-    # but recreating them would violate later history and is intentionally not
-    # attempted by downgrade.
     op.execute("DROP INDEX IF EXISTS uq_intents_one_goal_per_project")

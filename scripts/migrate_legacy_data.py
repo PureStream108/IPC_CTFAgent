@@ -29,7 +29,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from backend.persistence.database import Database  # noqa: E402
+from backend.persistence.database import Database
 
 GRAPH_TABLES = (
     "settings",
@@ -77,8 +77,6 @@ JSON_COLUMNS = {
     ("workflows", "spec_json"),
 }
 
-# Missing legacy columns must not be inserted as NULL. PostgreSQL only applies
-# a column default when the column is omitted from the INSERT statement.
 SERVER_DEFAULT_COLUMNS = {
     "settings": {"id", "intent_timeout", "reason_timeout"},
     "projects": {
@@ -103,9 +101,6 @@ SERVER_DEFAULT_COLUMNS = {
     "workflows": {"status"},
 }
 
-# These columns are NOT NULL and have no target-side default. A malformed
-# legacy row should fail with an actionable message instead of an opaque
-# PostgreSQL NotNullViolation.
 REQUIRED_COLUMNS = {
     "projects": {"id", "title", "created_at", "updated_at"},
     "facts": {"id", "project_id", "description", "created_at"},
@@ -287,8 +282,6 @@ def _set_if_blank(row: dict[str, Any], key: str, value: Any) -> None:
 
 
 def _project_row(row: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    # A few very early exports used ``name`` and omitted updated_at. Keep the
-    # import useful while retaining the old timestamp whenever it exists.
     _set_if_blank(row, "id", str(row.get("external_id") or "").strip() or None)
     _set_if_blank(
         row, "title", row.get("name") or row.get("external_id") or row.get("id")
@@ -359,8 +352,6 @@ def _attachment_row(row: dict[str, Any], context: dict[str, Any]) -> dict[str, A
     if candidate.is_file():
         row["path"] = str(candidate)
     elif not str(row.get("path") or "").strip():
-        # Keep the row invalid rather than claiming a file exists when the
-        # legacy attachment and copied artifact are both absent.
         row["path"] = None
     row["created_at"] = _clean_timestamp(row.get("created_at")) or _utcnow()
     return row
@@ -386,7 +377,6 @@ def _run_row(row: dict[str, Any], _context: dict[str, Any]) -> dict[str, Any]:
     row["cancel_requested"] = _legacy_bool(row.get("cancel_requested"))
     status = str(row.get("status") or "abandoned").strip().lower()
     if status == "running":
-        # No legacy worker can safely resume after the process boundary.
         row["status"] = "abandoned"
         row["error"] = row.get("error") or "legacy import: interrupted run abandoned"
     else:
@@ -482,9 +472,6 @@ def _sync_serial_sequence(target, table: str) -> None:
     max_id = max_row.get("max_id") if max_row else None
     if max_id is None:
         return
-    # pg_get_serial_sequence returns a server-quoted qualified identifier. It
-    # cannot be passed as a value to SELECT, so use it only after PostgreSQL
-    # has resolved it; table names here are fixed constants above.
     state = target.execute(
         f"SELECT last_value, is_called FROM {sequence_name}"
     ).fetchone()
@@ -701,8 +688,6 @@ def _import_rows(
     transform = TRANSFORMS.get(table)
     source_rows = list(rows)
     if table in SERIAL_TABLES:
-        # Explicit ids must be inserted first; generated ids then start above
-        # the imported range even when the legacy sequence was stale.
         source_rows.sort(key=lambda source: not _valid_serial_id(source.get("id")))
     for source in source_rows:
         row = dict(source)
@@ -716,9 +701,6 @@ def _import_rows(
                 _sync_serial_sequence(target, table)
         if transform is not None:
             row = transform(row, context)
-        # A transform may synthesize fallback values for a field that was
-        # absent in an old schema. Treat those exactly like server defaults
-        # unless the source row actually carried the field.
         missing = sorted(
             column
             for column in REQUIRED_COLUMNS.get(table, set())
@@ -732,8 +714,6 @@ def _import_rows(
             conflicts += 1
             continue
 
-        # Omit absent/NULL optional values. This preserves target defaults for
-        # columns added after the legacy export and avoids explicit NULLs.
         insert_columns = tuple(
             column
             for column in columns
@@ -988,9 +968,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return result
 
     database = Database(args.database_url or None)
-    # Import against the base PostgreSQL schema so duplicate goal edges from a
-    # legacy SQLite database can be loaded intact. The head migration then
-    # audits and canonicalizes those rows before installing its unique index.
     _upgrade_database(database.dsn, "20260807_0001")
     database.open()
     stats = ImportStats()

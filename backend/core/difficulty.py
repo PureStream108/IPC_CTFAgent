@@ -58,8 +58,6 @@ def max_difficulty(*values: str | None) -> str:
 
 
 def extra_members_for_difficulty(value: str | None) -> int:
-    # Keep reinforcements conservative: high means a second pair of eyes, not
-    # instantly spending every configured member on a possibly stale branch.
     return {"low": 0, "medium": 1, "high": 1, "ex": 2}[normalize_difficulty(value)]
 
 

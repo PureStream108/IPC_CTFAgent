@@ -84,12 +84,10 @@ def test_handoff_transfers_write_access_without_starting_a_new_transcript(store)
     assert writer["owner"] == "worker-b"
     assert writer["epoch"] == 2
 
-    # The previous owner is fenced out at its old epoch.
     with pytest.raises(SessionWriterLost):
         store.append_event(
             session["id"], "stale", "status", {}, owner="worker-a", epoch=1
         )
-    # The new owner continues the same transcript.
     store.append_event(
         session["id"], "second", "provider_messages",
         {"messages": [{"role": "assistant", "content": "continuing"}]},
@@ -125,14 +123,12 @@ def test_one_active_root_session_per_task(store):
     with pytest.raises(SessionConflict, match="active root session"):
         store.create_session("competition", task)
 
-    # A helper seat is a child session, so it does not contend for the slot.
     helper = store.create_session(
         "competition", task, parent_session_id=first["id"], lineage_reason="helper"
     )
     assert helper["parent_session_id"] == first["id"]
     assert store.active_session_for_task(task)["id"] == first["id"]
 
-    # Retiring the root frees the task for a fresh session.
     store.set_state(first["id"], "finished")
     replacement = store.create_session("competition", task, lineage_reason="resume")
     assert replacement["id"] != first["id"]
@@ -152,7 +148,6 @@ def test_unknown_kinds_and_reasons_are_rejected_before_any_write(store):
 def test_turn_usage_is_recorded_for_token_budget_calibration(store):
     session = owned(store, task_key="ops:usage")
     store.start_turn(session["id"], 1, "worker-a", 1)
-    # Restarting the same turn is idempotent, not a duplicate row.
     assert store.start_turn(session["id"], 1, "worker-a", 1)["turn"] == 1
     finished = store.finish_turn(
         session["id"], 1, "completed",
@@ -214,7 +209,6 @@ def test_model_snapshot_never_stores_credentials(store):
 
 def test_claiming_a_session_owned_by_another_worker_requires_handoff(store):
     session = owned(store, task_key="ops:claim")
-    # The same owner resuming after a restart simply renews.
     assert store.claim_writer(session["id"], "ops-run", "worker-a")["epoch"] == 1
     with pytest.raises(SessionWriterLost, match="handoff"):
         store.claim_writer(session["id"], "ops-run", "worker-b")

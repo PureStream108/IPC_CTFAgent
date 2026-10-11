@@ -51,8 +51,6 @@ class MemoryStore:
         )
         row["status"] = status
         for key, value in (usage or {}).items():
-            # COALESCE semantics: a later report without usage keeps what the
-            # provider already told us.
             if value is not None:
                 row[key] = value
         return row
@@ -157,10 +155,7 @@ def test_competition_turns_are_recorded_and_renew_worker_liveness():
 
     assert [row["status"] for row in store.turns.values()] == ["completed", "completed"]
     assert store.turns[1]["prompt_tokens"] == 900
-    # One renewal per completed turn: the cadence the watchdog reads.
     assert store.renewals == 2
-    # A real prompt_tokens report tightens the local estimate, and the ratio is
-    # durable so the next seat for this session starts calibrated.
     assert store.token_budget.get("calibration_ratio")
 
 
@@ -263,12 +258,8 @@ def test_deterministic_compaction_keeps_tool_pairing_and_shrinks_transcript():
 
     assert len(compacted) < len(messages)
     assert compacted[0] == {"role": "user", "content": "start"}
-    # It records which tools were already used, so the model knows the ground
-    # it covered even without a semantic summary.
     assert "member_action" in summary["verified_facts"][0]["claim"]
     assert summary["open_questions"]
-    # No tool result may survive without its assistant tool call, or the next
-    # provider request is rejected.
     assistant_ids = {
         call["id"]
         for message in compacted
@@ -576,14 +567,12 @@ def test_truncated_turn_is_continued_instead_of_failing_the_session():
     ).run("start")
 
     assert result.status == "idle"
-    # The partial assistant message and the continuation directive are durable.
     truncated = [
         item for item in store.items
         if item["payload"].get("truncated") == "max_tokens"
     ]
     assert len(truncated) == 1
     assert truncated[0]["payload"]["messages"][0] == partial.messages[0]
-    # The retry sees the partial turn plus an instruction to continue.
     assert captured[1][-2] == partial.messages[0]
     assert "stopped at the provider output limit" in captured[1][-1]["content"]
 
@@ -647,8 +636,6 @@ def test_anthropic_output_limit_yields_a_continuable_partial_turn():
 
     turn = caught.value.turn
     assert caught.value.reason == "max_tokens"
-    # The half-streamed tool_use block is dropped: an unanswered tool call
-    # would make the next request invalid.
     assert turn.tools == []
     content = turn.messages[0]["content"]
     assert [block["type"] for block in content] == ["text"]
@@ -816,8 +803,6 @@ def test_base_member_native_bridge_routes_provider_action_through_dispatch():
     assert result.status == "done"
     assert result.steps == 1
     assert any(item["kind"] == "tool_call" for item in deps.competition_store.items)
-    # The worker proved its own liveness while executing the tool, not only
-    # once the turn completed (P5b): a single tool can run for minutes.
     assert deps.competition_store.renewals >= 1
 
 
@@ -897,8 +882,6 @@ def test_base_member_renews_its_own_liveness_lease_per_tool_call():
     asyncio.run(
         member._solve_with_native_session("project", "intent", "web", True, None)
     )
-    # Two tool calls plus the completed turns: renewal is frequent enough that
-    # a worker inside a slow tool is still distinguishable from a dead one.
     assert store.renewals >= 3
 
 
@@ -1370,15 +1353,10 @@ def test_base_member_dispatches_each_split_tool_by_name():
     )
 
     assert result.status == "done"
-    # The provider was offered the split tool set, not one opaque action tool.
     assert "member_action" not in stream.seen_tools
     assert {"bash", "memory_search", "give_up"}.issubset(set(stream.seen_tools))
-    # Each tool name reached the dispatcher as its legacy action kind. The two
-    # reads were a parallel group, so their relative order is not fixed; what
-    # matters is that both ran, and that they ran before the later write.
     assert set(dispatched[:2]) == {"memory", "tool_search"}
     assert dispatched[2:] == ["bash", "done"]
-    # The transcript, unlike execution order, follows the provider's array.
     results = [
         item["payload"]["id"] for item in deps.competition_store.items
         if item["kind"] == "tool_result"

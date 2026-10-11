@@ -54,7 +54,6 @@ def test_search_category_filter(store):
 
 def test_persistence_across_instances(store):
     _seed(store)
-    # A second store sharing the PostgreSQL database sees committed memories.
     store2 = MemoryStore(store.db).configure()
     assert len(store2.all()) == 4
 

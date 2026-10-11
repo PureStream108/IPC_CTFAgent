@@ -49,8 +49,6 @@ class QuestionStore:
     def answer(self, question_id: str, session_id: str, value: str) -> dict:
         if not value.strip() or len(value) > 16384:
             raise ValueError("answer must contain 1 to 16384 characters")
-        # Reuse the established credential store; raw sensitive answers never
-        # enter the question table or conversation events.
         ops = OpsStore(self.state.root, database=self.state.db)
         with self.state.db.connect() as connection:
             row = connection.execute(

@@ -48,10 +48,6 @@ def claim_engine_lease(
         ).fetchone())
         if live and not same_owner:
             return None
-        # A live lease may be renewed by the same owner without fencing its
-        # in-flight work.  Once the lease has expired, even that same owner
-        # must receive a new epoch so a delayed worker cannot keep writing
-        # with the previous fencing token.
         keep_epoch = live and same_owner
         return connection.execute(
             """UPDATE projects SET engine_kind=%s,engine_owner=%s,

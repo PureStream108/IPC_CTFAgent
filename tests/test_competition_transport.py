@@ -79,8 +79,6 @@ def test_recon_subscriber_replays_orders_deduplicates_and_acknowledges():
         request_id="second", message_type="recon",
         sequence=0,
     ).model_dump(mode="json")
-    # Global message sequences can contain records for other sessions, so a
-    # missing integer between two records is not itself an error.
     first = {"sequence": 4, "envelope": first, "status": "done"}
     second = {"sequence": 9, "envelope": second, "status": "done"}
     records = [first, second]
@@ -102,8 +100,6 @@ def test_recon_subscriber_replays_orders_deduplicates_and_acknowledges():
         replay=replay, advance=advance, context=context,
     )
     try:
-        # No live PUB message is needed: reconnect recovery is driven by the
-        # durable callback and remains deterministic in unit tests.
         assert subscriber.receive(timeout_ms=0)["sequence"] == 4
         assert subscriber.receive(timeout_ms=0)["sequence"] == 4
         assert subscriber.ack() == 4
@@ -149,8 +145,6 @@ def test_recon_publisher_accepts_member_worker_threads():
     publisher = ReconPublisher("inproc://recon-workers", persist, context=context)
     subscriber = ReconSubscriber("inproc://recon-workers", "challenge", context=context)
     try:
-        # PUB/SUB subscriptions are asynchronous; allow the subscriber to
-        # connect before sending from several independent Member threads.
         time.sleep(0.05)
         workers = [
             threading.Thread(

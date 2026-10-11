@@ -95,8 +95,6 @@ def test_goal_intent_uniqueness_is_an_explicit_audited_migration() -> None:
     assert "DELETE FROM intents" in combined
     assert "CREATE UNIQUE INDEX uq_intents_one_goal_per_project" in combined
     assert "WHERE to_fact_id = 'goal'" in combined
-    # Runtime bootstrap may create tables, but must never perform destructive
-    # history cleanup or bypass this Alembic revision.
     assert "uq_intents_one_goal_per_project" not in "\n".join(
         SCHEMA_CONTRACT_STATEMENTS
     )
@@ -157,8 +155,6 @@ def test_alembic_env_prefers_explicit_config_url_when_environment_is_empty(monke
 
 
 def _load_migration_env_for_test():
-    # ``env.py`` calls Alembic's context at import time, so provide a minimal
-    # fake context and config through the module loader only for this unit test.
     import sys
     import types
 

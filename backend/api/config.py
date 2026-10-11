@@ -45,7 +45,7 @@ class ConfigUpdate(BaseModel):
     diamond: LLMUpdate | None = None
     member: LLMUpdate | None = None
     use_legacy_member: str | None = None
-    members: dict[str, LLMUpdate] | None = None  # keyed by member name
+    members: dict[str, LLMUpdate] | None = None
     remove_members: list[str] | None = None
     runtime: RuntimeUpdate | None = None
 
@@ -192,8 +192,6 @@ def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
         try:
             cfg.runtime = RuntimeConfig.model_validate(runtime_values)
         except ValidationError as exc:
-            # Pydantic's default string includes rejected input, which can
-            # contain credentials accidentally pasted into an origin URL.
             detail = "; ".join(
                 f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
                 for error in exc.errors(include_input=False, include_context=False, include_url=False)

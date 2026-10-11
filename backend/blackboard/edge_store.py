@@ -148,8 +148,6 @@ def complete_goal_intent(
         (project_id,),
     ).fetchone()
     if existing is not None:
-        # Repair rows produced by older versions that concluded a goal while
-        # leaving a worker lease behind.  This is safe under the project lock.
         conn.execute(
             """
             UPDATE intents
@@ -178,8 +176,6 @@ def complete_goal_intent(
         (worker or creator, now, now, intent.id, project_id),
     ).fetchone()
     if concluded is None:
-        # The project lock should make this unreachable, but fail closed if a
-        # non-conforming caller changed the row inside the transaction.
         raise RuntimeError("completion intent could not be concluded")
     return intent_to_model(conn, concluded, project_id)
 
@@ -259,9 +255,6 @@ def release_intent(
         if worker is None:
             query += " AND lease_owner IS NULL AND lease_token IS NULL"
         else:
-            # Compatibility path for callers written before opaque tokens.
-            # A worker still has to own a live lease; accepting an unclaimed
-            # row here would let any caller release another worker's intent.
             query += " AND lease_owner = %s AND worker = %s " \
                 "AND lease_expires_at IS NOT NULL AND lease_expires_at > now()"
             params += (worker, worker)
@@ -294,9 +287,6 @@ def conclude_intent(
     """
     params: tuple[Any, ...] = (fact_id, worker, now, now, intent_id, project_id)
     if lease_owner is None and lease_token is None:
-        # A legacy conclude call can still be accepted when the worker owns a
-        # live lease.  An unclaimed intent must never be concluded without a
-        # fencing owner, otherwise a stale/untrusted caller can write facts.
         query += " AND lease_owner = %s AND worker = %s " \
             "AND lease_expires_at IS NOT NULL AND lease_expires_at > now()"
         params += (worker, worker)

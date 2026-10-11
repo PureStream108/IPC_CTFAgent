@@ -23,9 +23,6 @@ _MAX_COMMAND_LENGTH = 32_000
 _MAX_OUTPUT_LENGTH = 16_000
 
 
-# These are deliberately provider-neutral. IPC's fallback adapter uses the
-# JSON action protocol shared by all configured LLM adapters, so the same
-# catalogue can be included in the prompt and exposed by the API/UI.
 _TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "question",
@@ -217,8 +214,6 @@ class OpsToolExecutor:
             )
             wait_result = container.wait(timeout=timeout + 15)
             status_code = int(wait_result.get("StatusCode", 1)) if isinstance(wait_result, dict) else 1
-            # Docker SDK 7.x does not accept ``demux`` on Container.logs();
-            # combined output is sufficient for the host maintenance tool.
             output = container.logs(stdout=True, stderr=True)
         except Exception as exc:
             raise OpsToolError(f"host command failed to start: {type(exc).__name__}: {exc}") from exc
@@ -297,9 +292,6 @@ def _host_helper_image(client) -> str:
         client.images.get(preferred)
         return preferred
     except Exception:
-        # The task image is intentionally large and may not have been built on
-        # a fresh server yet.  The application image contains the shell and
-        # core utilities needed by the host-root helper.
         return "ipc-ctfagent:latest"
 
 

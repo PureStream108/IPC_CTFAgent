@@ -30,7 +30,6 @@ def test_cjk_and_ascii_text_are_estimated_at_different_densities():
     ascii_text = "this is an english sentence" * 20
     assert estimate_text_tokens(cjk) > 0
     assert estimate_text_tokens(ascii_text) > 0
-    # Per character, CJK costs materially more tokens than English prose.
     assert (estimate_text_tokens(cjk) / len(cjk)) > (
         estimate_text_tokens(ascii_text) / len(ascii_text)
     )
@@ -60,12 +59,10 @@ def test_tool_calls_and_ids_are_included_in_the_estimate():
 def test_calibration_converges_towards_the_reported_prompt_tokens():
     """Repeated real observations should pull the estimate onto the tokenizer."""
     ratio = 1.0
-    # A provider that consistently charges ~1.5x the heuristic.
     for _ in range(25):
         ratio = calibrate(ratio, 1_000, 1_500)
     assert 1.4 <= ratio <= 1.5
 
-    # And back down again when the provider charges less.
     for _ in range(40):
         ratio = calibrate(ratio, 1_000, 800)
     assert 0.8 <= ratio <= 0.85
@@ -78,7 +75,6 @@ def test_calibration_ignores_missing_or_nonsense_usage():
 
 
 def test_calibration_is_clamped_against_a_single_anomalous_response():
-    # A cache hit or a differently-counting provider must not wreck the budget.
     assert calibrate(1.0, 10, 10_000_000) <= 2.0
     assert calibrate(1.0, 10_000_000, 1) >= 0.5
 
@@ -86,12 +82,9 @@ def test_calibration_is_clamped_against_a_single_anomalous_response():
 def test_compaction_triggers_on_the_budget_ratio_not_at_the_hard_limit():
     messages = [{"role": "user", "content": "x" * 4_000}]
     estimate = estimate_tokens(messages)
-    # Just above the trigger point but below the limit: compact now, because
-    # waiting for the hard limit means the next turn cannot fit its output.
     limit = int(estimate / 0.8)
     assert should_compact(messages, limit=limit, trigger_ratio=0.75) is True
     assert should_compact(messages, limit=estimate * 10, trigger_ratio=0.75) is False
-    # limit=0 means "unknown window": never compact on a guess.
     assert should_compact(messages, limit=0) is False
 
 
@@ -99,7 +92,6 @@ def test_calibration_shifts_the_compaction_decision():
     messages = [{"role": "user", "content": "x" * 4_000}]
     limit = int(estimate_tokens(messages) / 0.6)
     assert should_compact(messages, limit=limit, trigger_ratio=0.75) is False
-    # Once the provider proves it charges more, the same history compacts.
     assert should_compact(
         messages, limit=limit, trigger_ratio=0.75, calibration=1.8
     ) is True
@@ -116,23 +108,18 @@ def test_unknown_model_infers_no_limit_rather_than_guessing_one():
 def test_known_models_infer_a_window_minus_the_output_reserve():
     opus = infer_context_limit({"model": "claude-opus-4-8"})
     assert 150_000 < opus <= 180_000
-    # The reply has to fit too, so a large output budget lowers the prompt
-    # budget rather than being ignored.
     assert infer_context_limit(
         {"model": "claude-opus-4-8"}, max_output_tokens=32_768
     ) == opus - 32_768
 
 
 def test_model_name_is_matched_through_gateway_prefixes_and_longest_marker():
-    # A routing prefix must not defeat the lookup.
     assert infer_context_limit({"model": "anthropic/claude-opus-5"}) == (
         infer_context_limit({"model": "claude-opus-5"})
     )
-    # "claude-opus-5" and "claude-opus-4" must not be conflated.
     assert infer_context_limit({"model": "claude-opus-5"}) > infer_context_limit(
         {"model": "claude-opus-4-8"}
     )
-    # An object with a .model attribute (a provider config) works too.
     class Config:
         model = "gpt-5.5"
 
@@ -153,7 +140,6 @@ def test_structured_summary_is_normalized_and_junk_is_dropped():
         }
     )
     assert summary["verified_facts"][0]["claim"] == "/admin reachable"
-    # A single object is accepted where a list was expected.
     assert summary["failed_paths"] == [{"approach": "sqli", "do_not_retry": True}]
     assert "nonsense" not in summary
     assert set(summary) == set(empty_summary())
@@ -203,7 +189,6 @@ def test_semantic_summarize_uses_the_model_response_when_it_is_usable():
     def request(prompt, dropped):
         seen["prompt"] = prompt
         seen["dropped"] = dropped
-        # Models often wrap JSON in prose; that must still parse.
         return "Here you go:\n```json\n" + json.dumps(expected) + "\n```"
 
     summary, retained = summarize(messages, request=request, keep_recent=4)
@@ -212,7 +197,6 @@ def test_semantic_summarize_uses_the_model_response_when_it_is_usable():
     assert summary["next_hypotheses"] == expected["next_hypotheses"]
     assert "do_not_retry" in seen["prompt"]
     assert len(retained) < len(messages)
-    # The opening task statement is never dropped.
     assert retained[0] == {"role": "user", "content": "start"}
 
 
@@ -232,7 +216,6 @@ def test_semantic_summarize_falls_back_when_the_model_call_fails():
 
     summary, retained = summarize(messages, request=failing, keep_recent=4)
 
-    # A degraded summary, not an exception: compaction is an optimisation.
     assert "member_action" in summary["verified_facts"][0]["claim"]
     assert retained[0] == {"role": "user", "content": "start"}
 
@@ -263,7 +246,6 @@ def test_deterministic_compaction_never_orphans_a_tool_result():
         messages.append(
             {"role": "tool", "tool_call_id": f"call-{index}", "content": "output"}
         )
-    # An odd keep_recent would otherwise cut between a call and its result.
     _summary, retained = deterministic_summary(messages, keep_recent=5)
     tail = retained[1:]
     assert tail
@@ -289,7 +271,6 @@ def test_deterministic_compaction_handles_anthropic_tool_result_blocks():
         )
     _summary, retained = deterministic_summary(messages, keep_recent=3)
     tail = retained[1:]
-    # The first retained message must not be a bare tool result block.
     assert not any(
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in (tail[0].get("content") or [])

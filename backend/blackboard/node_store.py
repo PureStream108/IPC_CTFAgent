@@ -7,10 +7,6 @@ from backend.blackboard.ids import next_fact_id, utcnow
 from backend.blackboard.models import Fact
 
 
-# Agent reports often restate the same source finding with a different lead-in
-# (for example, "Nday candidate" versus "confirmed candidate").  Keeping the
-# full prose is useful for audit, but these stable tokens are enough to prevent
-# a repeated conclusion from inflating the graph and retriggering Diamond.
 _FINDING_RE = re.compile(
     r"(?P<path>[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx|h|hpp|py|js|ts|java))"
     r"(?::|\s+lines?\s+)(?P<line>\d+(?:-\d+)?)"

@@ -24,28 +24,15 @@ _SUMMARY_PREFACE = (
     "the work it describes:\n"
 )
 
-# Characters per token, measured separately because the ratio differs sharply:
-# CJK text is close to one token per character or two, while English prose is
-# closer to four characters per token.
 _CJK_CHARS_PER_TOKEN = 2.2
 _ASCII_CHARS_PER_TOKEN = 3.8
-# Every message carries role/delimiter overhead regardless of its content.
 _PER_MESSAGE_TOKENS = 4
-# Keep calibration inside a sane band: one anomalous response (a cache hit, a
-# provider that counts differently) must not distort the budget for the rest
-# of the session.
 _MIN_CALIBRATION = 0.5
 _MAX_CALIBRATION = 2.0
-# Exponential smoothing weight for a new observation.
 _CALIBRATION_WEIGHT = 0.3
 
 
-# Published context windows, keyed by the distinctive part of a model name.
-# Only families whose window is documented appear here: an entry that is merely
-# plausible is worse than no entry, because a limit guessed low compacts away
-# evidence the window could still have held.
 _CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
-    # Anthropic
     ("claude-opus-5", 1_000_000),
     ("claude-sonnet-5", 1_000_000),
     ("claude-fable-5", 1_000_000),
@@ -53,22 +40,17 @@ _CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("claude-sonnet-4", 200_000),
     ("claude-haiku-4", 200_000),
     ("claude-3", 200_000),
-    # OpenAI
     ("gpt-5", 400_000),
     ("gpt-4.1", 1_000_000),
     ("gpt-4o", 128_000),
     ("o4", 200_000),
     ("o3", 200_000),
-    # DeepSeek
     ("deepseek", 128_000),
-    # Others seen in deployments
     ("kimi-k2", 256_000),
     ("kimi-for-coding", 256_000),
     ("qwen3", 128_000),
     ("glm-4", 128_000),
 )
-# The window has to hold the reply too. Reserving the output budget keeps the
-# trigger from firing only once the prompt alone has filled the window.
 _WINDOW_RESERVE_RATIO = 0.9
 
 
@@ -88,15 +70,11 @@ def infer_context_limit(
     window = 0
     matched = ""
     for marker, published in _CONTEXT_WINDOWS:
-        # Longest match wins, so "claude-opus-5" is not shadowed by a shorter
-        # marker belonging to a different generation.
         if marker in name and len(marker) > len(matched):
             window, matched = published, marker
     if not window:
         return 0
     usable = int(window * _WINDOW_RESERVE_RATIO) - max(0, max_output_tokens)
-    # A deployment may set an output budget large enough to swallow a small
-    # window; fall back to the reserve alone rather than to a negative limit.
     return usable if usable > 0 else int(window * _WINDOW_RESERVE_RATIO)
 
 
@@ -107,7 +85,6 @@ def _model_name(model_snapshot: Any) -> str:
         candidate = str(model_snapshot.get("model") or "")
     else:
         candidate = str(getattr(model_snapshot, "model", "") or "")
-    # Gateways prefix a routing vendor ("anthropic/claude-opus-5").
     return candidate.strip().lower().rsplit("/", 1)[-1]
 
 

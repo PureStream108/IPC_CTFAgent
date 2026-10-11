@@ -84,8 +84,6 @@ class SharedWorkspace:
         write_started = False
         try:
             with self.db.connect() as connection:
-                # Serialize quota calculations across different files in the
-                # same challenge, then take the narrower per-path lock.
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"artifact-quota:{challenge_id}",),

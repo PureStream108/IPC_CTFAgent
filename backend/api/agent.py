@@ -83,8 +83,6 @@ def get_session(
         "session": session,
         "health": _view(health) if health else None,
         "turns": sessions.turns(session_id, limit=20),
-        # Running jobs are why a healthy session can look idle for hours, so
-        # the console shows them next to the quiet timer.
         "jobs": jobs.jobs(session_id, limit=20),
     }
 
@@ -138,8 +136,6 @@ def session_events(
                     )
                 idle_since = time.monotonic()
             elif time.monotonic() - idle_since >= 15:
-                # A quiet session is normal (a long job, a slow turn), so the
-                # keepalive is what keeps the connection from looking dead.
                 yield ": keepalive\n\n"
                 idle_since = time.monotonic()
             time.sleep(0.5)

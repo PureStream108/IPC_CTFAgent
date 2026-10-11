@@ -151,18 +151,15 @@ def test_ops_tool_transcript_is_durable_and_visible_to_the_next_turn(client, mon
         {"name": "task_sandbox_health", "project_id": "proj_openai", "ok": True}
     ]
 
-    # The workflow proposal is a real tool now, not a field parsed out of prose.
     adapter = adapter_class.instances[0]
     assert "propose_platform_workflow" in adapter.tool_names
 
-    # The second turn sees the actual assistant tool call and its tool result.
     second_turn = adapter.seen[1]
     assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in second_turn)
     tool_messages = [m for m in second_turn if m.get("role") == "tool"]
     assert tool_messages
     assert "running" in tool_messages[-1]["content"]
 
-    # And it is durable: the transcript is in agent_events, not just in memory.
     session_id = completed["session_id"]
     agent_session_id = service.store.agent_session_id(session_id)
     assert agent_session_id
@@ -177,7 +174,6 @@ def test_ops_tool_transcript_is_durable_and_visible_to_the_next_turn(client, mon
 
     history = client.get(f"/api/ops/sessions/{session_id}").json()
     assert history["active_run"] is None
-    # One runtime: context always comes from the durable agent transcript.
     assert history["context_mode"] == "agent_session"
     assert history["agent_context_ready"] is True
     assert history["agent_session_id"] == agent_session_id
@@ -247,7 +243,6 @@ def test_ops_workflow_proposal_is_an_explicit_tool_call(client, monkeypatch):
     assert result["reply"] == "drafted a workflow"
     assert len(result["proposals"]) == 1
     assert result["proposals"][0]["name"] == "Proposed"
-    # A draft is never executable until the operator confirms it.
     assert result["proposals"][0]["status"] == "draft"
 
 
@@ -275,7 +270,6 @@ def test_ops_rejects_an_invalid_workflow_proposal_without_failing_the_turn(clien
 
     assert result["proposals"] == []
     assert "was not saved" in result["proposal_error"]
-    # The model is told why, so it can correct course inside the same session.
     adapter = adapter_class.instances[0]
     tool_messages = [m for m in adapter.seen[1] if m.get("role") == "tool"]
     assert "was not saved" in tool_messages[-1]["content"]
@@ -347,8 +341,6 @@ def test_interrupt_chat_requests_cancellation_and_persists_status(client):
     )
     service = client.app.state.ipc.ops_agent_service
     session_id = service.store.create_session("interrupt") ["id"]
-    # Linked project events are mirrored through IPCLogger.  The event's own
-    # ``kind`` field must not collide with the logger's destination argument.
     service.store.link_session_project(session_id, "proj_interrupt")
     service.store.create_run(session_id, "run_0123456789abcdef")
     response = client.post(
@@ -448,20 +440,12 @@ if __name__ == "__main__":
     completed = asyncio.run(run())
     assert completed["ok"] is True
     state = client.app.state.ipc
-    # Finalization commits the verified flag and writeup synchronously. Memory
-    # and archive generation are durable, fenced background jobs, so the MCP
-    # response intentionally does not contain the old synchronous ``archive``
-    # object.  The worker may already have advanced the aggregate status by the
-    # time the response is serialized; all these states are valid observations.
     assert completed["status"] == "solved"
     assert completed["postprocess_status"] in {"pending", "running", "completed"}
     assert completed["wp_path"]
     assert "archive" not in completed
     assert Path(completed["wp_path"]).is_file()
 
-    # Wait for the asynchronous memory/archive workers before asserting their
-    # filesystem contract.  A polling loop keeps this test deterministic on
-    # both a local pool and a slower CI PostgreSQL instance.
     deadline = time.monotonic() + 8
     postprocess = None
     while time.monotonic() < deadline:
@@ -480,8 +464,6 @@ if __name__ == "__main__":
     writeups = client.get("/wp/completed").json()["writeups"]
     assert any(item["project_id"] == completed["project_id"] for item in writeups)
 
-    # Simulate a fresh runtime: durable archives remain visible in
-    # the same Logs/WP pages even when the live graph no longer has the project.
     with state.db.connect() as connection:
         connection.execute("DELETE FROM projects WHERE id = %s", (completed["project_id"],))
     archived_wp = client.get("/wp/completed").json()["writeups"]
@@ -716,7 +698,6 @@ def test_agent_can_propose_a_workflow_without_seeing_secret(client, monkeypatch)
     assert response.json()["proposals"][0]["secrets"] == [
         {"name": "platform_token", "secret_set": True}
     ]
-    # The raw credential never reaches the provider or the response.
     seen = adapter_class.instances[0].seen
     assert "abcdefghijklmnop" not in json.dumps(seen, ensure_ascii=False)
     assert "abcdefghijklmnop" not in response.text
@@ -770,7 +751,6 @@ def test_ops_tools_are_exposed_and_chat_runs_a_tool_loop(client, monkeypatch):
     assert response.status_code == 200
     assert executed == [("host_exec", {"command": "id", "timeout": 10})]
     assert response.json()["tool_calls"] == [{"name": "host_exec", "project_id": None, "ok": True}]
-    # The tool result reaches the model as a real tool message.
     tool_messages = [
         message
         for message in adapter_class.instances[0].seen[1]
@@ -1115,10 +1095,6 @@ def test_gpt_56_auto_uses_responses_structured_output(monkeypatch):
     assert calls[0][0] == "https://api.openai.com/v1/responses"
     body = calls[0][1]["json"]
     assert "input" in body and "messages" not in body
-    # No output cap on a decision: a reasoning model may spend its whole
-    # budget on hidden reasoning before emitting the action JSON, so capping
-    # here truncates the answer rather than the thinking. See the comment on
-    # ``OpenAICompatibleAdapter.decide``.
     assert "max_output_tokens" not in body
     assert body["reasoning"] == {"effort": "high"}
     assert body["text"]["format"]["type"] == "json_schema"
@@ -1166,7 +1142,6 @@ def test_gpt_56_auto_falls_back_to_chat_and_caches_surface(monkeypatch):
 
     assert calls[0][0].endswith("/v1/responses")
     assert calls[1][0].endswith("/v1/chat/completions")
-    # The surface changes on fallback; the absence of an output cap does not.
     assert "max_completion_tokens" not in calls[1][1]
     assert "max_tokens" not in calls[1][1]
     assert calls[1][1]["reasoning_effort"] == "high"
@@ -1299,9 +1274,6 @@ def test_deepseek_decide_uses_json_mode_and_repairs_invalid_output(monkeypatch):
     assert len(requests_seen) == 2
     assert all(body["response_format"] == {"type": "json_object"} for body in requests_seen)
     assert all(body["thinking"] == {"type": "disabled"} for body in requests_seen)
-    # DeepSeek used to get a 4096 cap here. It is gone on purpose: a truncated
-    # action JSON is unparseable, and the repair round costs more than letting
-    # the provider choose the length.
     assert "max_tokens" not in requests_seen[0]
     assert requests_seen[0]["temperature"] == 0.0
 

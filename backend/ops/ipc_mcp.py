@@ -227,8 +227,6 @@ operator request.""",
     def host_exec(command: str, timeout: int = 60) -> dict[str, Any]:
         return tools.host_exec(command, timeout)
 
-    # The runner reaches this server over the compose network as ipc-app:8000.
-    # Retain FastMCP's DNS-rebinding checks while accepting that internal host.
     security = server.settings.transport_security
     if security is None:
         security = TransportSecuritySettings()
@@ -452,9 +450,6 @@ class _Tools:
         rollback_file: Callable[[], None] | None = None
         try:
             with self.state.db.connect() as conn:
-                # Hold the project row lock across the compatibility check,
-                # filesystem write, graph completion, and Flag commit.  A
-                # losing concurrent finalizer fails before touching the WP.
                 assert_flag_compatible(conn, project_id, flag)
                 path, rollback_file = persist_validated_writeup(
                     conn,
@@ -521,10 +516,6 @@ class _Tools:
         return self._run_project_tool(project_id, "task_sandbox_health")
 
     def task_sandbox_exec(self, project_id: str, command: str, timeout: int) -> dict[str, Any]:
-        # ``_run_project_tool`` injects project_id into the executor payload;
-        # pass only the command arguments here.  Passing project_id twice made
-        # the MCP bridge fail with ``too many values to unpack`` before the
-        # sandbox command could run.
         return self._run_project_tool(project_id, "task_sandbox_exec", command, timeout)
 
     def host_exec(self, command: str, timeout: int) -> dict[str, Any]:

@@ -134,7 +134,6 @@ def test_platform_verdict_rejects_wrong_flag_and_resumes(state):
     orch = Orchestrator(state, max_workers=2)
     try:
         orch.on_flag_found(pid)
-        # rejected -> no more pending candidates -> back to running
         assert _wait_status(state, pid, {"running"}) == "running"
         submissions = _submissions(state, pid)
         assert [s["status"] for s in submissions] == ["rejected"]
@@ -143,8 +142,6 @@ def test_platform_verdict_rejects_wrong_flag_and_resumes(state):
             row = graph_store.get_project_row(conn, pid)
         assert row["flag"] is None
 
-        # The rejection is written to experience memory so members do not
-        # resubmit the same string.
         rejected = [
             m for m in state.memory.list()
             if m.project_id == pid and "rejected-flag" in m.tags
@@ -152,7 +149,6 @@ def test_platform_verdict_rejects_wrong_flag_and_resumes(state):
         assert len(rejected) == 1
         assert "'flag{wrong}'" in rejected[0].content
 
-        # A corrected candidate is judged and accepted.
         _raise_candidate(state, pid, "flag{right}")
         orch.on_flag_found(pid)
         assert _wait_status(state, pid, {"solved"}) == "solved"
@@ -178,7 +174,6 @@ def test_platform_verdict_unknown_is_retried_then_parked(state):
     try:
         for attempt in (1, 2, 3):
             orch.on_flag_found(pid)
-            # wait until the async verdict job released the project guard
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 with orch._lock:
@@ -188,10 +183,8 @@ def test_platform_verdict_unknown_is_retried_then_parked(state):
                 time.sleep(0.05)
             assert pid not in orch._completing
             if attempt < 3:
-                # still pending, waiting for the next scheduler tick
                 assert _submissions(state, pid)[0]["status"] == "pending"
                 assert Lifecycle(state.db).status(pid) == "flag_found"
-        # attempts exhausted: parked as error, project resumes solving
         assert _submissions(state, pid)[0]["status"] == "error"
         assert Lifecycle(state.db).status(pid) == "running"
     finally:

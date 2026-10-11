@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from backend.blackboard import graph_store
 
-# allowed transitions (status maps to blackboard project.status)
 TRANSITIONS = {
     "created": {"running", "stopped"},
     "running": {"flag_found", "stopped", "timeout", "infra_error", "failed"},

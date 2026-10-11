@@ -57,8 +57,6 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     app_root = Path(root) if root else Path(os.environ.get("IPC_ROOT", "."))
     frontend_dir = _resolve_frontend_dir(app_root)
     auth_manager = AuthManager(app_root)
-    # The lambda is evaluated only by MCP tool calls, after the FastAPI
-    # lifespan below has attached AppState to ``app.state``.
     ipc_mcp = build_ipc_mcp(lambda: app.state.ipc)
     ipc_mcp_app = ipc_mcp.streamable_http_app()
 
@@ -66,13 +64,12 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         state = AppState(root=app_root)
         app.state.ipc = state
-        # Attach orchestrator if available (module 8).
         try:
             from backend.core.orchestrator import Orchestrator
 
             state.orchestrator = Orchestrator(state)
             state.orchestrator.start()
-        except Exception as exc:  # orchestrator optional during early bring-up
+        except Exception as exc:
             app.state.orchestrator_error = str(exc)
         try:
             from backend.competition.service import CompetitionService
@@ -82,10 +79,6 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         except Exception as exc:
             app.state.competition_error = str(exc)
         try:
-            # Mounted Starlette applications do not automatically receive a
-            # lifespan. FastMCP's streamable HTTP session manager needs one to
-            # create its task group, so enter it explicitly before accepting
-            # runner requests.
             async with ipc_mcp_app.router.lifespan_context(ipc_mcp_app):
                 yield
         finally:
@@ -130,10 +123,6 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     app.include_router(skills_router.router)
     app.include_router(questions_router.router)
 
-    # Claude Code receives IPC capabilities through this internal MCP mount;
-    # AuthenticationMiddleware permits it only with IPC_RUNNER_TOKEN.  Keeping
-    # it out of the normal browser API prevents it from altering Claude's
-    # native system prompt or tool policy.
     app.mount(
         "/internal",
         ipc_mcp_app,

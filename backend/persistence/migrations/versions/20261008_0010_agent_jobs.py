@@ -51,9 +51,6 @@ def upgrade():
         "CREATE INDEX IF NOT EXISTS ix_agent_jobs_running "
         "ON agent_jobs(session_id) WHERE state='running'"
     )
-    # Sourced from the schema contract rather than copied, so the view the
-    # application creates on bootstrap and the one a migrated database gets
-    # cannot drift apart.
     op.execute("DROP VIEW IF EXISTS agent_session_health")
     op.execute(_health_view_statement())
 
@@ -68,9 +65,5 @@ def _health_view_statement() -> str:
 
 
 def downgrade():
-    # Unlike 0009 this is reversible: the table and view are new and nothing
-    # references them, so dropping them restores the previous shape exactly.
-    # Job history is lost, which is acceptable because a job's evidence is also
-    # in the transcript and its output files remain in the workspace volume.
     op.execute("DROP VIEW IF EXISTS agent_session_health")
     op.execute("DROP TABLE IF EXISTS agent_jobs")

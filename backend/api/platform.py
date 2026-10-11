@@ -36,8 +36,6 @@ class ImportRequest(ChallengeRequest):
 
 
 def _build_adapter(mapping: FieldMapping) -> PlatformAdapter:
-    # Keep the legacy client injection seam used by the standalone ret2shell
-    # preview tests; the adapter implementation remains platform-owned.
     if mapping.platform == "ret2shell":
         return Ret2ShellAdapter(
             Ret2ShellClient(base_url=mapping.list_url, game_id=mapping.game_id),
@@ -83,10 +81,6 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
             raise HTTPException(400, f"unknown external_id values: {missing}")
         selected = [by_id[external_id] for external_id in body.select]
 
-    # Phase 1 downloads every attachment while NO database connection is
-    # open.  Holding the write transaction across network downloads starved
-    # the UI polling loop (and itself) with "database is locked" on large
-    # imports.  Phase 2 then only performs fast local writes.
     staging_root = state.root / "staging" / f"import_{int(time.time() * 1000)}"
     staged: dict[str, list[Path]] = {}
     try:
@@ -113,9 +107,6 @@ def import_challenges(body: ImportRequest, state: AppState = Depends(get_state))
     try:
         with state.db.connect() as conn:
             for challenge in selected:
-                # Mirror the ops workflow importer: the challenge statement
-                # (connection commands, flag format) rides in the origin fact
-                # so the Member context's challenge_description picks it up.
                 origin = body.mapping.list_url
                 if challenge.description:
                     origin = f"{origin}\n\n{challenge.description}"

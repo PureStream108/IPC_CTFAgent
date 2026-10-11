@@ -102,7 +102,6 @@ class WsrxTunnelManager:
         self._lock = threading.Lock()
         self._tunnels: dict[int, list[_Tunnel]] = {}
 
-    # ---- default subprocess plumbing ----
 
     def _spawn_process(self, remote: str, local_port: int) -> Any:
         binary = shutil.which(self.binary)
@@ -145,7 +144,6 @@ class WsrxTunnelManager:
         except Exception:
             pass
 
-    # ---- public API ----
 
     def _alive(self, challenge_id: int) -> list[_Tunnel]:
         tunnels = [t for t in self._tunnels.get(challenge_id, []) if t.alive]
@@ -177,8 +175,6 @@ class WsrxTunnelManager:
                 tunnels.append(_Tunnel(remote, local_port, process))
                 started.append(remote)
             self._tunnels[challenge_id] = tunnels
-        # Probe outside the lock, on a snapshot, so a slow platform-side
-        # websocket handshake never blocks other challenges' tool calls.
         deadline = time.monotonic() + self.startup_timeout
         for tunnel in tunnels:
             while time.monotonic() < deadline:
@@ -250,7 +246,6 @@ def build_ret2shell_mcp(
     )
 
     def _direct_endpoints(instance: dict[str, Any]) -> Any:
-        # Direct host:port style exposure (no wsrx needed): pass through.
         exposed = instance.get("exposed_ports")
         if isinstance(exposed, list) and exposed and not wsrx_remotes(instance, client):
             return exposed

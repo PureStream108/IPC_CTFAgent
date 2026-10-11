@@ -44,8 +44,6 @@ class PlatformAdapter(ABC):
 
     @property
     def identity(self) -> str:
-        # Generic HTTP workflows add competition/team scope in the coordinator
-        # because the mapping itself intentionally contains no team identity.
         return ""
 
     @property

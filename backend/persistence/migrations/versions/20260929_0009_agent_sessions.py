@@ -18,14 +18,6 @@ branch_labels = None
 depends_on = None
 
 
-# competition_assignments pins a session to one member through a composite
-# foreign key.  Member handoff - keeping the transcript while a different
-# Member takes the seat - is unrepresentable until it becomes a single-column
-# reference to agent_sessions.
-#
-# The old constraint names are discovered from the catalog rather than spelled
-# out: PostgreSQL truncates generated names to 63 characters, and the
-# composite key on competition_assignments is well past that.
 _REPOINTED_FOREIGN_KEYS = (
     ("competition_assignments", "competition_assignments_session_fk", "session_id"),
     ("competition_submissions", "competition_submissions_session_fk", "session_id"),
@@ -66,15 +58,6 @@ def upgrade():
     for statement in AGENT_SCHEMA:
         op.execute(statement)
 
-    # A historical database can hold several active sessions for one challenge
-    # - one per Member working it.  uq_agent_session_active_task permits
-    # exactly one live root session per task, so the contention has to be
-    # resolved *inside* the backfill: deciding it afterwards is too late,
-    # because the INSERT itself would already have hit the index.
-    #
-    # Which session survives matters.  One still holding an unreleased,
-    # unexpired assignment is a seat a worker may be running right now, so it
-    # outranks a merely newer row.
     op.execute(
         """
         CREATE TEMP TABLE _agent_session_state AS
@@ -106,7 +89,6 @@ def upgrade():
         """
     )
 
-    # 1) Backfill sessions, keeping ids so child foreign keys stay valid.
     op.execute(
         """
         INSERT INTO agent_sessions
@@ -120,9 +102,6 @@ def upgrade():
         """
     )
 
-    # 2) Copy the transcript verbatim.  Legacy compaction events additionally
-    #    become agent_compactions rows so the projection logic has one source,
-    #    but the original events are preserved untouched.
     op.execute(
         """
         INSERT INTO agent_events
@@ -179,10 +158,6 @@ def upgrade():
                       WHERE e.session_id = s.id), 1))
         """
     )
-    # Record each retirement in the retired session's own transcript. An
-    # operator looking at a session that stopped receiving writes needs to see
-    # why; silently flipping state leaves no trail. This runs after the copy
-    # above so the appended sequence cannot collide with a legacy event.
     op.execute(
         """
         INSERT INTO agent_events
@@ -209,8 +184,6 @@ def upgrade():
         """
     )
 
-    # 3) Re-point child foreign keys at agent_sessions.  competition_sessions
-    #    survives read-only for rollback inspection.
     for table, new_constraint, column in _REPOINTED_FOREIGN_KEYS:
         op.execute(_drop_constraints_referencing_competition_sessions(table))
         op.execute(
@@ -221,8 +194,6 @@ def upgrade():
             f"FOREIGN KEY ({column}) REFERENCES agent_sessions(id)"
         )
 
-    # 4) Give every backfilled assignment a writer row so the existing lease
-    #    keeps fencing writes through the new contract.
     op.execute(
         """
         INSERT INTO agent_session_writers
@@ -237,8 +208,6 @@ def upgrade():
         """
     )
 
-    # 5) The Claude Code sidecar is gone: Ops conversations now reference an
-    #    agent session instead of an external provider session id.
     op.execute("ALTER TABLE sessions DROP COLUMN IF EXISTS claude_session_id")
 
 

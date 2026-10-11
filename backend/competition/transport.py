@@ -184,8 +184,6 @@ class PairCoordinator:
         if len(str(self.socket_path).encode()) > 100:
             raise ValueError("Unix socket path is too long")
         self.socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # An advisory owner lock distinguishes a stale crash artifact from a
-        # live coordinator before removing the Unix socket path.
         import fcntl
 
         lock_path = self.socket_path.with_suffix(self.socket_path.suffix + ".lock")
@@ -229,10 +227,6 @@ class PairCoordinator:
             try:
                 result = self.execute(message, cancel)
             except Exception as exc:
-                # A claimed request must never remain ``running`` forever
-                # after a worker exception.  Persist a bounded failure result
-                # so a retry receives the same outcome and does not repeat a
-                # side effect.
                 result = {
                     "status": "failed",
                     "request_id": message.request_id,
@@ -334,8 +328,6 @@ class ReconPublisher:
             self._lock_file.close()
             self._lock_file = None
             raise RuntimeError("recon socket is owned by another process") from exc
-        # flock is released by the OS after a crash; the path itself is not.
-        # Only the process holding the lock is allowed to remove it.
         socket_path.unlink(missing_ok=True)
 
     def _run(self) -> None:
@@ -366,9 +358,6 @@ class ReconPublisher:
                 try:
                     socket.send_multipart([topic, payload], flags=zmq.NOBLOCK)
                 except Exception as exc:
-                    # PostgreSQL replay remains available after a live socket
-                    # failure; stop sending rather than touching the socket
-                    # from another thread.
                     self._error = exc
                     break
         finally:
@@ -377,8 +366,6 @@ class ReconPublisher:
 
     def publish(self, message: Envelope) -> dict:
         stored = self.persist(message)
-        # Persisted sequence is authoritative for reconnect/replay.  A full
-        # live queue is intentionally lossy: subscribers catch up from the DB.
         if not self._closed and self._error is None:
             try:
                 self._queue.put_nowait((message.challenge_id.encode(), encode(stored)))
@@ -533,14 +520,10 @@ class ReconSubscriber:
         except (TypeError, ValueError) as exc:
             raise ValueError("recon payload is not valid JSON") from exc
         if not self.reliable:
-            # Legacy live-only consumers keep their original return shape,
-            # but versioned envelopes are still validated when present.
             if isinstance(value, dict) and "envelope" in value:
                 self._normalize(value)
             return value
         self._queue(value)
-        # Persistence precedes publication.  Re-querying here fills any older
-        # records that were missed while this subscriber was offline.
         self._catch_up()
         if not self._pending:
             return None

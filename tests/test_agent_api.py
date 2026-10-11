@@ -46,14 +46,11 @@ def test_session_list_reports_each_signal_separately(client, sessions):
     rows = response.json()["sessions"]
     assert len(rows) == 1
     row = rows[0]
-    # Four distinct facts rather than one aggregate "healthy" flag.
     assert row["session_id"] == session["id"]
     assert row["worker_live"] is True
     assert row["event_count"] == 1
     assert row["last_event_kind"] == "tool_call"
     assert row["quiet_seconds"] >= 0
-    # And the watchdog's own grading, so the console and the coordinator
-    # cannot disagree about whether this session is stalled.
     assert row["health"] == "ok"
     assert row["health_reason"]
 
@@ -67,7 +64,6 @@ def test_session_list_is_filtered_by_scope(client, sessions):
     ).json()["sessions"]
     assert [row["task_key"] for row in scoped] == ["competition:run:one"]
 
-    # A kind with no sessions is an empty list, not an error.
     assert client.get("/api/agent/sessions?kind=ops").json()["sessions"] == []
 
 
@@ -159,12 +155,9 @@ def test_scope_events_read_across_sessions_in_one_pass(client, sessions):
     )
 
     rows = sessions.events_for_scope_after_event_id(0, kind="competition")
-    # One ordered scan over the global event id, interleaved by time rather
-    # than grouped by session.
     assert [row["event_key"] for row in rows] == ["e1", "e2", "e3"]
     assert {row["session_id"] for row in rows} == {first["id"], second["id"]}
 
-    # The cursor is resumable: reading again from the last id yields nothing.
     assert sessions.events_for_scope_after_event_id(
         rows[-1]["event_id"], kind="competition"
     ) == []

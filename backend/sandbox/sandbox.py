@@ -34,7 +34,6 @@ def _git_bash_executable() -> Path | None:
     git = shutil.which("git")
     if git:
         git_path = Path(git).resolve()
-        # Typical layout: <Git>\\cmd\\git.exe -> <Git>\\bin\\bash.exe.
         if len(git_path.parents) >= 2:
             candidates.append(git_path.parents[1] / "bin" / "bash.exe")
 
@@ -175,12 +174,6 @@ class LocalSandbox:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    # ---- detached jobs ----
-    #
-    # The Docker backend is the real one; this mirrors its contract so dev-mode
-    # runs and tests exercise the same job lifecycle. The handle is again files
-    # on disk plus a PID, not a Popen object, so a poll works from a different
-    # process after a restart.
 
     def exec_detached(self, job_id: str, command: str) -> int:
         directory = self._job_dir(job_id)
@@ -231,8 +224,6 @@ class LocalSandbox:
             code = proc.poll()
             if code is not None:
                 exit_code = int(code)
-                # Persist it so a later poll - possibly from another process -
-                # reads the same answer instead of reporting the job lost.
                 status_file.write_text(str(exit_code), encoding="utf-8")
         elif status_file.is_file():
             text = status_file.read_text(encoding="utf-8").strip()
@@ -242,13 +233,7 @@ class LocalSandbox:
         elif proc is not None or (pid is not None and self._pid_alive(pid)):
             state = "running"
         else:
-            # Unknown is not success: see TaskSandbox.job_state.
             state = "lost"
-        # Note: the pid-recycling guard TaskSandbox needs does not apply here.
-        # This sandbox is development-only and single-process, so the live
-        # ``Popen`` handle is the identity; the pid path is only a fallback for
-        # a poll after a restart, which also loses the handle and so resolves
-        # to 'lost' rather than to another process.
         return {
             "state": state,
             "exit_code": exit_code,

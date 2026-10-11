@@ -333,8 +333,6 @@ class ToolCatalog:
         return "\n".join(lines)
 
     def html_document(self, entry_id: str) -> str:
-        # Catalog documents are trusted package data. Keep a dependency-free
-        # renderer for the small supported Markdown subset used by the UI.
         source = self.document(entry_id)
         blocks = []
         in_code = False

@@ -43,7 +43,6 @@ def test_local_sandbox_path_escape_blocked(tmp_path):
 def test_local_sandbox_timeout(tmp_path):
     sb = LocalSandbox("m1", tmp_path / "ws")
     sb.start()
-    # python sleep is portable across win/linux
     res = sb.exec(f'"{sys.executable}" -c "import time; time.sleep(5)"', timeout=1)
     assert res.timed_out
     assert res.exit_code == 124
@@ -67,7 +66,7 @@ def test_local_sandbox_timeout_kills_grandchildren_holding_pipes(tmp_path):
 
 def test_local_sandbox_exposes_webui_via_proxy(tmp_path):
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
+        def do_GET(self):
             body = f"origin {self.path}".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -140,7 +139,6 @@ def test_container_pool_shares_workspace_within_project(tmp_path):
     sb1.write_file("a.txt", "from aventurine")
     assert sb2.read_file("a.txt") == "from aventurine"
     assert pool.get("proj_002", "agate").read_file("a.txt") is None
-    # same member returns same sandbox
     assert pool.get("proj_001", "aventurine") is sb1
 
 

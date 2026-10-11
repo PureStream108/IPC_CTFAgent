@@ -12,9 +12,7 @@ import yaml
 
 REGISTRY_DIR = Path(__file__).resolve().parent / "registry"
 
-# Public tools/MCPs every project may use regardless of category.
 PUBLIC_MCPS = ("browser", "reverse")
-# Languages/runtimes always available in the member sandbox.
 LANGUAGES = (
     "bash",
     "python",
@@ -57,8 +55,6 @@ class ToolRegistry:
         in_memory: bool = False,
     ):
         self.registry_dir = registry_dir or REGISTRY_DIR
-        # cache_db/in_memory are accepted for source compatibility only. Search
-        # results are a bounded, rebuildable process-local cache.
         del cache_db, in_memory
         self.cache_max_entries = max(1, int(os.environ.get("IPC_TOOL_CACHE_MAX", "512")))
         self.cache_ttl_seconds = max(1, int(os.environ.get("IPC_TOOL_CACHE_TTL", "900")))
@@ -89,7 +85,6 @@ class ToolRegistry:
         self._loaded = True
         return self
 
-    # ---- category-based exposure ----
 
     def all_tools(self) -> list[Tool]:
         return list(self._tools)
@@ -130,7 +125,6 @@ class ToolRegistry:
     def categories(self) -> list[str]:
         return sorted({t.category for t in self._tools})
 
-    # ---- tool_search (cached) ----
 
     def _score(self, tool: Tool, terms: list[str]) -> float:
         name = tool.name.lower()

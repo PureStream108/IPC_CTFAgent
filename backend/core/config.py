@@ -10,18 +10,13 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# CTF challenge categories the user may pick when creating a project.
 CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
 
-# Supported LLM wire formats. base_url is always user-provided.
-# ``anthropic`` is the raw Messages API. There is no separate sidecar runtime:
-# every agent runs through the unified loop in backend/agent/runtime.py.
 ApiFormat = Literal["openai", "anthropic", "deepseek", "pi", "mock"]
 ApiSurface = Literal["auto", "chat_completions", "responses"]
 ReasoningEffort = Literal["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 SelectedReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
-# Default member names. These are worker identities, not different roles.
 MEMBER_NAMES: tuple[str, ...] = (
     "amber", "agate", "topaz", "sugilite", "aventurine",
     "pearl", "sapphire", "jade", "obsidian", "opal",
@@ -40,12 +35,7 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     base_url: str = ""
     model: str = ""
-    # OpenAI-compatible providers vary in which generation endpoint they
-    # implement.  ``auto`` negotiates and caches a working endpoint, while the
-    # explicit values are useful for strict gateways and future model families.
     api_surface: ApiSurface = "auto"
-    # Kept provider-neutral in configuration.  Adapters translate this to
-    # ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat).
     reasoning_effort: ReasoningEffort = "high"
 
     @property
@@ -75,8 +65,6 @@ class LimitsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     total_cpu: int = 4
-    # Max CTF tasks running concurrently. Each task owns one shared container;
-    # containers are not memory-capped, so there is no per-agent memory limit.
     max_concurrent_tasks: int = Field(default=10, gt=0, le=10)
     network: bool = True
 
@@ -84,29 +72,19 @@ class LimitsConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Difficulty self-evaluation cadence for Members.
     eval_interval_steps: int = Field(default=20, gt=0)
-    # Scheduler tick + heartbeat cadence (seconds).
     interval: int = Field(default=2, gt=0)
     intent_timeout: int = Field(default=30, ge=5)
     reason_timeout: int = Field(default=30, ge=5)
-    # Max extra Members Diamond may add per difficulty report.
     max_members_per_report: int = Field(default=3, gt=0)
     sandbox_backend: Literal["local", "docker"] = "docker"
     sandbox_backend_forced: bool = False
     max_member_steps: int = Field(default=60, gt=0)
     max_member_actions_per_task: int = Field(default=20, gt=0)
-    # Agent runtime budgets. A long investigation is normal work, so none of
-    # these impose a hard step ceiling: convergence comes from the provider
-    # finishing, repeated-batch detection, cancellation and the watchdog.
-    # ``max_turns = 0`` means no ceiling.
     max_output_tokens: int = Field(default=32768, gt=0)
-    # 0 infers the window from the model instead of guessing a fixed number.
     context_token_limit: int = Field(default=0, ge=0)
     compaction_trigger_ratio: float = Field(default=0.75, gt=0.0, le=0.95)
     max_turns: int = Field(default=0, ge=0)
-    # Chunk-gap timeout for streamed turns. Long reasoning can precede the
-    # first token, so this is deliberately generous.
     provider_read_timeout: int = Field(default=300, ge=30)
     browser_event_limit: int = Field(default=200, gt=0, le=1000)
     browser_console_limit: int = Field(default=100, gt=0, le=1000)
@@ -167,7 +145,6 @@ class AppConfig(BaseModel):
     @model_validator(mode="after")
     def _check_unique(self) -> AppConfig:
         if self.member is None:
-            # Compare complete legacy endpoints, never silently pick a key.
             blank = LLMConfig().model_dump()
             candidates = [m.model_dump(exclude={"name"}) for m in self.members
                           if m.model_dump(exclude={"name"}) != blank]
@@ -180,7 +157,6 @@ class AppConfig(BaseModel):
             self.members = [MemberConfig(name=name, **self.member.model_dump()) for name in MEMBER_NAMES]
         return self
 
-    # --- startup validation (Seed.md launch rules) ---
     def startup_errors(self) -> list[str]:
         """Return human-readable reasons the system cannot start (empty if OK)."""
         errors: list[str] = []
@@ -230,8 +206,6 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
         cfg.member.model = defaults.get(cfg.member.api_format, "")
 
 
-# Limit keys removed in the task-slot model. Silently dropped from old configs
-# so an existing config.yaml/limits.yaml does not fail extra="forbid" validation.
 _LEGACY_LIMIT_KEYS = ("total_memory_gb", "total_disk_gb", "per_agent_memory_gb")
 
 LOCAL_SANDBOX_ENV = "IPC_ALLOW_LOCAL_SANDBOX"
@@ -283,7 +257,6 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     _apply_models_defaults(cfg, models)
     _enforce_container_sandbox(cfg)
 
-    # Allow env override of the log switch (handy for docker / tests).
     env_log = os.environ.get("IPC_LOG_ENABLED")
     if env_log is not None:
         cfg.log_enabled = env_log.strip().lower() in ("1", "true", "yes", "on")
@@ -302,13 +275,9 @@ def save_config(cfg: AppConfig, config_dir: Path | None = None) -> None:
         "runtime": cfg.runtime.model_dump(exclude={"sandbox_backend_forced"}),
         "limits": cfg.limits.model_dump(),
     }
-    # Serialize before touching disk, then publish a complete file on the same
-    # filesystem. A failed write must preserve the previous configuration.
     content = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
     temporary: Path | None = None
     try:
-        # NamedTemporaryFile uses owner-only permissions on POSIX: credentials
-        # must not become world-readable while staging or after replacement.
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=base,
             prefix=".config-", suffix=".tmp", delete=False,

@@ -99,7 +99,7 @@ def test_llm_surface_and_reasoning_settings_are_validated():
 
 def test_diamond_without_creds_blocks_startup():
     cfg = AppConfig(
-        diamond=LLMConfig(api_format="openai"),  # no creds
+        diamond=LLMConfig(api_format="openai"),
         members=[MemberConfig(name="aventurine", api_format="mock")],
     )
     errors = cfg.startup_errors()
@@ -109,7 +109,7 @@ def test_diamond_without_creds_blocks_startup():
 def test_requires_at_least_one_member_with_creds():
     cfg = AppConfig(
         diamond=LLMConfig(api_format="mock"),
-        members=[MemberConfig(name="a", api_format="openai")],  # no creds
+        members=[MemberConfig(name="a", api_format="openai")],
     )
     errors = cfg.startup_errors()
     assert any("Member" in e for e in errors)
@@ -120,7 +120,7 @@ def test_available_members_filters_unconfigured():
         diamond=LLMConfig(api_format="mock"),
         members=[
             MemberConfig(name="a", api_format="openai", api_key="k", base_url="u"),
-            MemberConfig(name="b", api_format="openai"),  # not configured
+            MemberConfig(name="b", api_format="openai"),
         ],
     )
     avail = cfg.available_members()
@@ -195,9 +195,6 @@ def test_saved_config_credentials_are_owner_only(tmp_path):
 
 
 def test_models_yaml_fills_empty_model(tmp_path: Path):
-    # An empty `model` field must be filled from models.yaml defaults, keyed by
-    # api_format. Build an isolated config so this never depends on the repo
-    # config.yaml (which may carry real credentials + explicit models).
     src = Path(__file__).resolve().parent.parent / "backend" / "config"
     (tmp_path / "models.yaml").write_text((src / "models.yaml").read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "config.yaml").write_text(
@@ -216,7 +213,6 @@ def test_models_yaml_fills_empty_model(tmp_path: Path):
         encoding="utf-8",
     )
     cfg = load_config(tmp_path)
-    # empty diamond model -> mock default; empty member model -> openai default
     assert cfg.diamond.model == "mock-model"
     model_defaults = yaml.safe_load((tmp_path / "models.yaml").read_text(encoding="utf-8"))[
         "defaults"

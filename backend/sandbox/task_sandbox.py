@@ -18,13 +18,9 @@ from backend.sandbox.errors import (
 from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
-# Layout inside the per-task container.
 WORKSPACE = "/workspace"
 ATTACHMENTS_DIR = f"{WORKSPACE}/attachments"
 SHARED_DIR = f"{WORKSPACE}/shared"
-# Detached job state. Deliberately inside the workspace volume: a docker exec
-# id dies with a container restart, while these files survive it, so a job's
-# fate stays knowable.
 JOBS_DIR = f"{WORKSPACE}/.ipc/jobs"
 
 
@@ -39,10 +35,6 @@ def job_dir(job_id: str) -> str:
     return f"{JOBS_DIR}/{_safe_segment(job_id)}"
 
 
-# The detached-job shell text lives in module functions rather than inline in
-# the methods so it can be tested against a real bash without Docker. Quoting
-# is the whole risk here: the command is model-supplied and is nested two
-# levels deep (bash -c 'bash -lc "<command>"').
 
 
 def job_launch_script(directory: str, command: str, workdir: str) -> str:
@@ -78,10 +70,6 @@ def job_launch_script(directory: str, command: str, workdir: str) -> str:
         f"nohup bash -c {shlex.quote(supervisor)} >/dev/null 2>&1 < /dev/null &",
         "child=$!",
         f"printf '%s' \"$child\" > {quoted}/pid",
-        # The process start time, recorded so a recycled pid cannot be
-        # mistaken for this job. A container restart resets pids to low
-        # numbers, so a stale pid file very plausibly matches some unrelated
-        # process - and a dead job would then read as 'running' forever.
         f"(sed 's/.*) //' /proc/$child/stat 2>/dev/null | awk '{{print $20}}' "
         f"|| true) > {quoted}/starttime",
         f"cat {quoted}/pid",
@@ -103,8 +91,6 @@ def job_probe_script(directory: str) -> str:
         f"want=$(cat {quoted}/starttime 2>/dev/null || true); "
         f"alive=no; "
         f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then alive=yes; fi; '
-        # Only downgrade when both start times are actually known: an
-        # unreadable /proc must not turn a live job into a lost one.
         f"have=$(sed 's/.*) //' /proc/$pid/stat 2>/dev/null | awk '{{print $20}}' || true); "
         f'if [ "$alive" = yes ] && [ -n "$want" ] && [ -n "$have" ] '
         f'&& [ "$want" != "$have" ]; then alive=no; fi; '
@@ -189,14 +175,11 @@ class TaskSandbox:
         self._sdk = None
         self._preflight_complete = False
         self._container_name = task_container_name(project_id)
-        # Named Linux volumes also work when the backend uses the host Docker
-        # socket: no incorrect backend-to-host bind path translation is needed.
         self._volume_name = f"{self._container_name}-workspace"
         self._shared_network: str | None = None
         self._lock = threading.RLock()
         self._member_dirs: set[str] = set()
 
-    # ---- docker plumbing ----
 
     def _docker(self):
         if self._client is None:
@@ -247,7 +230,6 @@ class TaskSandbox:
                 return name
         return next(iter(networks), None)
 
-    # ---- lifecycle ----
 
     def start(self) -> None:
         with self._lock:
@@ -377,7 +359,6 @@ class TaskSandbox:
                 self._container = None
             self._member_dirs.clear()
 
-    # ---- member views ----
 
     def member_view(self, member: str) -> MemberSandbox:
         workdir = member_workdir(member)
@@ -389,7 +370,6 @@ class TaskSandbox:
                 self._member_dirs.add(workdir)
         return MemberSandbox(self, member, workdir)
 
-    # ---- exec / IO (member-scoped via workdir) ----
 
     def exec(self, command: str, workdir: str, timeout: int = 60) -> ExecResult:
         if self._container is None:
@@ -408,7 +388,6 @@ class TaskSandbox:
         timed_out = res.exit_code in (124, 137)
         return ExecResult(res.exit_code if res.exit_code is not None else -1, stdout, stderr, timed_out)
 
-    # ---- detached jobs ----
 
     def exec_detached(self, job_id: str, command: str, workdir: str) -> int:
         """Start ``command`` with no timeout and return its process-group PID.
@@ -493,7 +472,6 @@ class TaskSandbox:
             return None
         return res.stdout
 
-    # ---- webui proxy target ----
 
     def proxy_target_host(self) -> str:
         if self._container is None:
@@ -527,7 +505,6 @@ class MemberSandbox:
     def exec(self, command: str, timeout: int = 60) -> ExecResult:
         return self._task.exec(command, workdir=self.workdir, timeout=timeout)
 
-    # ---- detached jobs (see TaskSandbox for the durability reasoning) ----
 
     def exec_detached(self, job_id: str, command: str) -> int:
         return self._task.exec_detached(job_id, command, workdir=self.workdir)
@@ -551,7 +528,6 @@ class MemberSandbox:
         return self._task.read_file(self.workdir, rel_path)
 
     def stop(self) -> None:
-        # Member views do not own the container; stopping is a task-level action.
         return None
 
     def visible_attachment_path(self, filename: str, original_path: str | None = None) -> str:

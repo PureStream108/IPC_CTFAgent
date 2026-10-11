@@ -29,7 +29,6 @@ def json_value(payload: Any, path: str) -> Any:
 
 
 def matches(value: Any, values: list[Any]) -> bool:
-    # Python treats True == 1; that must not confuse platform verdict codes.
     return any(type(value) is type(expected) and value == expected for expected in values)
 
 

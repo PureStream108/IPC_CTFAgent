@@ -70,10 +70,7 @@ def wait_for(predicate, timeout=25.0):
 
 
 def test_job_dir_is_inside_the_workspace_volume_and_sanitized():
-    # Inside the volume, because that is what survives a container restart
-    # while a docker exec id does not.
     assert job_dir("abc123").startswith(JOBS_DIR)
-    # A job id never reaches the shell unsanitized.
     assert "/" not in job_dir("../../etc/passwd").removeprefix(JOBS_DIR + "/")
     assert ";" not in job_dir("a;rm -rf /")
 
@@ -85,7 +82,6 @@ def test_launch_records_pid_and_real_exit_status(tmp_path):
     pid = int(result.stdout.strip().splitlines()[-1])
     assert pid > 0
 
-    # While running: alive, with no status recorded yet.
     early = probe(directory, tmp_path)
     assert early["state"] in {"running", "exited"}
 
@@ -95,15 +91,12 @@ def test_launch_records_pid_and_real_exit_status(tmp_path):
         )
     )
     assert final is not None, "job never recorded a status"
-    # The real exit code, not a boolean: 5 has to survive the two wrappers.
     assert final["exit_code"] == 5
     assert (directory / "stdout").read_text().split() == ["one", "two"]
 
 
 def test_launch_survives_a_command_full_of_shell_metacharacters(tmp_path):
     directory = tmp_path / "job"
-    # Single quotes, double quotes, $, backticks and ; all at once. If the
-    # quoting is wrong this either fails to run or executes the injection.
     command = """printf '%s\\n' "it's \\$HOME; \\`echo hi\\` | done" """
     result = launch(directory, command, tmp_path)
     assert result.returncode == 0, result.stderr
@@ -112,14 +105,12 @@ def test_launch_survives_a_command_full_of_shell_metacharacters(tmp_path):
         lambda: probe(directory, tmp_path)["state"] == "exited"
     ), "job never exited"
     written = (directory / "stdout").read_text()
-    # $HOME and the backticks were not expanded by the wrapper layers.
     assert "it's $HOME; `echo hi` | done" in written
 
 
 def test_launch_does_not_let_a_command_escape_into_the_wrapper(tmp_path):
     directory = tmp_path / "job"
     marker = tmp_path / "escaped"
-    # A command that tries to close the quoting and run its own shell line.
     command = f"echo safe' ; touch {posix(marker)} ; echo '"
     launch(directory, command, tmp_path)
     wait_for(lambda: probe(directory, tmp_path)["state"] == "exited")
@@ -129,8 +120,6 @@ def test_launch_does_not_let_a_command_escape_into_the_wrapper(tmp_path):
 def test_a_vanished_process_without_a_status_file_reads_as_lost(tmp_path):
     directory = tmp_path / "job"
     directory.mkdir()
-    # A pid that is certainly not running, and no status file: exactly the
-    # shape left behind by a container restart.
     (directory / "pid").write_text("2147483646")
     state = probe(directory, tmp_path)
     assert state["state"] == "lost"
@@ -139,8 +128,6 @@ def test_a_vanished_process_without_a_status_file_reads_as_lost(tmp_path):
 
 def test_cancel_kills_the_whole_process_group(tmp_path):
     directory = tmp_path / "job"
-    # The job spawns a child that outlives its parent's own exit. Killing only
-    # the leader would leave this grandchild running and holding stdout open.
     child_marker = tmp_path / "child-alive"
     command = (
         f"( while true; do touch {posix(child_marker)}; sleep 1; done ) & "
@@ -152,7 +139,6 @@ def test_cancel_kills_the_whole_process_group(tmp_path):
     assert run(job_cancel_script(posix(directory)), tmp_path).returncode == 0
     child_marker.unlink()
     time.sleep(3)
-    # Nothing recreated the marker, so no descendant survived the cancel.
     assert not child_marker.exists(), "a descendant survived job_cancel"
 
 
@@ -169,8 +155,6 @@ def test_probe_parsing_distinguishes_the_three_states():
     }
     assert parse_job_probe("pid=12 status= alive=yes stdout=5 stderr=1")["state"] == "running"
     assert parse_job_probe("pid=12 status= alive=no stdout=0 stderr=0")["state"] == "lost"
-    # A signalled process reports a negative status; it is still an exit, and
-    # the code must not be dropped to None.
     signalled = parse_job_probe("pid=12 status=-9 alive=no stdout=0 stderr=0")
     assert signalled["state"] == "exited"
     assert signalled["exit_code"] == -9
@@ -189,8 +173,6 @@ def test_a_recycled_pid_is_not_mistaken_for_the_original_job(tmp_path):
     assert live["state"] == "running"
     assert (directory / "starttime").read_text().strip(), "no start time recorded"
 
-    # Same pid, but recorded as having started at a different time: this is
-    # what a recycled pid looks like.
     (directory / "starttime").write_text("1\n")
     assert probe(directory, tmp_path)["state"] == "lost"
 

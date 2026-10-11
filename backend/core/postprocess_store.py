@@ -197,8 +197,6 @@ def complete_existing_job(
             (project_id, kind, lease_token),
         ).rowcount == 1
 
-    # Completion is idempotent for a job already finalized by either path.  We
-    # still refresh the aggregate status so callers see a consistent project.
     existing = connection.execute(
         "SELECT status FROM postprocess_jobs WHERE project_id = %s AND kind = %s",
         (project_id, kind),

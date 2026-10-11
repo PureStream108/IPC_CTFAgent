@@ -102,7 +102,6 @@ def derive_project_logs(state: AppState = Depends(get_state)):
         folders[kind].mkdir(parents=True, exist_ok=True)
 
     with state.export_lock:
-        # One task uses one suffix across all four log groups.
         used = {
             path.name
             for folder in folders.values()

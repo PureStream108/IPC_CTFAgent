@@ -27,10 +27,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# Thresholds are in seconds of total quiet, measured by the health view from
-# the most recent sign of progress of any kind (event, turn start, job poll,
-# lease renewal). They are generous on purpose: a provider read timeout alone
-# is 300s, so anything tighter would mistake a slow turn for a dead worker.
 DIAGNOSE_AFTER = 300
 CANCEL_AFTER = 900
 HANDOFF_AFTER = 1800
@@ -78,8 +74,6 @@ def classify(
             f"quiet for {quiet}s but {running_jobs} job(s) still running; "
             "long work is expected to look idle",
         )
-    # A worker whose own lease has lapsed is gone, not slow: it stopped
-    # renewing, which it does per turn and per tool call.
     worker_live = health.get("worker_live")
     if worker_live is False and quiet >= cancel_after:
         return Verdict(

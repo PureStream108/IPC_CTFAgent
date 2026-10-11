@@ -151,8 +151,6 @@ def test_mcp_tool_keeps_its_own_args_object():
 
 
 def test_side_effecting_tools_are_never_parallel_safe():
-    # bash is model-supplied: there is no way to know whether a given command
-    # writes a file or spends the only rate-limited request.
     for name in ("bash", "install", "mcp_tool", "job_start", "job_cancel"):
         assert is_parallel_safe(name) is False, name
     for name in ("memory_search", "tool_search", "job_status", "job_logs"):
@@ -223,8 +221,6 @@ def test_a_terminal_action_stops_the_rest_of_its_batch():
     runner = runtime(turns, executor)
     asyncio.run(runner.run_async("start"))
     assert executor.started == ["submit_flag"]
-    # The abandoned call left no result event, which is exactly what the
-    # dangling-call repair path is there to resolve on the next turn.
     keys = [item["event_key"] for item in runner.writer.items]
     assert "tool-call:b" not in keys
     assert "tool-result:b" not in keys
@@ -266,8 +262,6 @@ def test_concurrent_results_stay_paired_and_in_provider_order():
     that log, so the rebuilt array no longer lined up with its results.
     """
     executor = RecordingExecutor(
-        # The second call finishes first, so ordering by completion would
-        # produce a transcript the provider cannot match up.
         delays={"memory_search": 0.08, "tool_search": 0.0}
     )
     turns = [
@@ -284,9 +278,7 @@ def test_concurrent_results_stay_paired_and_in_provider_order():
     runner = runtime(turns, executor)
     asyncio.run(runner.run_async("start"))
 
-    # Execution really did complete out of order...
     assert executor.finished == ["tool_search", "memory_search"]
-    # ...but the durable transcript follows the provider's array.
     calls = [
         item["payload"]["id"] for item in runner.writer.items
         if item["kind"] == "tool_call"
@@ -297,7 +289,6 @@ def test_concurrent_results_stay_paired_and_in_provider_order():
     ]
     assert calls == ["slow", "fast"]
     assert results == ["slow", "fast"]
-    # Every call has exactly one result.
     assert len(results) == len(set(results))
 
 
@@ -344,7 +335,6 @@ def test_parallel_fan_out_is_capped():
 
     assert runner._tool_groups(reads) == [reads[0:3], reads[3:6], reads[6:9]]
     assert executor.peak_concurrency == 3
-    # Every call still ran exactly once, and the transcript keeps the order.
     assert len(executor.finished) == 9
     results = [
         item["payload"]["id"] for item in runner.writer.items
@@ -398,6 +388,4 @@ def test_one_failing_tool_does_not_discard_its_siblings_results():
         if item["kind"] == "tool_result"
     ]
     assert calls == ["ok", "bad"]
-    # The successful sibling's result survived; only the failed call dangles,
-    # which is exactly what the repair path is designed to resolve.
     assert results == ["ok"]

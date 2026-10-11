@@ -76,14 +76,11 @@ def test_engine_lease_fences_legacy_and_competition_schedulers(store):
         )
     legacy = store.claim_engine_lease(project_id, "legacy", "legacy-a", seconds=30)
     assert legacy["engine_epoch"] == competition["engine_epoch"] + 1
-    # A stale competition owner cannot clear the new legacy lease.
     assert not store.release_engine_lease(
         project_id, "competition", "coordinator-a", epoch=competition["engine_epoch"]
     )
     assert store.engine_lease(project_id)["engine_kind"] == "legacy"
 
-    # Reclaiming an expired lease with the same owner still fences the old
-    # worker.  Owner identity alone is not a sufficient fencing token.
     with store.db.connect() as connection:
         connection.execute(
             "UPDATE projects SET engine_lease_expires_at=now()-interval '1 second' WHERE id=%s",
@@ -170,8 +167,6 @@ def test_replay_and_assignment_leases_remain_bounded_across_repeated_cycles(stor
     assert store.advance_message_cursor(receiver["session_id"], last_sequence) == last_sequence
     assert store.observe_run(run["id"], "pressure-worker")["payload"]["replay_backlog"] == 0
 
-    # Expiry/reclaim bumps the fence instead of accumulating a second active
-    # assignment for the same Member/session.
     with store.db.connect() as connection:
         connection.execute(
             "UPDATE competition_assignments SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
@@ -229,7 +224,6 @@ def test_restart_recovers_expired_assignment_without_resetting_deadline(store):
     assert recovered[0]["session_id"] == original["session_id"]
     assert recovered[0]["lease_owner"] == "new-coordinator"
     assert recovered[0]["epoch"] == original["epoch"] + 1
-    # The ordinary expiry pass must see the newly fenced lease as live.
     assert store.release_expired_assignments(run["id"]) == []
     active = store.assignments(run["id"], active_only=True)
     assert active[0]["id"] == original["id"]
@@ -281,14 +275,10 @@ def test_assign_projects_the_seat_onto_the_agent_session_writer(store):
     writer = store.agent_session_writer(assignment["session_id"])
     assert writer is not None
     assert writer["worker_kind"] == "competition-assignment"
-    # Owner and epoch mirror the assignment: the two fences must never name
-    # different holders, or the Member would be unable to write.
     assert writer["owner"] == assignment["lease_owner"]
     assert writer["epoch"] == assignment["epoch"]
     assert writer_is_live(store, assignment["session_id"]) is True
 
-    # Releasing the seat retires the liveness row rather than leaving a
-    # future expiry that would report a worker which has already gone.
     assert store.release(assignment["id"], "worker-1", assignment["epoch"])
     assert writer_is_live(store, assignment["session_id"]) is False
 
@@ -310,8 +300,6 @@ def test_assignment_writer_follows_recovery_and_refuses_stale_renewal(store):
     writer = store.agent_session_writer(original["session_id"])
     assert writer["owner"] == "new-coordinator"
     assert writer["epoch"] == recovered["epoch"]
-    # The displaced worker holds the old epoch; letting it renew would keep a
-    # seat warm that another worker now owns.
     assert store.renew_assignment_writer(original) is False
     assert store.renew_assignment_writer(recovered) is True
 
@@ -332,7 +320,6 @@ def test_competition_turns_record_usage_for_calibration(store):
     assert finished["finished_at"] is not None
     assert finished["owner"] == assignment["lease_owner"]
 
-    # A later turn with no usage report must not erase what was recorded.
     assert store.record_turn(assignment, 1, "completed")["prompt_tokens"] == 1200
 
     store.save_token_budget(assignment["session_id"], {"calibration_ratio": 1.25})
@@ -354,19 +341,15 @@ def test_heartbeat_refuses_to_prop_up_a_seat_whose_worker_went_silent(store):
     alive = store.assign(run["id"], working["id"], "amber", "coordinator")
     stalled = store.assign(run["id"], silent["id"], "agate", "coordinator")
 
-    # Both seats renew while both workers are turning.
     assert store.heartbeat_run_assignments(run["id"], "coordinator") == 2
     assert store.stalled_run_assignments(run["id"]) == []
 
-    # One worker stops proving it is alive.
     with store.db.connect() as connection:
         connection.execute(
             """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
                WHERE session_id=%s""",
             (stalled["session_id"],),
         )
-        # Wind both seats back so the next renewal is observable as movement
-        # rather than being masked by the one above.
         connection.execute(
             """UPDATE competition_assignments SET lease_expires_at=now()+interval '5 seconds'
                WHERE run_id=%s""",
@@ -377,7 +360,6 @@ def test_heartbeat_refuses_to_prop_up_a_seat_whose_worker_went_silent(store):
     reported = store.stalled_run_assignments(run["id"])
     assert [row["id"] for row in reported] == [stalled["id"]]
 
-    # The live worker's seat was renewed; the silent one's was left to expire.
     with store.db.connect() as connection:
         extended = {
             row["id"]: row["extended"]
@@ -390,7 +372,6 @@ def test_heartbeat_refuses_to_prop_up_a_seat_whose_worker_went_silent(store):
     assert extended[alive["id"]] is True
     assert extended[stalled["id"]] is False
 
-    # Renewing again revives the seat: a stall is recoverable, not terminal.
     assert store.renew_assignment_writer(stalled) is True
     assert store.heartbeat_run_assignments(run["id"], "coordinator") == 2
 
@@ -575,7 +556,7 @@ def test_recon_persists_concurrently_without_a_global_lock(store):
                 store._lock(connection, run["id"])
                 holding.set()
                 release.wait(10)
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except BaseException as exc:
             failure.append(exc)
             holding.set()
 
@@ -584,7 +565,6 @@ def test_recon_persists_concurrently_without_a_global_lock(store):
     try:
         assert holding.wait(10)
         assert not failure
-        # Would block until `release` if recon still took the shared lock.
         record = store.persist_recon_message(message("free-recon"))
         assert record["status"] == "done"
     finally:
@@ -625,7 +605,7 @@ def test_concurrent_recon_of_one_request_id_stays_idempotent(store):
             record = store.persist_recon_message(envelope)
             with lock:
                 results.append(record)
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except BaseException as exc:
             with lock:
                 failures.append(exc)
 
@@ -637,7 +617,6 @@ def test_concurrent_recon_of_one_request_id_stays_idempotent(store):
 
     assert not failures
     assert len(results) == 4
-    # One row, one sequence: every racing writer observed the same record.
     assert len({record["sequence"] for record in results}) == 1
 
 
@@ -662,7 +641,7 @@ def test_two_runs_do_not_contend_on_the_same_lock_shard(store):
                 store._lock(connection, first["id"])
                 holding.set()
                 release.wait(10)
-        except BaseException as exc:  # pragma: no cover - surfaced below
+        except BaseException as exc:
             failure.append(exc)
             holding.set()
 
@@ -711,8 +690,6 @@ def test_recon_postgres_publisher_replays_across_offline_and_restart(store):
     try:
         first = publisher.publish(message("recon-1", "one"))
 
-        # Start after publication: a live-only subscriber would miss this,
-        # while the durable replay path must deliver it immediately.
         subscriber = ReconSubscriber(
             "inproc://competition-recon-postgres", challenge["id"],
             session_id=receiver["session_id"],
@@ -729,8 +706,6 @@ def test_recon_postgres_publisher_replays_across_offline_and_restart(store):
             subscriber.close()
 
         second = publisher.publish(message("recon-2", "two"))
-        # Retries publish the same durable record and must not create a second
-        # sequence, even if the live socket announces it twice.
         assert publisher.publish(message("recon-2", "two"))["sequence"] == second["sequence"]
         third = publisher.publish(message("recon-3", "three"))
 
@@ -745,8 +720,6 @@ def test_recon_postgres_publisher_replays_across_offline_and_restart(store):
             context=context,
         )
         try:
-            # The callback deliberately returns out of order; the subscriber
-            # emits the lowest unacknowledged sequence first.
             assert restarted.receive(timeout_ms=0)["sequence"] == second["sequence"]
             assert restarted.ack() == second["sequence"]
             assert restarted.receive(timeout_ms=0)["sequence"] == third["sequence"]
@@ -803,15 +776,11 @@ def test_orchestrator_report_bridge_uses_durable_recon_store(store):
         payload={"kind": "difficulty_report", "progress": "shared evidence"},
     )
 
-    # The bridge filters by project_id, so attach the challenge to the
-    # project represented by the report before checking delivery.
     with store.db.connect() as connection:
         connection.execute(
             "UPDATE competition_challenges SET project_id=%s WHERE id=%s",
             (project_id, challenge["id"]),
         )
-    # Re-run after linking the durable project; the first call is intentionally
-    # a no-op and should not fabricate a message for an unrelated project.
     orchestrator._publish_competition_recon(
         project_id,
         "amber",
@@ -974,8 +943,6 @@ def test_session_health_separates_the_four_signals_the_ui_merged(store):
     assert active["turn_status"] == "running"
     assert active["current_turn_started_at"] is not None
 
-    # A lapsed worker lease is visible as a separate fact from event activity:
-    # that distinction is what the single green dot used to hide.
     with store.db.connect() as connection:
         connection.execute(
             """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
@@ -993,7 +960,6 @@ def test_run_session_health_is_one_query_ordered_by_quiet_time(store):
     two = store.assign(run["id"], second["id"], "agate", "coordinator")
 
     with store.db.connect() as connection:
-        # Make one session visibly older so the ordering is deterministic.
         connection.execute(
             """UPDATE agent_sessions SET created_at=now()-interval '10 minutes'
                WHERE id=%s""",
@@ -1008,7 +974,6 @@ def test_run_session_health_is_one_query_ordered_by_quiet_time(store):
 
     rows = store.run_session_health(run["id"])
     assert {row["session_id"] for row in rows} == {one["session_id"], two["session_id"]}
-    # Quietest first, so the thing most needing attention is at the top.
     assert rows[0]["session_id"] == one["session_id"]
     assert rows[0]["quiet_seconds"] > rows[1]["quiet_seconds"]
     assert rows[0]["assignment_id"] == one["id"]
@@ -1032,7 +997,6 @@ def test_handoff_moves_both_fences_so_the_new_member_can_write(store):
         epoch=original["epoch"],
     )
 
-    # A live worker keeps its seat: a handoff is not a way to preempt one.
     with pytest.raises(CompetitionConflict, match="still live"):
         store.handoff_assignment(original["id"], "agate", "coordinator")
 
@@ -1046,23 +1010,19 @@ def test_handoff_moves_both_fences_so_the_new_member_can_write(store):
     moved = store.handoff_assignment(original["id"], "agate", "coordinator")
     assert moved["member"] == "agate"
     assert moved["epoch"] == original["epoch"] + 1
-    # The session id is preserved, so the replacement inherits the findings.
     assert moved["session_id"] == original["session_id"]
 
     writer = store.agent_session_writer(moved["session_id"])
     assert writer["owner"] == moved["lease_owner"]
     assert writer["epoch"] == moved["epoch"]
 
-    # The real assertion: the new Member can actually write.
     store.append_event(
         moved["session_id"], "finding-2", "tool_result", {"evidence": "took over"},
         assignment_id=moved["id"], owner=moved["lease_owner"], epoch=moved["epoch"],
     )
     kinds = [row["kind"] for row in store.events(moved["session_id"])]
-    # The prior finding, the recorded handoff, and the new Member's write.
     assert kinds == ["tool_result", "handoff", "tool_result"]
 
-    # And the displaced Member can no longer write to the transcript.
     with pytest.raises(CompetitionConflict):
         store.append_event(
             moved["session_id"], "stale", "tool_call", {},
@@ -1086,6 +1046,4 @@ def test_handoff_refuses_a_member_that_already_holds_a_seat(store):
 
     with pytest.raises(CompetitionConflict, match="already occupied"):
         store.handoff_assignment(stalled["id"], "agate", "coordinator")
-    # A handoff back to the same Member is allowed: it is a turn reset, and the
-    # occupancy check must not reject the seat's own current holder.
     assert store.handoff_assignment(stalled["id"], "amber", "coordinator")["member"] == "amber"

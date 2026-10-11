@@ -24,7 +24,6 @@ def write_memory(
     category = p.category
     written = []
 
-    # Knowledge: the solution path distilled.
     path_facts = [
         f.description for f in detail.facts if f.id not in ("origin", "goal")
     ]
@@ -41,7 +40,6 @@ def write_memory(
             )
         )
 
-    # Tool usage + lessons gathered from member difficulty reports.
     knowledge_points: list[str] = []
     directions: list[str] = []
     for r in detail.reports:
@@ -60,7 +58,6 @@ def write_memory(
             )
         )
 
-    # Exploit summary keyed off the goal edge.
     goal_edge = next((i for i in detail.intents if i.to == "goal"), None)
     if goal_edge:
         written.append(
@@ -75,7 +72,6 @@ def write_memory(
             )
         )
 
-    # Lessons: course corrections suggested mid-solve.
     if directions:
         written.append(
             memory.add(

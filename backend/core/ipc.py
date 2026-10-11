@@ -135,9 +135,6 @@ def accept_verified_flag(
     }
 
 
-# Flag submission lifecycle for platform-judged projects:
-# pending -> judging -> verified | rejected | error (transient, may re-pend).
-# ``superseded`` marks candidates that lost the race against an accepted flag.
 PENDING_FLAG_STATUSES = ("pending", "judging", "error")
 
 

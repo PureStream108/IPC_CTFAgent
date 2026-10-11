@@ -48,9 +48,6 @@ def test_old_revision_upgrades_forward_and_keeps_legacy_rows(monkeypatch):
         monkeypatch.setenv("IPC_DATABASE_URL", target)
         config = Config("alembic.ini")
         config.attributes["ipc_database_url"] = target
-        # Keep both the repository-specific attribute and Alembic's standard
-        # URL populated.  This also works with older Alembic runners that
-        # clone Config before entering env.py.
         config.set_main_option("sqlalchemy.url", target)
         command.upgrade(config, "20260807_0002")
         with connect(target) as connection:
@@ -88,9 +85,6 @@ def test_old_revision_upgrades_forward_and_keeps_legacy_rows(monkeypatch):
             "agent_compactions",
             "agent_jobs",
         }.issubset(tables)
-        # Derived from the migration graph rather than hardcoded, so adding a
-        # migration does not require editing this assertion. What matters is
-        # that upgrading an old database lands on head, not which id head is.
         assert revision == _head_revision(config)
     finally:
         with connect(maintenance, autocommit=True) as connection:
@@ -159,8 +153,6 @@ def test_several_active_sessions_on_one_challenge_do_not_abort_the_migration(
             connection.execute(
                 "INSERT INTO competition_run_challenges (run_id,challenge_id) VALUES ('run','chal')"
             )
-            # Three Members each hold an active session on the same challenge.
-            # The oldest one owns the live seat.
             connection.execute(
                 """INSERT INTO competition_sessions
                    (id,run_id,challenge_id,member,state,next_sequence,created_at)
@@ -189,7 +181,6 @@ def test_several_active_sessions_on_one_challenge_do_not_abort_the_migration(
                     "SELECT id,state FROM agent_sessions ORDER BY id"
                 ).fetchall()
             )
-            # The retirement is visible in the retired session's own transcript.
             notes = connection.execute(
                 """SELECT session_id, payload->>'status', payload->>'had_live_assignment'
                    FROM agent_events
@@ -211,8 +202,6 @@ def test_several_active_sessions_on_one_challenge_do_not_abort_the_migration(
             ("sess-newest", "superseded_by_migration", "false"),
             ("sess-stale", "superseded_by_migration", "false"),
         ]
-        # The appended note advanced the cursor, so the next real write does
-        # not collide with it.
         assert sequences["sess-stale"] == 2
         assert sequences["sess-live"] == 1
     finally:
@@ -264,7 +253,6 @@ def test_event_kinds_outside_the_new_enum_are_preserved_as_status(monkeypatch):
 
         assert rows[0] == (1, "status", "member_thought", {"text": "hmm"})
         assert rows[1] == (2, "status", "difficulty_report", {"score": 3})
-        # A kind that is already valid is copied through untouched.
         assert rows[2][:3] == (3, "tool_call", None)
     finally:
         _drop_database(maintenance, database_name)
@@ -370,7 +358,6 @@ def test_existing_competition_history_is_backfilled_and_stays_queryable(monkeypa
             writer = connection.execute(
                 "SELECT owner,epoch FROM agent_session_writers WHERE session_id='sess'"
             ).fetchone()
-            # Every child row still resolves through the re-pointed keys.
             children = connection.execute(
                 """SELECT s.id, sub.id, wp.challenge_id, cur.sequence, art.path
                    FROM agent_sessions s
@@ -384,8 +371,6 @@ def test_existing_competition_history_is_backfilled_and_stays_queryable(monkeypa
             legacy_kept = connection.execute(
                 "SELECT count(*) FROM competition_session_events WHERE session_id='sess'"
             ).fetchone()[0]
-            # The composite key pinning a session to one member is gone, so a
-            # different Member can take the seat without losing the transcript.
             member_pinning = connection.execute(
                 """SELECT count(*) FROM pg_constraint
                    WHERE conrelid='competition_assignments'::regclass AND contype='f'

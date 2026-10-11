@@ -78,8 +78,6 @@ def test_a_lapsed_worker_lease_escalates_sooner_than_mere_quiet():
     quiet = CANCEL_AFTER
     assert classify(health(quiet_seconds=quiet, worker_live=True)).level == "cancel"
     assert classify(health(quiet_seconds=quiet, worker_live=False)).level == "handoff"
-    # Below the cancel threshold even a lapsed lease only earns a diagnosis:
-    # the seat may be mid-handoff rather than dead.
     assert classify(
         health(quiet_seconds=DIAGNOSE_AFTER, worker_live=False)
     ).level == "diagnose"
@@ -100,8 +98,6 @@ def test_the_verdict_carries_the_evidence_behind_it():
         last_event_kind="tool_call", running_jobs=0,
     )
     record = diagnosis(row)
-    # A postmortem has to be able to tell "we killed a working Member" from
-    # "the Member was gone", which needs the provider/tool state, not a verdict.
     assert record["current_turn"] == 7
     assert record["turn_status"] == "running"
     assert record["last_event_kind"] == "tool_call"
@@ -110,6 +106,4 @@ def test_the_verdict_carries_the_evidence_behind_it():
 
 
 def test_quiet_seconds_is_read_defensively():
-    # The view returns NULL for a session with no activity at all; that is 0
-    # seconds of quiet, not a crash in the watchdog.
     assert classify(health(quiet_seconds=None)).level == "ok"

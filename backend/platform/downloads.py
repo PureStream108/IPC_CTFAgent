@@ -24,10 +24,8 @@ def stage_challenges(adapter_factory: Callable, challenges: list, destination: P
 
     def download(item):
         index, challenge = item
-        # Platform IDs are not paths. Never interpolate them into filenames.
         directory = destination / str(index)
         adapter = adapter_factory()
-        # Acquire in a global order for multi-origin challenges to avoid cycles.
         with ExitStack() as stack:
             for origin in origins[challenge.external_id]:
                 stack.enter_context(gates[origin])
@@ -37,7 +35,5 @@ def stage_challenges(adapter_factory: Callable, challenges: list, destination: P
                 raise ValueError("adapter returned a file outside its staging directory")
         return challenge.external_id, files
 
-    # executor.map keeps results deterministic and waits for running jobs on
-    # failure, so callers can safely remove staging after this function exits.
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ipc-download") as pool:
         return dict(pool.map(download, enumerate(challenges)))

@@ -59,12 +59,12 @@ class NetworkManager:
         if self.backend == "docker":
             env.started = self._docker_up(env)
         else:
-            env.started = True  # local/test: record only
+            env.started = True
         with self._lock:
             self._envs[project_id] = env
         return env
 
-    def _docker_up(self, env: ChallengeEnv) -> bool:  # pragma: no cover - needs docker
+    def _docker_up(self, env: ChallengeEnv) -> bool:
         import subprocess
 
         try:
@@ -124,7 +124,7 @@ class NetworkManager:
             return
         self._docker_down(env)
 
-    def _docker_down(self, env: ChallengeEnv) -> None:  # pragma: no cover - needs docker
+    def _docker_down(self, env: ChallengeEnv) -> None:
         import subprocess
 
         try:

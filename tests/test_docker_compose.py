@@ -11,11 +11,8 @@ def test_compose_persists_app_exports_and_postgres_state():
     app = compose["services"]["ipc-app"]
     binds = dict(entry.split(":", 1) for entry in app["volumes"] if ":" in entry)
 
-    # ./data is the app's host bind mount for durable IPC state and exports.
     assert binds.get("./data") == "/app/data"
 
-    # PostgreSQL is the only named volume. Every agent runs in-process through
-    # the unified runtime, so there is no sidecar session store to persist.
     assert set(compose.get("volumes", {})) == {"ipc_postgres_data"}
     assert "ipc-claude-runner" not in compose["services"]
     assert "claude" not in raw.lower()
@@ -25,8 +22,6 @@ def test_compose_persists_app_exports_and_postgres_state():
     for target in ("/app/memory", "/app/wp", "/app/logs", "/app/projects"):
         assert target not in binds.values()
 
-    # Workspaces, attachments, live output and exports all derive from one
-    # deployment-shared root below the persistent bind mount.
     env = dict(item.split("=", 1) for item in app["environment"])
     assert env["IPC_ARTIFACT_ROOT"] == "/app/data/artifacts"
     for legacy in (
@@ -55,15 +50,9 @@ def test_task_image_contains_ctf_and_container_mcp_runtimes():
     assert "alembic upgrade head" in app_dockerfile
     assert "chromium" not in app_dockerfile
     assert "rg/ripgrep" in inventory
-    # The inventory is the Member's quick reference, so it has to describe the
-    # 60s bash ceiling and the detached-job escape from it. A model that does
-    # not know job_start exists will keep splitting long work into short
-    # commands and losing intermediate progress.
     assert "bash is killed after 60 seconds" in inventory
     for tool in ("job_start", "job_status", "job_logs", "job_cancel"):
         assert tool in inventory
-    # And that "lost" is not success, which is the one job state a model can
-    # most damagingly misread.
     assert "Never treat lost as" in inventory
 
 
@@ -81,7 +70,6 @@ def test_build_context_excludes_nested_bytecode_and_local_virtualenvs():
     ]
     assert "**/__pycache__" in patterns
     assert "**/*.pyc" in patterns
-    # A local virtualenv would otherwise be copied over the installed package.
     assert ".venv" in patterns
 
 

@@ -101,8 +101,6 @@ def test_coordinator_restart_recovers_session_checkpoint_artifact_and_deadline(t
             expected_version=None,
         )
 
-        # Simulate both coordinator and worker disappearing.  No application
-        # code is allowed to rewrite first_assigned_at/deadline_at on recovery.
         with db.connect() as connection:
             connection.execute(
                 "UPDATE competition_runs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",

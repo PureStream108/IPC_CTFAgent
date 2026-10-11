@@ -49,32 +49,32 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         "application/octet-stream",
     )
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         self._proxy()
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         self._proxy()
 
-    def do_PUT(self) -> None:  # noqa: N802
+    def do_PUT(self) -> None:
         self._proxy()
 
-    def do_PATCH(self) -> None:  # noqa: N802
+    def do_PATCH(self) -> None:
         self._proxy()
 
-    def do_DELETE(self) -> None:  # noqa: N802
+    def do_DELETE(self) -> None:
         self._proxy()
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
+    def do_OPTIONS(self) -> None:
         self._proxy()
 
-    def do_HEAD(self) -> None:  # noqa: N802
+    def do_HEAD(self) -> None:
         self._proxy()
 
     def log_message(self, fmt: str, *args) -> None:
         return
 
     def _proxy(self) -> None:
-        handle: ProxyHandle = self.server.proxy_handle  # type: ignore[attr-defined]
+        handle: ProxyHandle = self.server.proxy_handle
         body = self._read_body()
         upstream_url = urlunsplit(
             (
@@ -185,7 +185,7 @@ class WebUIProxyManager:
                 server=httpd,
                 thread=thread,
             )
-            httpd.proxy_handle = handle  # type: ignore[attr-defined]
+            httpd.proxy_handle = handle
             thread.start()
             self._handles[key] = handle
             return handle

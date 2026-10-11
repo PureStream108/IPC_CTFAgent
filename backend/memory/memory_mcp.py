@@ -69,9 +69,6 @@ def build_memory_mcp(
                     catalog.search, query, limit
                 )
             ]
-        # Preserve the established contract: user/project experience is more
-        # important than generic built-in documentation. Catalog hits fill the
-        # remaining slots.
         return [*memory_hits, *catalog_hits][:limit]
 
     @server.tool(

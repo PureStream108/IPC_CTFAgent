@@ -54,9 +54,6 @@ class AppState:
             self._clean_runtime_state()
         self.config: AppConfig = load_config(config_dir)
 
-        # PostgreSQL is the only runtime fact store. Large and generated files
-        # live below one deployment-shared Artifact root so every app instance
-        # sees the same workspaces, attachments, logs, writeups and exports.
         self.db = Database().configure()
         with self.db.connect() as conn:
             graph_store.reset_project_counter_if_empty(conn)
@@ -73,8 +70,6 @@ class AppState:
             self.memory_export_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
-        # Derive endpoints allocate collision-free filenames from persistent
-        # directories. Serialise allocation + creation within this process.
         self.export_lock = threading.RLock()
         self.logger = IPCLogger(
             self.logs_dir,
@@ -94,9 +89,6 @@ class AppState:
         )
         self.network = NetworkManager(backend=self.config.runtime.sandbox_backend)
 
-        # In-process MCP servers (memory + tool_search). The container-backed
-        # servers (browser, reverse) run inside each task container and are
-        # injected per Member by the orchestrator via docker-exec stdio targets.
         self.mcps = MCPRegistry()
         from backend.skills.store import SkillStore
         from backend.skills.mcp import build_skills_mcp
@@ -105,16 +97,11 @@ class AppState:
         self.mcps.register(build_skills_mcp(self.skills))
         self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
-        # The ret2shell competition MCP (dynamic instance control) is only
-        # registered when participant credentials are configured, so members
-        # never see a platform they cannot reach.  The same client backs the
-        # orchestrator's platform-verdict gate for ret2shell-linked projects.
         self.ret2shell_client: Ret2ShellClient | None = None
         if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
             self.ret2shell_client = Ret2ShellClient()
             self.mcps.register(build_ret2shell_mcp(self.ret2shell_client))
 
-        # Attached by module 8.
         self.orchestrator = None
 
     def _reserve_existing_project_ids(self, conn) -> None:
@@ -142,9 +129,6 @@ class AppState:
             )
 
     def _clean_runtime_state(self) -> None:
-        # Database rows are intentionally not deleted by a local clean start.
-        # Durable exports are preserved; only live workspaces and generated
-        # output are cleared from the shared Artifact root.
         for target in (self.projects_dir, self.wp_dir, self.logs_dir):
             if not target.exists():
                 continue
@@ -176,9 +160,6 @@ class AppState:
                 self.db.close()
 
     def project_log_filename(self, project_id: str) -> str | None:
-        # Called from logging paths, including the scheduler's crash handler;
-        # a failing database must degrade to the plain id instead of raising
-        # through the logger and killing the caller.
         try:
             with self.db.connect() as conn:
                 return graph_store.project_log_filename(conn, project_id)

@@ -146,7 +146,6 @@ def _is_orphaned_tool_result(
         )
     content = message.get("content")
     if message.get("role") == "user" and isinstance(content, list):
-        # Anthropic carries tool results inside a user message.
         return any(
             isinstance(block, dict) and block.get("type") == "tool_result"
             for block in content
@@ -193,7 +192,6 @@ def _parse_json(raw: Any) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # A model often wraps the object in prose or a code fence.
     decoder = json.JSONDecoder()
     for index, character in enumerate(text):
         if character != "{":

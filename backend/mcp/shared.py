@@ -243,10 +243,6 @@ class _BrowserSession:
                     "headless": True,
                     "args": ["--no-sandbox"],
                 }
-                # Playwright is a library dependency of the task image.  A
-                # browser executable is deployment-owned and optional; accepting
-                # an explicit path lets Linux workers use an already provisioned
-                # Edge/Chromium-compatible binary without downloading one here.
                 executable = os.environ.get("IPC_PLAYWRIGHT_EXECUTABLE", "").strip()
                 if executable:
                     launch_options["executable_path"] = executable
@@ -261,11 +257,6 @@ class _BrowserSession:
                 self._register_page(page, preferred_id="main")
                 self._context.on("page", self._on_new_page)
             except BaseException:
-                # ``async_playwright().start()`` owns a driver process even
-                # when the deployment intentionally supplies no browser.  A
-                # failed launch must release that process before the error is
-                # reported, otherwise Windows leaves a closed-pipe transport
-                # for interpreter shutdown.
                 context, browser, playwright = (
                     self._context, self._browser, self._playwright
                 )
@@ -1151,9 +1142,6 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                     try:
                         await page.goto(url, wait_until="commit", timeout=timeout_ms)
                     except Exception:
-                        # Chromium aborts the navigation when a response becomes a
-                        # download. The enclosing download expectation is the
-                        # authoritative success/failure signal.
                         pass
             item = await download_info.value
             suggested_name = Path(str(getattr(item, "suggested_filename", "download"))).name

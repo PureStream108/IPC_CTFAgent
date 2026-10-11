@@ -38,9 +38,7 @@ class ContainerPool:
         self.image = image
         self.limiter = limiter or TaskSlotLimiter()
         self.network = network
-        # docker: one TaskSandbox per project. local: unused (per-member below).
         self._tasks: dict[str, object] = {}
-        # per-(project, member) sandbox view, cached for identity stability.
         self._sandboxes: dict[tuple[str, str], Sandbox] = {}
         self._lock = threading.Lock()
 

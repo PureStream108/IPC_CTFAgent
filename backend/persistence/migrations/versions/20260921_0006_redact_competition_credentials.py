@@ -10,8 +10,6 @@ depends_on = None
 
 
 def upgrade():
-    # JSONB ``-`` is idempotent and also handles snapshots created before the
-    # runtime began recording an explicit ``member_config_source`` marker.
     op.execute(
         """UPDATE competition_runs
            SET config_snapshot = jsonb_set(

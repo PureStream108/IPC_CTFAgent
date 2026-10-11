@@ -26,7 +26,6 @@ class JobService:
         self.sandbox = sandbox
         self.session_id = session_id
 
-    # ------------------------------------------------------------------ start
 
     def start(self, command: str, *, kind: str = "bash") -> dict[str, Any]:
         """Start a detached command after the same policy check as ``bash``.
@@ -43,9 +42,6 @@ class JobService:
             return {"ok": False, "error": f"command blocked: {violation}"}
 
         job_id = new_job_id()
-        # The row is written before the process starts: a crash between the
-        # two leaves a job that reconciles to 'lost', whereas starting first
-        # could leave a running process with no record of it at all.
         self.store.start(
             self.session_id, command, kind=kind, job_id=job_id,
             workdir=getattr(self.sandbox, "workdir", None),
@@ -72,7 +68,6 @@ class JobService:
             ),
         }
 
-    # ----------------------------------------------------------------- status
 
     def status(self, job_id: str) -> dict[str, Any]:
         try:
@@ -90,8 +85,6 @@ class JobService:
         try:
             observed = self.sandbox.job_state(row["id"])
         except Exception:
-            # The sandbox is unreachable; the job's own state is still
-            # unknown, so leave the row alone rather than declaring it dead.
             return row
         state = observed.get("state")
         if state == "running":
@@ -100,8 +93,6 @@ class JobService:
             return self.store.finish(
                 row["id"], "exited", exit_code=observed.get("exit_code")
             )
-        # A process that is gone with no recorded status: the container
-        # restarted or something outside killed it. Unknown, not successful.
         return self.store.finish(row["id"], "lost")
 
     def jobs(self, *, active_only: bool = False) -> dict[str, Any]:
@@ -114,7 +105,6 @@ class JobService:
             ],
         }
 
-    # ------------------------------------------------------------------- logs
 
     def logs(
         self, job_id: str, *, stream: str = "stdout", offset: int | None = None,
@@ -159,12 +149,9 @@ class JobService:
             "offset": start,
             "next_offset": next_offset,
             "text": text,
-            # Truncation has to be visible: a model that believes it read the
-            # whole output will stop polling and reason from a prefix.
             "truncated": next_offset - start >= capped,
         }
 
-    # ----------------------------------------------------------------- cancel
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         try:
@@ -184,12 +171,9 @@ class JobService:
                 "job_id": job_id,
                 "error": f"failed to cancel job: {type(exc).__name__}: {exc}",
             }
-        # finish() only applies to a still-running row, so a job that exited on
-        # its own in the same instant keeps its real exit code.
         final = self.store.finish(job_id, "cancelled")
         return {"ok": True, "job_id": job_id, "state": final["state"]}
 
-    # ------------------------------------------------------------------- view
 
     @staticmethod
     def _view(row: dict) -> dict[str, Any]:

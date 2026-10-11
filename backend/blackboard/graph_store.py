@@ -35,7 +35,6 @@ def _json_list(value: Any) -> list[str]:
         return [str(item) for item in parsed] if isinstance(parsed, list) else []
     return []
 
-# ---------- settings ----------
 
 
 def get_timeouts(conn: Any) -> tuple[int, int]:
@@ -43,7 +42,6 @@ def get_timeouts(conn: Any) -> tuple[int, int]:
     return row["intent_timeout"], row["reason_timeout"]
 
 
-# ---------- reason lease ----------
 
 
 def reason_from_row(row: Any) -> ProjectReason | None:
@@ -121,7 +119,6 @@ def expire_reason_leases(conn: Any, timeout: int, project_id: str | None = None)
     conn.execute(query, params)
 
 
-# ---------- projects ----------
 
 
 def project_meta(row: Any) -> ProjectMeta:
@@ -182,7 +179,6 @@ def create_project(
                 "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (%s, %s, %s, %s, %s)",
                 (hid, pid, content, creator, now),
             )
-    # IPC and Diamond always exist from the start.
     add_agent(conn, pid, "ipc", "ipc", state="active")
     add_agent(conn, pid, "diamond", "diamond", state="idle")
     return pid
@@ -300,7 +296,6 @@ def delete_project(conn: Any, project_id: str) -> None:
     reset_project_counter_if_empty(conn)
 
 
-# ---------- hints ----------
 
 
 def create_hint(conn: Any, project_id: str, content: str, creator: str) -> Hint:
@@ -392,7 +387,6 @@ def link_exists(conn: Any, project_id: str, src: str, dst: str, kind: str) -> bo
     return row is not None
 
 
-# ---------- reports ----------
 
 
 def create_report(
@@ -459,7 +453,6 @@ def list_reports(conn: Any, project_id: str) -> list[Report]:
     ]
 
 
-# ---------- attachments ----------
 
 
 def create_attachment(conn: Any, project_id: str, filename: str, path: str) -> Attachment:
@@ -482,7 +475,6 @@ def list_attachments(conn: Any, project_id: str) -> list[Attachment]:
     ]
 
 
-# ---------- broadcasts ----------
 
 
 def add_broadcast(conn: Any, project_id: str | None, title: str, flag: str) -> Broadcast:
@@ -511,7 +503,6 @@ def list_broadcasts(conn: Any, limit: int = 50) -> list[Broadcast]:
     ]
 
 
-# ---------- assembly ----------
 
 
 def project_detail(conn: Any, project_id: str) -> ProjectDetail | None:

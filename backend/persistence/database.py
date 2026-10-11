@@ -27,8 +27,6 @@ def database_url(value: str | Path | None = None) -> str:
     ):
         configured = os.environ.get("IPC_DATABASE_URL", "").strip()
     if configured.startswith("postgresql+psycopg://"):
-        # ``+psycopg`` is SQLAlchemy's dialect marker, not valid libpq
-        # connection-info syntax.  Runtime callers use psycopg directly.
         return "postgresql://" + configured.removeprefix("postgresql+psycopg://")
     if configured.startswith(("postgresql://", "postgres://")):
         return configured
@@ -109,7 +107,7 @@ class PostgresDatabase:
         lock_timeout_ms: int | None = None,
         in_memory: bool | None = None,
     ) -> None:
-        del in_memory  # kept only to fail closed without reopening a SQLite path
+        del in_memory
         self.dsn = database_url(dsn)
         self.min_size = min_size or int(os.environ.get("IPC_DB_POOL_MIN", "2"))
         self.max_size = max_size or int(os.environ.get("IPC_DB_POOL_MAX", "16"))

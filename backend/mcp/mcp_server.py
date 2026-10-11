@@ -45,7 +45,7 @@ def close_lifespan(close: Callable[[], None]):
 def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") -> MCPServer:
     """Build one IPC MCP server for an external stdio/HTTP client."""
 
-    del root  # retained for CLI and third-party caller compatibility
+    del root
     if name == "browser":
         from backend.mcp.shared import build_browser_mcp
 
@@ -54,7 +54,6 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
         from backend.mcp.reverse_mcp import build_reverse_mcp
 
         return build_reverse_mcp()
-    # Stateful debug servers use the same PostgreSQL DSN as the main app.
     if name == "memory":
         from backend.memory.memory_mcp import build_memory_mcp
         from backend.memory.memory_store import MemoryStore
