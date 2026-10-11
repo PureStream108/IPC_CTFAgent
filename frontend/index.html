@@ -9,6 +9,8 @@
   <script src="/static/vendor/dagre.min.js"></script>
   <script src="/static/vendor/cytoscape.min.js"></script>
   <script src="/static/vendor/cytoscape-dagre.js"></script>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
   <style>
     [x-cloak] { display: none !important; }
@@ -43,6 +45,33 @@
     .catalog-markdown a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
     .ops-chat-scroll { scrollbar-gutter: stable; overscroll-behavior: contain; scrollbar-width: thin; }
     .ops-log-scroll { scrollbar-gutter: stable; overscroll-behavior: contain; scrollbar-width: thin; }
+    .ops-markdown { line-height: 1.7; word-break: break-word; }
+    .ops-markdown > :first-child { margin-top: 0; }
+    .ops-markdown > :last-child { margin-bottom: 0; }
+    .ops-markdown h1, .ops-markdown h2, .ops-markdown h3 { margin: 1rem 0 .5rem; font-weight: 700; line-height: 1.35; }
+    .ops-markdown h1 { font-size: 1.25rem; }
+    .ops-markdown h2 { font-size: 1.1rem; }
+    .ops-markdown h3 { font-size: 1rem; }
+    .ops-markdown p { margin: .5rem 0; }
+    .ops-markdown ul, .ops-markdown ol { margin: .5rem 0 .5rem 1.3rem; }
+    .ops-markdown ul { list-style: disc; }
+    .ops-markdown ol { list-style: decimal; }
+    .ops-markdown li { margin: .2rem 0; }
+    .ops-markdown pre { margin: .65rem 0; overflow-x: auto; border-radius: .6rem; background: #0f172a; padding: .8rem; color: #e2e8f0; font-size: .78rem; }
+    .ops-markdown code { border-radius: .25rem; background: rgba(99,102,241,0.1); padding: .1rem .3rem; color: #4338ca; font-size: .82em; }
+    .ops-markdown pre code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+    .ops-markdown blockquote { margin: .6rem 0; border-left: 3px solid #c7d2fe; padding-left: .7rem; color: #64748b; }
+    .ops-markdown a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
+    .ops-markdown table { margin: .65rem 0; border-collapse: collapse; display: block; overflow-x: auto; }
+    .ops-markdown th, .ops-markdown td { border: 1px solid #e2e8f0; padding: .3rem .5rem; text-align: left; }
+    .ops-markdown th { background: #f8fafc; font-weight: 600; }
+    .ops-markdown hr { margin: .8rem 0; border: 0; border-top: 1px solid #e2e8f0; }
+    .ops-markdown-invert code { background: rgba(255,255,255,0.18); color: #eef2ff; }
+    .ops-markdown-invert a { color: #e0e7ff; }
+    .ops-markdown-invert blockquote { border-left-color: rgba(255,255,255,0.4); color: #e0e7ff; }
+    .ops-markdown-invert th, .ops-markdown-invert td { border-color: rgba(255,255,255,0.3); }
+    .ops-markdown-invert th { background: rgba(255,255,255,0.12); }
+    .ops-reasoning { white-space: pre-wrap; word-break: break-word; }
   </style>
   <script>
     tailwind.config = {
@@ -120,7 +149,8 @@
         <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.status"></span>
         <span x-show="current.project.runtime_phase && current.project.runtime_phase!=='idle'"
           class="rounded-md bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700"
-          x-text="current.project.runtime_phase"></span>
+          :title="'Project phase: '+current.project.runtime_phase"
+          x-text="'phase '+current.project.runtime_phase"></span>
         <span class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-slate-500">
           <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 7v5l3 3"/><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Z"/></svg>
           <span class="uppercase tracking-wide text-[10px] text-slate-400">Elapsed</span>
@@ -135,12 +165,38 @@
       :class="sidebarOpen ? 'w-64' : 'w-0 border-r-0'">
       <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
         <div class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Projects</div>
-        <button class="h-6 w-6 rounded-md border border-slate-200 text-slate-400 hover:bg-slate-50 inline-flex items-center justify-center" @click="sidebarOpen=false" title="Collapse">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
-        </button>
+        <div class="flex items-center gap-1">
+          <div class="relative">
+            <button class="h-6 rounded-md border px-1.5 text-[10px] inline-flex items-center gap-1"
+              :class="projectStatusFilter.length?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 text-slate-400 hover:bg-slate-50'"
+              @click="projectFilterOpen=!projectFilterOpen" title="Filter by status">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M3 5h18"/><path d="M6 12h12"/><path d="M10 19h4"/></svg>
+              <span x-text="projectStatusFilter.length?projectStatusFilter.length:'All'"></span>
+            </button>
+            <div class="absolute right-0 top-7 z-20 w-40 rounded-xl border border-slate-200 bg-white p-2 shadow-lg"
+              x-show="projectFilterOpen" x-cloak @click.outside="projectFilterOpen=false">
+              <template x-for="group in projectStatusGroups" :key="group.key">
+                <label class="flex items-center gap-2 rounded-lg px-1.5 py-1 text-[11px] text-slate-600 hover:bg-slate-50">
+                  <input type="checkbox" :value="group.key"
+                    :checked="projectStatusFilter.includes(group.key)"
+                    @change="toggleProjectStatusFilter(group.key)">
+                  <span x-text="group.label"></span>
+                  <span class="flex-1"></span>
+                  <span class="text-slate-400" x-text="projectStatusGroupCount(group.key)"></span>
+                </label>
+              </template>
+              <button class="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-50"
+                x-show="projectStatusFilter.length" x-cloak
+                @click="projectStatusFilter=[]">Clear</button>
+            </div>
+          </div>
+          <button class="h-6 w-6 rounded-md border border-slate-200 text-slate-400 hover:bg-slate-50 inline-flex items-center justify-center" @click="sidebarOpen=false" title="Collapse">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+          </button>
+        </div>
       </div>
       <div class="flex-1 overflow-y-auto p-2">
-        <template x-for="p in projects" :key="p.id">
+        <template x-for="p in filteredProjects()" :key="p.id">
           <button class="group w-full text-left rounded-xl border p-3 mb-2 transition"
             :class="selectedId===p.id ? 'border-brand-200 bg-brand-50/80 shadow-sm' : 'border-transparent hover:border-slate-200 hover:bg-slate-50'"
             @click="openProject(p.id)">
@@ -159,6 +215,7 @@
           </button>
         </template>
         <div x-show="projects.length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
+        <div x-show="projects.length>0 && filteredProjects().length===0" x-cloak class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No project matches this filter.</div>
       </div>
     </aside>
 
@@ -176,8 +233,14 @@
         </div>
         <template x-if="current && (current.project.runtime_error || !['idle','ready','solved','stopped'].includes(current.project.runtime_phase))">
           <div class="absolute top-14 left-3 z-10 max-w-[34rem] rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
-            <div class="font-mono font-semibold text-sky-700" x-text="'IPC startup: '+current.project.runtime_phase"></div>
-            <div x-show="current.project.runtime_error" class="mt-1 break-words text-rose-600" x-text="current.project.runtime_error"></div>
+            <div class="font-mono font-semibold text-sky-700" x-text="'Project phase: '+current.project.runtime_phase"></div>
+            <button type="button" class="mt-1 text-[11px] text-sky-600 hover:text-sky-800"
+              x-show="current.project.runtime_error" x-cloak
+              @click="projectPhaseErrorOpen=!projectPhaseErrorOpen"
+              x-text="projectPhaseErrorOpen?'Hide details':'Show details'"></button>
+            <div x-show="current.project.runtime_error && projectPhaseErrorOpen" x-cloak
+              class="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-rose-600"
+              x-text="current.project.runtime_error"></div>
           </div>
         </template>
         <template x-if="current && current.project.reason">
@@ -605,21 +668,6 @@
     </div>
   </div>
 
-  <div class="fixed inset-0 overlay flex items-center justify-center z-50 p-4" x-show="pendingQuestions.length" x-cloak>
-    <div class="panel rounded-2xl w-[560px] p-5">
-      <template x-if="pendingQuestions.length">
-        <div>
-          <h2 class="font-semibold mb-3" x-text="pendingQuestions[0].title"></h2>
-          <div class="flex flex-wrap gap-2 mb-3">
-            <template x-for="option in pendingQuestions[0].options" :key="option"><button class="btn-ghost rounded-lg p-2 text-sm" @click="questionAnswer=option" x-text="option"></button></template>
-          </div>
-          <input class="w-full rounded-lg p-2" :type="pendingQuestions[0].sensitive?'password':'text'" x-model="questionAnswer" placeholder="Your answer" @keydown.enter="answerQuestion()">
-          <div class="text-xs text-rose-600 mt-2" x-text="questionError"></div>
-          <button class="btn rounded-lg px-3 py-2 mt-3 disabled:opacity-50" :disabled="questionBusy||!questionAnswer.trim()" @click="answerQuestion()">Answer</button>
-        </div>
-      </template>
-    </div>
-  </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-40 p-4" x-show="showSkills" x-cloak>
     <div class="panel rounded-2xl w-[720px] max-w-[96vw] h-[78vh] p-5 flex flex-col">
@@ -958,32 +1006,78 @@
               </div>
               <template x-for="message in opsMessages" :key="message.id || message.created_at">
                 <div class="flex" :class="message.role==='user'?'justify-end':'justify-start'">
-                  <div class="max-w-[88%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap break-words"
-                    :class="message.role==='user'?'bg-brand-500 text-white rounded-br-md':'bg-slate-100 text-slate-700 rounded-bl-md'"
-                    x-text="message.content"></div>
+                  <div class="rounded-2xl text-sm break-words ops-markdown"
+                    :class="message.role==='user'?'max-w-[88%] bg-brand-500 text-white rounded-br-md px-4 py-3 ops-markdown-invert':'w-full bg-transparent text-slate-700 px-1 py-1'"
+                    x-html="renderMarkdown(message.content)"></div>
                 </div>
               </template>
-              <div class="rounded-2xl border border-slate-800 bg-slate-950 p-3 shadow-inner" x-show="opsLiveEvents.length" x-cloak>
-                <div class="flex items-center justify-between gap-2 mb-2">
-                  <div class="flex items-center gap-2 text-[11px] font-semibold text-slate-200">
-                    <span class="h-2 w-2 rounded-full" :class="opsBusy?'bg-emerald-400 animate-pulse':'bg-slate-500'"></span>
-                    IPC live log
-                    <span class="font-normal text-slate-500" x-text="opsLiveEvents.length+' events'"></span>
-                  </div>
-                  <button class="text-[10px] text-slate-400 hover:text-white" @click="opsLiveEvents=[]">Clear</button>
+
+              <div class="space-y-2" x-show="opsReasoning || opsAnswer || opsBusy" x-cloak>
+                <div class="rounded-xl border border-slate-200 bg-slate-50/80" x-show="opsReasoning" x-cloak>
+                  <button type="button" class="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-slate-500 hover:text-slate-700"
+                    @click="opsReasoningOpen=!opsReasoningOpen">
+                    <svg class="h-3 w-3 shrink-0 transition" :class="opsReasoningOpen?'rotate-90':''" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                    <span x-text="opsBusy?'Thinking…':'Thought process'"></span>
+                    <span class="text-slate-400" x-text="'('+opsReasoning.length+' chars)'"></span>
+                  </button>
+                  <div class="max-h-60 overflow-y-auto px-3 pb-3 text-[11px] leading-relaxed text-slate-500 ops-reasoning ops-log-scroll"
+                    x-show="opsReasoningOpen" x-cloak x-ref="opsReasoningBox" x-text="opsReasoning"></div>
                 </div>
-                <div class="max-h-72 overflow-y-auto space-y-1 ops-log-scroll" x-ref="opsLogs">
-                  <template x-for="(event,index) in opsLiveEvents" :key="event.id || index">
-                    <div class="rounded-lg px-2 py-1 font-mono text-[11px] leading-relaxed" :class="event.kind==='tool'?'bg-cyan-950/70 text-cyan-200':event.kind==='tool-result'?'bg-emerald-950/60 text-emerald-200':event.kind==='stderr'?'bg-rose-950/60 text-rose-200':'text-slate-300'">
-                      <div class="flex items-start gap-2">
-                        <span class="shrink-0 text-slate-500" x-text="event.label"></span>
-                        <pre class="min-w-0 whitespace-pre-wrap break-words" x-text="event.text"></pre>
-                      </div>
-                    </div>
-                  </template>
+                <div class="flex justify-start" x-show="opsAnswer" x-cloak>
+                  <div class="w-full px-1 py-1 text-sm text-slate-700 ops-markdown" x-html="renderMarkdown(opsAnswer)"></div>
+                </div>
+                <div class="rounded-xl border border-slate-200 bg-white" x-show="opsBusy || opsToolNames.length" x-cloak>
+                  <button type="button" class="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-slate-500 hover:text-slate-700"
+                    @click="opsToolsOpen=!opsToolsOpen">
+                    <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="opsBusy?'bg-emerald-500 animate-pulse':'bg-slate-300'"></span>
+                    <span x-text="opsStatusLine()"></span>
+                    <span class="flex-1"></span>
+                    <span class="text-slate-400" x-show="opsToolNames.length" x-text="opsToolsOpen?'hide':'details'"></span>
+                  </button>
+                  <div class="px-3 pb-2" x-show="opsToolsOpen && opsToolNames.length" x-cloak>
+                    <template x-for="(name,index) in opsToolNames.slice(-8)" :key="index">
+                      <div class="truncate font-mono text-[10px] text-slate-400" x-text="name"></div>
+                    </template>
+                  </div>
                 </div>
               </div>
-              <div class="flex justify-start" x-show="opsBusy"><div class="rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 text-xs text-slate-400">IPC is executing tools...</div></div>
+
+              <template x-for="question in pendingQuestions" :key="question.id">
+                <div class="flex justify-start">
+                  <div class="w-full rounded-2xl border border-brand-200 bg-brand-50/60 px-4 py-3">
+                    <div class="text-sm font-medium text-slate-700" x-text="question.title"></div>
+                    <div class="mt-2 flex flex-wrap gap-1.5" x-show="(question.options||[]).length" x-cloak>
+                      <template x-for="option in question.options" :key="option">
+                        <button type="button" class="rounded-lg border px-2.5 py-1 text-xs transition"
+                          :class="questionAnswers[question.id]===option?'border-brand-400 bg-brand-100 text-brand-700':'border-slate-200 bg-white text-slate-600 hover:border-brand-300'"
+                          @click="questionAnswers[question.id]=option" x-text="option"></button>
+                      </template>
+                    </div>
+                    <div class="mt-2 flex gap-1.5">
+                      <input class="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-xs"
+                        :type="question.sensitive?'password':'text'"
+                        :placeholder="question.sensitive?'Value is stored as a workflow secret':'Your answer'"
+                        x-model="questionAnswers[question.id]"
+                        @keydown.enter="answerQuestion(question.id)">
+                      <button class="btn rounded-lg px-3 py-1.5 text-xs disabled:opacity-40"
+                        :disabled="questionBusy||!(questionAnswers[question.id]||'').trim()"
+                        @click="answerQuestion(question.id)">Answer</button>
+                    </div>
+                    <div class="mt-1.5 text-[11px] text-rose-600" x-show="questionError" x-cloak x-text="questionError"></div>
+                  </div>
+                </div>
+              </template>
+
+              <div class="flex justify-start" x-show="opsBusy && !opsAnswer && !opsReasoning" x-cloak>
+                <div class="rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 text-xs text-slate-400">IPC is working…</div>
+              </div>
+              <div class="flex justify-start" x-show="opsError" x-cloak>
+                <div class="w-full rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
+                  <div class="text-xs text-rose-700" x-text="opsError"></div>
+                  <button class="mt-2 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-[11px] text-rose-600 hover:bg-rose-100"
+                    x-show="opsRetryMessage" x-cloak @click="retryOpsMessage()">Retry</button>
+                </div>
+              </div>
             </div>
             <button x-show="!opsAtBottom && opsMessages.length" x-cloak @click="scrollOpsToLatest(true)"
               class="absolute bottom-4 right-5 rounded-full border border-brand-200 bg-white px-3 py-1.5 text-xs text-brand-600 shadow-md hover:bg-brand-50">
@@ -991,6 +1085,15 @@
             </button>
           </div>
           <div class="border-t border-slate-100 p-3">
+            <div class="mb-1.5 flex flex-wrap gap-1.5" x-show="opsNextCalls.length" x-cloak>
+              <template x-for="item in opsNextCalls" :key="item.id">
+                <span class="inline-flex max-w-full items-center gap-1 rounded-lg border border-brand-200 bg-brand-50 px-2 py-1 text-[11px] text-brand-700">
+                  <span class="text-brand-400">queued</span>
+                  <span class="max-w-[260px] truncate" x-text="item.message"></span>
+                  <button type="button" class="text-brand-400 hover:text-rose-600" title="Remove from queue" @click="removeOpsNextCall(item.id)">&times;</button>
+                </span>
+              </template>
+            </div>
             <div class="rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm transition focus-within:border-brand-300 focus-within:ring-2 focus-within:ring-brand-100">
               <div class="flex flex-wrap items-center gap-1.5 pb-2" x-show="opsAttachments.length" x-cloak>
                 <template x-for="attachment in opsAttachments" :key="attachment.id">
@@ -1004,24 +1107,24 @@
                 x-ref="opsInputBox" rows="1" x-model="opsInput"
                 @input="autoGrowOpsInput()"
                 @keydown.enter="onOpsInputEnter($event)"
-                placeholder="Describe the platform API, task, or credentials for IPC."></textarea>
+                :placeholder="opsBusy?'IPC is working — your message is queued and sent next.':'Describe the platform API, task, or credentials for IPC.'"></textarea>
               <div class="flex items-center gap-1.5 pt-1">
                 <input type="file" x-ref="opsFileInput" class="hidden" multiple @change="uploadOpsFiles($event)" />
                 <button type="button" class="h-8 w-8 rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-40 inline-flex items-center justify-center"
-                  title="Attach platform API documentation" :disabled="opsBusy || opsUploading" @click="$refs.opsFileInput.click()">
+                  title="Attach platform API documentation" :disabled="opsUploading" @click="$refs.opsFileInput.click()">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
                 </button>
                 <span class="text-[10px] text-slate-400" x-show="opsUploading" x-cloak>Uploading…</span>
                 <div class="flex-1"></div>
-                <span class="hidden sm:inline text-[10px] text-slate-400" x-show="!opsBusy" x-cloak>Enter to send · Shift+Enter for newline</span>
+                <span class="hidden sm:inline text-[10px] text-slate-400" x-text="opsBusy?'Enter to queue the next message':'Enter to send · Shift+Enter for newline'"></span>
                 <button type="button" class="h-8 w-8 rounded-lg bg-brand-500 text-white transition hover:bg-brand-600 disabled:opacity-30 inline-flex items-center justify-center"
-                  x-show="!opsBusy"
-                  :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()" title="Send">
+                  :disabled="!opsInput.trim() || !opsCfg?.configured" @click="sendOpsMessage()"
+                  :title="opsBusy?'Queue as the next message':'Send'">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>
                 </button>
                 <button type="button" class="h-8 w-8 rounded-lg bg-rose-500 text-white transition hover:bg-rose-600 disabled:opacity-40 inline-flex items-center justify-center"
                   x-show="opsBusy" x-cloak :disabled="opsInterrupting" @click="interruptOpsRun()"
-                  :title="opsInterrupting?'Interrupting…':'Stop IPC'">
+                  :title="opsInterrupting?'Interrupting…':'Stop IPC (queued messages are kept)'">
                   <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
                 </button>
               </div>
@@ -1037,15 +1140,20 @@
           </div>
           <div class="flex flex-col gap-1.5 pb-2 mb-2">
             <template x-for="workflow in opsWorkflows" :key="workflow.id">
-              <button class="w-full rounded-lg border px-2.5 py-2 text-left text-[11px] transition"
-                :class="opsWorkflowId===workflow.id?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 bg-white text-slate-500 hover:border-slate-300'"
-                @click="selectOpsWorkflow(workflow.id)"
-                :title="opsWorkflowId===workflow.id?'Click again to deselect and adapt a new platform':'Select this configured platform'">
-                <div class="flex items-center gap-1.5">
-                  <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="opsWorkflowId===workflow.id?'bg-brand-500':'bg-slate-300'"></span>
-                  <span class="min-w-0 flex-1 break-words font-medium" x-text="workflow.name"></span>
-                </div>
-              </button>
+              <div class="group flex items-stretch gap-1">
+                <button class="min-w-0 flex-1 rounded-lg border px-2.5 py-2 text-left text-[11px] transition"
+                  :class="opsWorkflowId===workflow.id?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 bg-white text-slate-500 hover:border-slate-300'"
+                  @click="selectOpsWorkflow(workflow.id)"
+                  :title="opsWorkflowId===workflow.id?'Click again to deselect and adapt a new platform':'Select this configured platform'">
+                  <div class="flex items-center gap-1.5">
+                    <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="opsWorkflowId===workflow.id?'bg-brand-500':'bg-slate-300'"></span>
+                    <span class="min-w-0 flex-1 break-words font-medium" x-text="workflow.name"></span>
+                  </div>
+                </button>
+                <button class="shrink-0 rounded-lg border border-transparent px-2 text-[11px] text-slate-300 opacity-0 transition group-hover:opacity-100 hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed"
+                  :disabled="opsWorkflowBusy" title="Delete this workflow"
+                  @click="deleteOpsWorkflow(workflow)">&times;</button>
+              </div>
             </template>
           </div>
           <div class="mb-2 rounded-lg border border-dashed border-slate-200 px-2.5 py-2 text-[10px] leading-relaxed text-slate-400"
@@ -1077,10 +1185,16 @@
               </div>
 
               <div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3" x-show="!workflowTokens[selectedOpsWorkflow().id]">
-                <div class="text-[11px] leading-relaxed text-amber-800">Review every URL, method and template above, then type:</div>
-                <code class="block my-2 text-[10px] text-amber-900 break-all" x-text="selectedOpsWorkflow().confirmation_phrase"></code>
-                <input class="w-full rounded-lg px-2 py-1 text-xs" x-model="opsConfirmInput" placeholder="confirmation phrase">
-                <button class="mt-2 btn w-full rounded-lg px-2 py-1.5 text-xs disabled:opacity-40" :disabled="opsConfirmInput!==selectedOpsWorkflow().confirmation_phrase" @click="confirmOpsWorkflow()">Authorize workflow</button>
+                <div class="text-[11px] leading-relaxed text-amber-800">Review the URLs, methods and templates above before authorizing.</div>
+                <div class="mt-2 flex flex-wrap gap-1" x-show="(opsConfirmMissing[selectedOpsWorkflow().id]||[]).length" x-cloak>
+                  <template x-for="name in opsConfirmMissing[selectedOpsWorkflow().id]||[]" :key="name">
+                    <span class="rounded-md bg-rose-50 px-2 py-0.5 text-[10px] text-rose-600" x-text="name+' missing'"></span>
+                  </template>
+                </div>
+                <button class="mt-2 btn w-full rounded-lg px-2 py-1.5 text-xs disabled:opacity-40"
+                  :disabled="opsWorkflowBusy" @click="authorizeOpsWorkflow()"
+                  x-text="opsWorkflowBusy?'Authorizing…':'Authorize workflow'"></button>
+                <div class="mt-1.5 text-[10px] text-rose-600" x-show="opsConfirmError" x-cloak x-text="opsConfirmError"></div>
               </div>
 
               <div class="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 space-y-2" x-show="workflowTokens[selectedOpsWorkflow().id]">
@@ -1091,6 +1205,24 @@
                 </div>
                 <button class="btn w-full rounded-lg px-2 py-1.5 text-xs" x-show="selectedOpsWorkflow().spec.submit" @click="submitFoundFlags()">Submit all found flags</button>
                 <button class="w-full text-[10px] text-rose-500" @click="revokeOpsWorkflow()">Revoke capability</button>
+              </div>
+              <div class="rounded-xl border border-brand-200 bg-brand-50/50 p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="text-xs font-semibold text-slate-600">Start solving</div>
+                  <span class="text-[10px] text-slate-400" x-text="opsStartSelectionLabel()"></span>
+                </div>
+                <button class="btn w-full rounded-lg px-2 py-2 text-xs disabled:opacity-40"
+                  :disabled="!opsStartReady() || opsStartBusy"
+                  :title="opsStartBlockedReason()||'Allocate challenges and begin solving'"
+                  @click="startOpsRun()"
+                  x-text="opsStartBusy?'Starting…':'Start'"></button>
+                <div class="text-[10px] text-slate-500" x-show="opsStartBlockedReason()" x-cloak x-text="opsStartBlockedReason()"></div>
+                <div class="text-[10px] text-rose-600" x-show="opsStartError" x-cloak x-text="opsStartError"></div>
+                <div class="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-2 py-1.5"
+                  x-show="competitionRun" x-cloak>
+                  <span class="text-[10px] text-emerald-700" x-text="'Run '+(competitionRun?.run?.status||competitionRun?.status||'started')"></span>
+                  <button class="text-[10px] text-brand-600" @click="showOps=false;openCompetition()">Open run</button>
+                </div>
               </div>
               <pre class="rounded-xl border border-slate-200 bg-white p-3 text-[10px] text-slate-500 whitespace-pre-wrap max-h-48 overflow-auto" x-show="opsResult" x-text="JSON.stringify(opsResult,null,2)"></pre>
             </div>
@@ -1131,14 +1263,17 @@
       _removedMembers: [],
       memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
-      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsRunId: null, opsQueuedMessage: null, opsQueuedAttachments: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsLiveEvents: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
+      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsRunId: null, opsNextCalls: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
+      opsAnswer: "", opsReasoning: "", opsReasoningOpen: false, opsToolNames: [], opsToolsOpen: false,
+      opsError: "", opsRetryMessage: null, opsRunStartedAt: 0, projectPhaseErrorOpen: false,
       opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
       opsConfirmInput: "", opsResult: null,
+      opsWorkflowBusy: false, opsConfirmError: "", opsConfirmMissing: {},
+      opsStartBusy: false, opsStartError: "",
+      projectStatusFilter: [], projectFilterOpen: false,
       competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
       competitionWorkflowId: "", competitionBusy: false, competitionPreflight: null, competitionError: "", competitionEventSource: null, competitionEventSourceToken: 0,
       competitionEventCursor: 0, competitionEventRunId: "", competitionReconnectTimer: null,
-      // Session-level observability: run events alone could not distinguish a
-      // coordinator that is ticking from a Member that is actually working.
       sessionHealth: [], sessionEvents: [], eventSourceFilter: "all",
       sessionEventSource: null, sessionEventSourceToken: 0, sessionEventCursor: 0,
       sessionReconnectTimer: null,
@@ -1151,7 +1286,8 @@
       clearAppData(){
         this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
         this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
-        this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsUploading=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
+        this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsRunId=null; this.opsNextCalls=[]; this.opsAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsUploading=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
+        this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[]; this.opsError=""; this.opsRetryMessage=null;
         this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
         this.competitionRuns=[]; this.competitionRun=null; this.competitionMembers=[]; this.competitionEvents=[];
         if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
@@ -1236,10 +1372,38 @@
 
       async loadProjects(){
         const list = await this.api("GET","/projects");
-        // Running projects first, then queued/created, completed last; newest id first within a group.
-        const rank = (s) => (s === 'running' ? 0 : (s === 'completed' ? 2 : 1));
         this.projects = [...list].sort((a, b) =>
-          (rank(a.status) - rank(b.status)) || (a.id < b.id ? 1 : -1));
+          (this.projectStatusRank(a.status) - this.projectStatusRank(b.status))
+          || (a.id < b.id ? 1 : -1));
+      },
+      projectStatusGroups: [
+        {key:"solved", label:"Solved"},
+        {key:"running", label:"Running"},
+        {key:"created", label:"Created"},
+        {key:"stopped", label:"Stopped"},
+      ],
+      projectStatusGroup(status){
+        if(["solved","flag_found"].includes(status)) return "solved";
+        if(status==="running") return "running";
+        if(status==="created") return "created";
+        return "stopped";
+      },
+      projectStatusRank(status){
+        const order={solved:0, running:1, created:2, stopped:3};
+        return order[this.projectStatusGroup(status)] ?? 3;
+      },
+      projectStatusGroupCount(key){
+        return this.projects.filter(project=>this.projectStatusGroup(project.status)===key).length;
+      },
+      toggleProjectStatusFilter(key){
+        this.projectStatusFilter=this.projectStatusFilter.includes(key)
+          ? this.projectStatusFilter.filter(item=>item!==key)
+          : [...this.projectStatusFilter,key];
+      },
+      filteredProjects(){
+        if(!this.projectStatusFilter.length) return this.projects;
+        return this.projects.filter(project=>
+          this.projectStatusFilter.includes(this.projectStatusGroup(project.status)));
       },
       async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },
       async loadProject(id){ this.current = await this.api("GET","/projects/"+id); },
@@ -1683,6 +1847,20 @@
       selectedCompletedWP(){ return this.completedWPs.find(x=>x.project_id===this.selectedCompletedWPId)||this.completedWPs[0]||null; },
       async deriveWP(){ const r=await this.api("POST","/wp/derive"); this.flash("exported: "+r.dir); },
 
+      renderMarkdown(text){
+        const source=(text===null||text===undefined)?"":String(text);
+        if(!source) return "";
+        if(typeof marked==="undefined" || typeof DOMPurify==="undefined"){
+          const escaped=source.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+          return '<p style="white-space:pre-wrap">'+escaped+"</p>";
+        }
+        const html=marked.parse(source,{gfm:true,breaks:true});
+        return DOMPurify.sanitize(html,{
+          FORBID_TAGS:["script","style","iframe","object","embed","form","input"],
+          FORBID_ATTR:["style","srcdoc"],
+          ALLOW_DATA_ATTR:false
+        });
+      },
       async openOpsAgent(){
         this.showOps=true; this.opsResult=null;
         try{
@@ -1701,16 +1879,21 @@
         const data=await this.api("GET","/api/ops/sessions/"+encodeURIComponent(sessionId));
         if(this.opsSessionId!==sessionId) this.opsAttachments=[];
         this.opsSessionId=sessionId; this.opsMessages=data.messages||[];
-        if(!preserveLive || (data.events||[]).length) this.opsLiveEvents=data.events||[];
         const active=data.active_run||null;
         if(active){
           this.opsRunId=active.id; this.opsBusy=true;
           this.opsInterrupting=!!active.cancel_requested;
+          if(!this.opsStreaming && data.active_stream){
+            this.opsAnswer=data.active_stream.text||"";
+            this.opsReasoning=data.active_stream.reasoning||"";
+            if(this.opsReasoning) this.opsReasoningOpen=true;
+          }
         }else if(!this.opsStreaming){
           this.opsRunId=null; this.opsBusy=false; this.opsInterrupting=false;
+          this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[];
         }
+        await this.loadQuestions();
         this.scrollOpsToLatest(false);
-        this.scrollOpsLogsToLatest();
       },
       async pollOpsRun(){
         if(!this.showOps || !this.opsSessionId || !this.opsRunId || this.opsStreaming) return;
@@ -1720,11 +1903,7 @@
           if(this.opsSessionId!==sessionId) return;
           if(!this.opsRunId || this.opsRunId!==runId){
             await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
-            const queued=this.opsQueuedMessage;
-            const queuedAttachments=this.opsQueuedAttachments;
-            this.opsQueuedMessage=null;
-            this.opsQueuedAttachments=[];
-            if(queued){ this.opsInput=queued; this.opsAttachments=queuedAttachments||[]; await this.sendOpsMessage(); }
+            await this.drainOpsNextCalls();
           }
         }catch(error){}
       },
@@ -1740,24 +1919,12 @@
           this.opsAtBottom=true;
         });
       },
-      scrollOpsLogsToLatest(){
-        this.$nextTick(()=>{
-          const element=this.$refs.opsLogs;
-          if(element) element.scrollTop=element.scrollHeight;
-        });
-      },
-      pushOpsLiveEvent(event){
-        if(!event||!event.text) return;
-        const last=this.opsLiveEvents[this.opsLiveEvents.length-1];
-        if(last && last.kind===event.kind && last.label===event.label && (event.kind==='text' || event.kind==='tool-input')){
-          last.text=(last.text||'')+event.text;
-          this.opsLiveEvents=[...this.opsLiveEvents];
-          this.scrollOpsLogsToLatest();
-          return;
-        }
-        this.opsLiveEvents.push({...event,id:"ops-log-"+Date.now()+"-"+this.opsLiveEvents.length});
-        this.scrollOpsLogsToLatest();
-        this.scrollOpsToLatest(true);
+      noteOpsToolEvent(event){
+        if(!event || event.kind!=="tool") return;
+        const label=event.label||"";
+        if(!label.includes("·")) return;
+        const name=label.split("·").pop().trim();
+        if(name) this.opsToolNames.push(name);
       },
       onOpsInputEnter(event){
         if(event.shiftKey || event.isComposing || event.keyCode===229) return;
@@ -1776,7 +1943,7 @@
           if(element) element.style.height="auto";
         });
       },
-      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsLiveEvents=[]; this.opsInput=""; this.opsAttachments=[]; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; this.resetOpsInputHeight(); },
+      newOpsSession(){ this.opsSessionId=null; this.opsMessages=[]; this.opsInput=""; this.opsAttachments=[]; this.opsRunId=null; this.opsNextCalls=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsAtBottom=true; this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[]; this.opsError=""; this.opsRetryMessage=null; this.pendingQuestions=[]; this.resetOpsInputHeight(); },
       removeOpsAttachment(id){ this.opsAttachments=this.opsAttachments.filter(item=>item.id!==id); },
       async uploadOpsFiles(event){
         const files=Array.from(event.target.files||[]); event.target.value="";
@@ -1817,26 +1984,42 @@
       },
       async sendOpsMessage(){
         const message=this.opsInput.trim(); if(!message||!this.opsCfg?.configured) return;
+        const attachments=[...this.opsAttachments];
+        this.opsInput=""; this.resetOpsInputHeight(); this.opsAttachments=[];
         if(this.opsBusy){
-          this.opsQueuedMessage=message;
-          this.opsQueuedAttachments=[...this.opsAttachments];
-          this.opsInput="";
-          this.resetOpsInputHeight();
-          this.opsAttachments=[];
-          await this.interruptOpsRun();
+          this.opsNextCalls.push({id:"next-"+Date.now()+"-"+this.opsNextCalls.length,message,attachments});
           return;
         }
+        await this.runOpsMessage(message,attachments);
+      },
+      removeOpsNextCall(id){ this.opsNextCalls=this.opsNextCalls.filter(item=>item.id!==id); },
+      async drainOpsNextCalls(){
+        if(this.opsBusy || this.opsStreaming || !this.opsNextCalls.length) return;
+        const next=this.opsNextCalls.shift();
+        await this.runOpsMessage(next.message,next.attachments||[],next.display);
+      },
+      retryOpsMessage(){
+        const pending=this.opsRetryMessage; if(!pending) return;
+        this.opsError=""; this.opsRetryMessage=null;
+        this.runOpsMessage(pending.message,pending.attachments||[],pending.display);
+      },
+      opsStatusLine(){
+        if(!this.opsBusy) return this.opsToolNames.length?("Used "+this.opsToolNames.length+" tool"+(this.opsToolNames.length===1?"":"s")):"Done";
+        const seconds=this.opsRunStartedAt?Math.max(0,Math.round((this.nowMs-this.opsRunStartedAt)/1000)):0;
+        const label=this.opsToolNames.length?("Running tools ("+this.opsToolNames.length+")"):"Working";
+        return label+" · "+seconds+"s";
+      },
+      async runOpsMessage(message,attachments,displayOverride){
         this.opsBusy=true;
         this.opsStreaming=true;
         this.opsInterrupting=false; this.opsRunId=null;
-        if(!this.opsSessionId) this.opsLiveEvents=[];
-        const attachments=[...this.opsAttachments]; this.opsAttachments=[];
-        const displayMessage=attachments.length?message+"\n\n[Attached: "+attachments.map(item=>item.filename).join(", ")+"]":message;
+        this.opsError=""; this.opsRetryMessage=null;
+        this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[]; this.opsReasoningOpen=true;
+        this.opsRunStartedAt=Date.now();
+        const displayMessage=displayOverride||(attachments.length?message+"\n\n[Attached: "+attachments.map(item=>item.filename).join(", ")+"]":message);
         const temporary={id:"temp-"+Date.now(),role:"user",content:displayMessage,created_at:new Date().toISOString()};
         this.opsMessages.push(temporary);
         this.scrollOpsToLatest(true);
-        this.opsInput="";
-        this.resetOpsInputHeight();
         try{
           const legacyOpsChatPath="/api/ops/chat";
           const chatPayload={message,session_id:this.opsSessionId,attachments:attachments.map(item=>item.id),workflow_id:this.opsWorkflowId};
@@ -1859,7 +2042,12 @@
               this.opsRunId=event.run_id;
               if(this.opsInterrupting) this.interruptOpsRun();
             }
-            else if(event.type==="log") this.pushOpsLiveEvent(event.event);
+            else if(event.type==="delta"){ this.opsAnswer+=event.text||""; this.opsReasoningOpen=false; if(this.opsAtBottom) this.scrollOpsToLatest(false); }
+            else if(event.type==="thinking"){ this.opsReasoning+=event.text||""; if(this.opsAtBottom) this.scrollOpsToLatest(false); }
+            else if(event.type==="log"){
+              this.noteOpsToolEvent(event.event);
+              this.loadQuestions().catch(()=>{});
+            }
             else if(event.type==="complete") completed=event.response;
             else if(event.type==="error") throw new Error(event.error||"IPC stream failed");
           };
@@ -1880,16 +2068,19 @@
           const responseData=completed;
           this.opsSessionId=responseData.session_id||this.opsSessionId;
           await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+          this.opsAnswer=""; this.opsReasoning="";
           await this.selectOpsSession(responseData.session_id,true);
           if(responseData.proposal_error) this.flash(responseData.proposal_error);
           if((responseData.proposals||[]).length){ this.opsWorkflowId=responseData.proposals[0].id; this.opsConfirmInput=""; }
         }catch(error){
           this.opsMessages=this.opsMessages.filter(item=>item!==temporary);
-          this.flash(error.message||"IPC stream failed");
+          this.opsAnswer=""; this.opsReasoning="";
+          this.opsError=error.message||"IPC stream failed";
+          this.opsRetryMessage={message,attachments};
         }finally{
-          const queued=this.opsQueuedMessage, queuedAttachments=this.opsQueuedAttachments;
-          this.opsBusy=false; this.opsStreaming=false; this.opsInterrupting=false; this.opsRunId=null; this.opsQueuedMessage=null; this.opsQueuedAttachments=[];
-          if(queued){ this.opsInput=queued; this.opsAttachments=queuedAttachments||[]; await this.sendOpsMessage(); }
+          this.opsBusy=false; this.opsStreaming=false; this.opsInterrupting=false; this.opsRunId=null;
+          this.opsToolNames=[];
+          await this.drainOpsNextCalls();
         }
       },
       async loadOpsWorkflows(){
@@ -1936,9 +2127,6 @@
         if(connectEvents||changed){ this.connectCompetitionEvents(runId); this.connectSessionEvents(); }
       },
       async loadSessionHealth(){
-        // Health is read separately from the run snapshot because it answers a
-        // different question: the run can be perfectly healthy while a Member
-        // has been silent for twenty minutes.
         try{
           const data=await this.api("GET","/api/agent/sessions?kind=competition");
           this.sessionHealth=data.sessions||[];
@@ -1953,8 +2141,6 @@
         if(!item?.assignment) return "bg-slate-200";
         const health=this.memberSessionHealth(item);
         if(!health) return "bg-slate-300";
-        // The four facts the single green dot used to merge: a worker that is
-        // gone reads differently from one that is merely quiet.
         if(health.health==="handoff") return "bg-rose-500";
         if(health.health==="cancel") return "bg-orange-500";
         if(health.health==="diagnose") return "bg-amber-400";
@@ -1975,8 +2161,6 @@
         const health=this.memberSessionHealth(item);
         if(!health) return "";
         const quiet=Number(health.quiet_seconds||0);
-        // A running job is why a working session looks idle; say so rather
-        // than showing a quiet timer that implies something is wrong.
         if(health.running_jobs>0) return health.running_jobs+" job"+(health.running_jobs>1?"s":"")+" running";
         return "quiet "+this.formatQuietSeconds(quiet);
       },
@@ -1989,18 +2173,12 @@
         return "text-slate-400";
       },
       formatQuietSeconds(seconds){
-        // Distinct from formatDuration, which takes milliseconds and renders
-        // hh:mm:ss for the project timer. Quiet time is a glance value on a
-        // small card, so it reads as "3m" rather than "00:03:12".
         const total=Math.max(0,Math.floor(Number(seconds)||0));
         if(total<60) return total+"s";
         if(total<3600) return Math.floor(total/60)+"m";
         return Math.floor(total/3600)+"h "+Math.floor((total%3600)/60)+"m";
       },
       mergedEvents(){
-        // Run events and session events are merged by time, not concatenated:
-        // the question an operator asks is "what happened next", regardless of
-        // which stream it came from.
         const run=this.eventSourceFilter==="session"?[]:this.competitionEvents.map(item=>({
           ...item, source:"run", stream_key:"run:"+item.event_id,
         }));
@@ -2021,8 +2199,6 @@
         const sourceToken=++this.sessionEventSourceToken;
         if(this.sessionEventSource){ this.sessionEventSource.close(); this.sessionEventSource=null; }
         if(this.sessionReconnectTimer){ clearTimeout(this.sessionReconnectTimer); this.sessionReconnectTimer=null; }
-        // One connection for every competition session, not one per Member:
-        // the global event id makes the whole scope a single ordered scan.
         const after=this.sessionEventCursor>0?"&after="+encodeURIComponent(this.sessionEventCursor):"";
         const source=new EventSource("/api/agent/events?kind=competition"+after);
         const onEvent=(event)=>{
@@ -2155,6 +2331,77 @@
         this.opsWorkflows=this.opsWorkflows.map(item=>item.id===workflow.id?response.workflow:item);
         this.opsConfirmInput=""; this.flash("workflow authorized");
       },
+      async authorizeOpsWorkflow(){
+        const workflow=this.selectedOpsWorkflow(); if(!workflow||this.opsWorkflowBusy) return;
+        this.opsWorkflowBusy=true; this.opsConfirmError="";
+        try{
+          const preview=await this.api("GET","/api/ops/workflows/"+workflow.id+"/confirmation");
+          this.opsConfirmMissing={...this.opsConfirmMissing,[workflow.id]:preview.missing_secrets||[]};
+          if((preview.missing_secrets||[]).length){
+            this.opsConfirmError="Set the missing workflow secrets first: "+preview.missing_secrets.join(", ");
+            return;
+          }
+          this.opsConfirmInput=preview.confirmation_phrase;
+          await this.confirmOpsWorkflow();
+        }catch(error){
+          this.opsConfirmError=error.message||"authorization failed";
+        }finally{
+          this.opsConfirmInput=""; this.opsWorkflowBusy=false;
+        }
+      },
+      async deleteOpsWorkflow(workflow){
+        if(!workflow||this.opsWorkflowBusy) return;
+        if(!confirm("Delete workflow \""+workflow.name+"\"?\n\nIts stored secrets and the execution capability are removed. Imported projects and competition runs are not deleted.")) return;
+        this.opsWorkflowBusy=true;
+        try{
+          await this.api("DELETE","/api/ops/workflows/"+encodeURIComponent(workflow.id));
+          const tokens={...this.workflowTokens}; delete tokens[workflow.id]; this.workflowTokens=tokens;
+          if(this.opsWorkflowId===workflow.id){ this.opsWorkflowId=null; this.opsResult=null; this.opsConfirmInput=""; }
+          if(this.competitionWorkflowId===workflow.id) this.competitionWorkflowId="";
+          await this.loadOpsWorkflows();
+          this.flash("workflow deleted");
+        }catch(error){
+          this.flash(error.message||"could not delete the workflow");
+        }finally{ this.opsWorkflowBusy=false; }
+      },
+      opsStartSelection(){
+        const wanted=this.projectStatusFilter.length?this.filteredProjects():this.projects;
+        return wanted
+          .filter(project=>!["solved","flag_found"].includes(project.status))
+          .map(project=>project.external_id)
+          .filter(Boolean);
+      },
+      opsStartSelectionLabel(){
+        const selection=this.opsStartSelection();
+        if(!this.projectStatusFilter.length) return "all unsolved challenges";
+        return selection.length+" selected";
+      },
+      opsStartBlockedReason(){
+        const workflow=this.selectedOpsWorkflow();
+        if(!workflow) return "Select a workflow first.";
+        if(workflow.status!=="confirmed") return "Authorize the workflow first.";
+        if(!this.workflowTokens[workflow.id]) return "The execution capability is held per browser tab: authorize again in this tab.";
+        return "";
+      },
+      opsStartReady(){ return !this.opsStartBlockedReason(); },
+      async startOpsRun(){
+        const workflow=this.selectedOpsWorkflow();
+        if(!workflow||!this.opsStartReady()||this.opsStartBusy) return;
+        this.opsStartBusy=true; this.opsStartError="";
+        try{
+          await this.api("POST","/api/workflows/"+encodeURIComponent(workflow.id)+"/preflight");
+          const random=(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+Math.random().toString(36).slice(2));
+          const payload={idempotency_key:"ui-"+random};
+          const selection=this.projectStatusFilter.length?this.opsStartSelection():[];
+          if(selection.length) payload.select=selection;
+          this.competitionRun=await this.api("POST","/api/workflows/"+encodeURIComponent(workflow.id)+"/start",payload);
+          this.competitionWorkflowId=workflow.id;
+          await Promise.all([this.loadProjects(),this.loadCompetitionRuns()]);
+          this.flash("competition run started");
+        }catch(error){
+          this.opsStartError=error.message||"could not start the run";
+        }finally{ this.opsStartBusy=false; }
+      },
       async executeOpsWorkflow(operation){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
         const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
@@ -2207,20 +2454,33 @@
         </div>`;
       },
       _edits: {},
-      pendingQuestions: [], questionAnswer: "", questionBusy: false, questionError: "",
+      pendingQuestions: [], questionAnswers: {}, questionBusy: false, questionError: "",
       async loadQuestions(){
-        const result=await this.api("GET","/questions?session_id="+encodeURIComponent(this.opsSessionId));
-        this.pendingQuestions=result.questions;
+        if(!this.opsSessionId){ this.pendingQuestions=[]; return; }
+        try{
+          const result=await this.api("GET","/questions?session_id="+encodeURIComponent(this.opsSessionId));
+          this.pendingQuestions=result.questions||[];
+        }catch(error){ this.pendingQuestions=[]; }
       },
-      async answerQuestion(){
-        if(this.questionBusy||!this.pendingQuestions.length||!this.questionAnswer.trim()) return;
-        const question=this.pendingQuestions[0];
+      async answerQuestion(questionId){
+        const question=this.pendingQuestions.find(item=>item.id===questionId)||this.pendingQuestions[0];
+        if(this.questionBusy||!question) return;
+        const value=(this.questionAnswers[question.id]||"").trim();
+        if(!value) return;
         this.questionBusy=true; this.questionError="";
         try{
-          await this.api("POST","/questions/"+question.id+"/answer",{session_id:this.opsSessionId,value:this.questionAnswer});
-          this.questionAnswer=""; await this.loadQuestions();
-          this.opsInput="Question "+question.id+" has been answered. Resume the dependent operation by reading the answer with its original operation key.";
-          await this.sendOpsMessage();
+          await this.api("POST","/questions/"+question.id+"/answer",{session_id:this.opsSessionId,value});
+          delete this.questionAnswers[question.id];
+          await this.loadQuestions();
+          const shown=question.sensitive?"******":value;
+          this.opsNextCalls.push({
+            id:"answer-"+question.id,
+            message:"已回答问题「"+question.title+"」："+shown
+              +"\n\n请使用该问题原本的 operation key 读取答案，并继续之前的操作。",
+            attachments:[]
+          });
+          await this.drainOpsNextCalls();
+          this.scrollOpsToLatest(true);
         }catch(error){ this.questionError=error.message; }
         finally{ this.questionBusy=false; }
       },

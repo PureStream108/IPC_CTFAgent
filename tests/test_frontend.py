@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.server.app import create_app
 from tests.helpers import write_mock_config
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -22,7 +28,6 @@ def test_index_served(client):
     assert r.status_code == 200
     body = r.text
     assert "ipcApp" in body
-    # IPC branding + key UI elements present
     assert "CTF_Agent" in body
     assert "BROADCAST" in body
     assert "Logs" in body
@@ -40,11 +45,45 @@ def test_index_served(client):
     assert 'await this.authRequest("POST","/auth/setup"' not in body
     assert 'await this.authRequest("POST","/auth/login"' not in body
     assert "OpenAI-compatible action agent with durable IPC history" not in body
-    # The Claude Code sidecar was removed: it must not be offerable as a format.
     assert "claudecode" not in body
     assert "Claude Code" not in body
     assert "OpenAI-compatible API" in body
-    assert "IPC live log" in body
+    assert "IPC live log" not in body
+    assert "opsLiveEvents" not in body
+    assert "opsStatusLine()" in body
+    assert "noteOpsToolEvent" in body
+    assert 'event.type==="delta"' in body
+    assert 'event.type==="thinking"' in body
+    assert "opsReasoningOpen" in body
+    assert "renderMarkdown" in body
+    assert "DOMPurify.sanitize" in body
+    assert "marked.min.js" in body
+    assert "purify.min.js" in body
+    assert "opsNextCalls" in body
+    assert "drainOpsNextCalls" in body
+    assert "await this.interruptOpsRun();\r\n          return;" not in body
+    assert "questionAnswers[question.id]" in body
+    assert "has been answered. Resume the dependent operation" not in body
+    assert "已回答问题" in body
+    assert "Project phase: " in body
+    assert "IPC startup: " not in body
+    assert "deleteOpsWorkflow" in body
+    assert "authorizeOpsWorkflow" in body
+    assert "/confirmation" in body
+    assert "opsConfirmMissing" in body
+    assert 'placeholder="confirmation phrase"' not in body
+    assert "Review every URL, method and template above, then type:" not in body
+    assert "startOpsRun" in body
+    assert "opsStartBlockedReason" in body
+    assert "/preflight" in body
+    assert "payload.select=selection" in body
+    assert "projectStatusFilter" in body
+    assert "filteredProjects()" in body
+    assert "projectStatusGroup(status)" in body
+    assert "projectStatusRank" in body
+    assert "s === 'completed'" not in body
+    for label in ("Solved", "Running", "Created", "Stopped"):
+        assert label in body
     assert "Archived" in body
     assert "Interrupt IPC" in body
     assert "/api/ops/chat/interrupt" in body
@@ -85,12 +124,8 @@ def test_index_served(client):
     assert "/memory/catalog" in body
     assert "打开 Markdown" in body
     assert "Add Hint" in body
-    # dagre remains the hidden graph layout engine
     assert "cytoscape-dagre.js" in body
     assert "name:'dagre'" in body
-    # Origin is a symbolic entry icon: Origin -> IPC -> Diamond. Member-owned
-    # root intents render from the Member, and later Member assignments attach
-    # back into the existing fact graph through context edges.
     assert 'id:"origin_ipc",source:"fact:origin",target:"ipc"' in body
     assert "for(const a of d.agents)" in body
     assert "memberForIntent(intent)" in body
@@ -108,39 +143,45 @@ def test_index_served(client):
     assert 'etype:"producer"' not in body
     assert 'etype:kind' in body
     assert 'taxi-direction' not in body
-    # Session-level observability (P6). The console used to render four
-    # different facts as one green dot: API up, coordinator ticking, worker
-    # holding the seat, and the task actually progressing. Each is now
-    # separately visible, and the dot reflects the watchdog's own verdict so
-    # the UI cannot disagree with the system about a stalled session.
     assert '"/api/agent/sessions?kind=competition"' in body
     assert '"/api/agent/events?kind=competition"' in body
     assert "memberHealthDot(item)" in body
     assert "memberActivity(item)" in body
     assert "loadSessionHealth" in body
     assert "connectSessionEvents" in body
-    # Run and session events merge by time rather than being concatenated.
     assert "mergedEvents()" in body
     assert "eventSourceFilter" in body
-    # A session with a running job is quiet on purpose, so it must not be
-    # presented as a problem.
     assert "health.running_jobs>0" in body
-    # Quiet time has its own formatter: the pre-existing formatDuration takes
-    # milliseconds and renders hh:mm:ss, so reusing that name silently shadowed
-    # this one and printed "00:00:00" for every card.
     assert "formatQuietSeconds" in body
     assert body.count("formatDuration(ms)") == 1
-    # The graded watchdog outcomes are visible in the run stream.
     for kind in ("assignment.stalled", "session.handed_off", "session.diagnose"):
         assert kind in body
-    # category options
     for cat in ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint"):
         assert cat in body
-    # attachment upload label
     assert "ATTACHMENT" in body
 
 
 def test_static_assets(client):
     for path in ("/static/vendor/cytoscape.min.js", "/static/vendor/dagre.min.js",
-                 "/static/vendor/cytoscape-dagre.js", "/static/vendor/alpine.min.js", "/static/ipc.png"):
+                 "/static/vendor/cytoscape-dagre.js", "/static/vendor/alpine.min.js",
+                 "/static/vendor/marked.min.js", "/static/vendor/purify.min.js",
+                 "/static/ipc.png"):
         assert client.get(path).status_code == 200
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_ops_chat_helpers_behave():
+    """Execute the chat helpers instead of only asserting that markup exists.
+
+    The assertions above cannot catch a logic error, which is how a
+    duplicate-name helper once silently shadowed a working one. This runs the
+    markdown renderer and the nextcall queue for real.
+    """
+    result = subprocess.run(
+        ["node", str(REPO_ROOT / "tests/js/ops_chat_checks.mjs"), str(REPO_ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip().endswith("ok")
