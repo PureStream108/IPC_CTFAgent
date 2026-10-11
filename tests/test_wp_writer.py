@@ -117,3 +117,40 @@ def test_final_writer_requires_the_verified_flag_and_python_script(state):
             expected_flag="flag{writer_test}",
             require_complete=True,
         )
+
+
+def test_writeup_prompts_require_chinese_prose(state):
+    """The operator asked for Chinese writeups, so the prompts must say so."""
+    from backend.core.wp_writer import (
+        WRITEUP_SYSTEM_PROMPT,
+        _repair_prompt,
+        _writeup_prompt,
+    )
+
+    assert "中文" in WRITEUP_SYSTEM_PROMPT
+    for constraint in ("不可信", "不要执行", "绝不编造", "cookie"):
+        assert constraint in WRITEUP_SYSTEM_PROMPT
+
+    project_id = _project(state)
+    with state.db.connect() as connection:
+        detail = graph_store.project_detail(connection, project_id)
+
+    prompt = _writeup_prompt(detail, {})
+    assert "中文" in prompt
+    assert "按原样保留" in prompt
+    assert "```json" in prompt
+
+    repair = _repair_prompt(detail, "previous", ["writeup is too short"])
+    assert "中文" in repair
+    assert detail.project.flag in repair
+
+
+def test_evidence_redaction_covers_chinese_credential_labels():
+    """Chinese prose means Chinese labels in front of captured credentials."""
+    from backend.core.wp_writer import _redact_text
+
+    assert _redact_text("password: hunter2") == "password:[REDACTED]"
+    assert _redact_text("口令：hunter2") == "口令：[REDACTED]"
+    assert _redact_text("密钥: AKIAEXAMPLE") == "密钥:[REDACTED]"
+    assert _redact_text("令牌 = abc123") == "令牌=[REDACTED]"
+    assert _redact_text("这道题需要爆破口令") == "这道题需要爆破口令"

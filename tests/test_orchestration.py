@@ -80,7 +80,7 @@ def test_lifecycle_transitions(state):
     assert lc.status(pid) == "running"
     lc.transition(pid, "flag_found")
     with pytest.raises(LifecycleError):
-        lc.transition(pid, "completed")  # project states end at solved
+        lc.transition(pid, "completed")
 
 
 def test_diamond_initial_assignment(state):
@@ -100,17 +100,16 @@ def test_diamond_initial_assignment(state):
 def test_diamond_reinforcements_on_high_difficulty(state):
     pid = _make_project(state)
     d = Diamond(state.db, state.config, state.logger)
-    d.assign_initial(pid)  # aventurine active
+    d.assign_initial(pid)
     with state.db.connect() as conn:
         report = graph_store.create_report(
             conn, pid, "aventurine", "stuck on auth", "high", "origin",
             ["recon done"], ["try jwt forge", "try sqli", "try ssti"], ["web"],
         )
     assignments = d.decide_reinforcements(pid, report)
-    # high difficulty -> up to 3, but capped by idle members (3 remaining)
     assert 1 <= len(assignments) <= 3
     names = {a.member for a in assignments}
-    assert "aventurine" not in names  # initial member already active
+    assert "aventurine" not in names
 
 
 def test_diamond_reinforcement_dedupes_duplicate_directions(state):
@@ -163,11 +162,18 @@ def test_full_solve_pipeline_to_solved(state):
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "web")
-    orch = Orchestrator(state, max_workers=4)
+    scripts = {
+        "aventurine": [
+            {"action": "bash", "command": "echo recon on web challenge"},
+            {"action": "memory", "query": "web capture the flag"},
+            {"action": "flag", "flag": "flag{mock_solved}",
+             "description": "Captured flag via the scripted mock arc."},
+        ],
+    }
+    orch = Orchestrator(state, max_workers=4, scripts=scripts)
     state.orchestrator = orch
     orch.start_project(pid)
     orch.wait(pid, timeout=20)
-    # Flag verification is synchronous; postprocess remains asynchronous.
     for _ in range(40):
         if Lifecycle(state.db).status(pid) == "solved":
             break
@@ -189,7 +195,6 @@ def test_full_solve_pipeline_to_solved(state):
     assert row["wp_path"]
     assert row["postprocess_status"] == "completed"
     assert any(b.project_id == pid for b in broadcasts)
-    # WP file exists
     assert Path(row["wp_path"]).exists()
     assert Path(row["wp_path"]).name == "Demo.md"
     wp_content = Path(row["wp_path"]).read_text(encoding="utf-8")
@@ -199,13 +204,11 @@ def test_full_solve_pipeline_to_solved(state):
     assert (state.wp_export_dir / "Demo.md").is_file()
     for folder in state.logger.KINDS.values():
         assert (state.log_export_dir / folder / "Demo.log").is_file()
-    # memory was written (4 categories may not all fill, but at least exploit+knowledge)
     assert len(state.memory.all()) >= 1
-    # completion graph links
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
     kinds = {link.kind for link in detail.agent_links}
-    assert "return" in kinds  # Diamond -> IPC
+    assert "return" in kinds
     orch.shutdown()
     state.orchestrator = None
 
@@ -224,8 +227,6 @@ def test_postprocess_worker_fencing_rejects_stale_completion(state):
             "WHERE id = %s",
             (stale.id,),
         )
-        # Expiry itself fences the worker; recovery/reclaim is not required to
-        # make the stale token invalid.
         assert complete_job(conn, stale) is False
         assert complete_existing_job(
             conn, pid, stale.kind, lease_token=stale.lease_token
@@ -245,7 +246,6 @@ def test_postprocess_worker_fencing_rejects_stale_completion(state):
         assert replacement.id == stale.id
         assert replacement.lease_token != stale.lease_token
 
-        # The old token is fenced even though the old worker knows the job id.
         assert complete_job(conn, stale) is False
         row = conn.execute(
             "SELECT status, locked_by, lease_token FROM postprocess_jobs WHERE id = %s",
@@ -274,7 +274,6 @@ def test_reinforcement_pipeline_with_scripts(state):
     from backend.core.orchestrator import Orchestrator
 
     pid = _make_project(state, "crypto")
-    # aventurine: report high difficulty then flag
     scripts = {
         "aventurine": [
             {"action": "report", "progress": "hard rsa", "difficulty": "high",
@@ -293,7 +292,6 @@ def test_reinforcement_pipeline_with_scripts(state):
     assert Lifecycle(state.db).status(pid) == "solved"
     with state.db.connect() as conn:
         detail = graph_store.project_detail(conn, pid)
-    # reinforcements were assigned (more than just aventurine got an assign link)
     assigned = {link.dst for link in detail.agent_links if link.kind == "assign"}
     assert len(assigned) >= 2
     assert detail.project.flag == "flag{rsa_pwned}"
@@ -789,8 +787,6 @@ def test_non_retryable_member_failure_is_not_requeued(state):
     key = (pid, intent.id)
     with orch._lock:
         orch._task_index[key] = future
-        # Simulate an earlier transient failure. The terminal result must
-        # clear this stale backoff as well as avoid scheduling a new one.
         orch._member_failure_counts[key] = 1
         orch._member_retry_not_before[key] = time.monotonic() + 60
 
@@ -825,8 +821,6 @@ def test_repeated_stalls_defer_original_intent_and_dispatch_alternative(state):
 
     orch = Orchestrator(state, max_workers=1)
     for _ in range(orch._MAX_CONSECUTIVE_STALLS):
-        # Mirror the real dispatch path: the worker claims the intent with a
-        # lease, then finishes stalled, and the reaper releases the claim.
         with state.db.connect() as conn:
             token = edge_store.claim_intent(conn, pid, stalled.id, "aventurine")
             assert token
@@ -864,3 +858,139 @@ def test_repeated_stalls_defer_original_intent_and_dispatch_alternative(state):
         for entry in entries
     )
     orch.shutdown()
+
+
+def test_legacy_block_logging_is_rate_limited(state):
+    """T8: a hot legacy-block loop collapses to one line per backoff window.
+
+    While a competition owns a project every legacy dispatch attempt is
+    rejected; logging each one produced thousands of identical lines.  The
+    first attempt logs, subsequent ones inside the window are suppressed, and
+    the suppressed attempts surface as a running ``attempts`` count.
+    """
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    orch = Orchestrator(state, max_workers=1)
+    try:
+        for _ in range(50):
+            orch._log_legacy_block(pid, "jade", "intent-1")
+        entries = [
+            e for e in state.logger.read_log("project", pid, None)
+            if e["event"] == "legacy_member_blocked_by_competition"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["attempts"] == 1
+        assert entries[0]["member"] == "jade"
+
+        orch._log_legacy_block(pid, "topaz", "intent-2")
+        entries = [
+            e for e in state.logger.read_log("project", pid, None)
+            if e["event"] == "legacy_member_blocked_by_competition"
+        ]
+        assert len(entries) == 2
+    finally:
+        orch.shutdown()
+
+
+def test_engine_lease_conflict_logging_is_rate_limited(state):
+    """T4: a stop-window engine-lease race collapses to one line per project.
+
+    Several instances racing for the same project lease and losing used to log
+    engine_lease_conflict on every tick, producing the storm T4 flags. The
+    shared throttle emits the first loss, folds the rest into an attempt count,
+    and tracks a second project independently.
+    """
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    other = _make_project(state, "pwn")
+    orch = Orchestrator(state, max_workers=1)
+    try:
+        for _ in range(40):
+            orch._throttled_log(
+                "engine_lease_conflict", pid, pid,
+                requested_kind="competition", requested_owner="inst-a",
+            )
+        entries = [
+            e for e in state.logger.read_log("project", pid, None)
+            if e["event"] == "engine_lease_conflict"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["attempts"] == 1
+
+        orch._throttled_log(
+            "engine_lease_conflict", other, other,
+            requested_kind="competition", requested_owner="inst-a",
+        )
+        other_entries = [
+            e for e in state.logger.read_log("project", other, None)
+            if e["event"] == "engine_lease_conflict"
+        ]
+        assert len(other_entries) == 1
+    finally:
+        orch.shutdown()
+
+
+def _link_project_to_competition_run(state, project_id, *, status, suffix):
+    """Insert the minimal competition rows linking a project to a run status."""
+    import json
+
+    with state.db.connect() as conn:
+        conn.execute(
+            """INSERT INTO workflows
+               (id,source,name,spec_json,spec_digest,status,created_at,updated_at)
+               VALUES (%s,'test',%s,%s,%s,'confirmed',now(),now())
+               ON CONFLICT (id) DO NOTHING""",
+            (f"wf-{suffix}", f"wf {suffix}", json.dumps({}), f"dig-{suffix}"),
+        )
+        run_id = f"run-{suffix}"
+        conn.execute(
+            """INSERT INTO competition_runs
+               (id,workflow_id,identity_key,idempotency_key,status,config_snapshot)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
+            (run_id, f"wf-{suffix}", f"id-{suffix}", f"idem-{suffix}", status,
+             json.dumps({})),
+        )
+        challenge_id = f"ch-{suffix}"
+        conn.execute(
+            """INSERT INTO competition_challenges
+               (id,identity_key,external_id,run_id,project_id)
+               VALUES (%s,%s,%s,%s,%s)""",
+            (challenge_id, f"id-{suffix}", f"ext-{suffix}", run_id, project_id),
+        )
+        conn.execute(
+            """INSERT INTO competition_run_challenges (run_id,challenge_id)
+               VALUES (%s,%s)""",
+            (run_id, challenge_id),
+        )
+    return run_id
+
+
+def test_stopped_run_projects_are_not_resurrected_by_recovery(state):
+    """T4: a project whose only competition run has stopped is terminal.
+
+    The generic recovery loop must skip it: the coordinator already tore its
+    seat down, so a lingering ``running`` graph status is stale and reviving a
+    session would restart work the operator stopped. A project under a live run
+    stays coordinator-owned (active), and a plain non-competition project is
+    neither.
+    """
+    from backend.core.orchestrator import Orchestrator
+
+    stopped_pid = _make_project(state, "web")
+    active_pid = _make_project(state, "pwn")
+    plain_pid = _make_project(state, "rev")
+    _link_project_to_competition_run(state, stopped_pid, status="stopped", suffix="s")
+    _link_project_to_competition_run(state, active_pid, status="running", suffix="a")
+
+    orch = Orchestrator(state, max_workers=1)
+    try:
+        with state.db.connect() as conn:
+            active, terminal = orch._competition_project_ownership(conn)
+        assert stopped_pid in terminal
+        assert active_pid in active
+        assert stopped_pid not in active
+        assert plain_pid not in active and plain_pid not in terminal
+    finally:
+        orch.shutdown()

@@ -79,9 +79,6 @@ class Orchestrator:
     _MAX_CONSECUTIVE_STALLS = 3
     _STALL_DEFER_SECONDS = 180
     _POSTPROCESS_LEASE_SECONDS = 120
-    # Consecutive platform-verdict failures (rate limit, network, judge poll
-    # timeout) tolerated before the candidate is parked as ``error`` and the
-    # project resumes solving instead of retrying forever.
     _VERDICT_MAX_UNKNOWN_ATTEMPTS = 3
 
     def __init__(self, state, max_workers: int | None = None, scripts: dict | None = None):
@@ -104,9 +101,6 @@ class Orchestrator:
             thread_name_prefix="ipc-startup",
         )
         self._members: dict[str, dict[str, Any]] = {}
-        # Member identities are global competition seats, not per-project
-        # resources.  Startup reservations close the race between concurrent
-        # project bootstrap workers before the Member object is registered.
         self._reserved_members: set[str] = set()
         self._futures: dict[str, list] = {}
         self._task_index: dict[tuple[str, str], Any] = {}
@@ -120,10 +114,6 @@ class Orchestrator:
         self._member_retry_not_before: dict[tuple[str, str], float] = {}
         self._member_stall_counts: dict[tuple[str, str], int] = {}
         self._project_leases: dict[str, str] = {}
-        # A separate scheduler fence prevents this legacy engine from racing
-        # the competition coordinator while both can still see the same
-        # durable Project row.  Competition workers use the coordinator's
-        # owner token through ``state.competition_engine_owner``.
         self._engine_leases: dict[str, tuple[str, str, int]] = {}
         self._engine_owner = f"{state.instance_id}:legacy"
         self._intent_leases: dict[tuple[str, str], IntentLease] = {}
@@ -133,7 +123,12 @@ class Orchestrator:
         self._postprocess_future: Any | None = None
         self._verdict_unknown_attempts: dict[str, int] = {}
         self._verdict_deferred_logged: set[str] = set()
-        # optional per-(project,member) scripts for deterministic tests
+        self._legacy_block_counts: dict[tuple[str, str, str], int] = {}
+        self._legacy_block_next_log: dict[tuple[str, str, str], float] = {}
+        self._legacy_block_emitted_counts: dict[tuple[str, str, str], int] = {}
+        self._throttle_counts: dict[tuple[str, str], int] = {}
+        self._throttle_next_log: dict[tuple[str, str], float] = {}
+        self._throttle_emitted: dict[tuple[str, str], int] = {}
         self.scripts = scripts or {}
 
     def start(self) -> None:
@@ -149,9 +144,6 @@ class Orchestrator:
         if self._loop_thread and self._loop_thread.is_alive():
             self._loop_thread.join()
 
-        # A startup worker can create a Member, so let all running startup work
-        # finish before taking the final Member snapshot.  Waiting for both
-        # executors guarantees AppState may close its database pool afterwards.
         self.startup_executor.shutdown(wait=True, cancel_futures=True)
         self._stop_members()
         self.executor.shutdown(wait=True, cancel_futures=True)
@@ -166,14 +158,12 @@ class Orchestrator:
         for m in members:
             m.stop()
 
-    # ---- project category helper ----
 
     def _category(self, project_id: str) -> str:
         with self.state.db.connect() as conn:
             row = graph_store.get_project_row(conn, project_id)
             return row["category"] if row else "misc"
 
-    # ---- start solving ----
 
     def start_project_async(self, project_id: str) -> dict[str, str | None]:
         """Queue slow Docker/bootstrap work without blocking an HTTP or MCP call."""
@@ -182,8 +172,6 @@ class Orchestrator:
             raise RuntimeError("orchestrator is shutting down")
 
         if self._competition_project(project_id) and not self._competition_running(project_id):
-            # A paused/blocked run owns this Project.  Its coordinator must
-            # Resume first; a direct legacy Start cannot revive solver work.
             return self.runtime_status(project_id)
 
         status = self.lifecycle.status(project_id)
@@ -195,10 +183,6 @@ class Orchestrator:
             with self._lock:
                 already_owned = project_id in self._project_leases
             if already_owned:
-                # The competition coordinator re-issues Start when a durable
-                # seat has no live Member (its previous task ended).  A plain
-                # no-op here strands the seat forever, so reconcile open
-                # intents with their idle seat holders instead.
                 self._submit_redispatch(project_id)
                 return self.runtime_status(project_id)
             if not self._ensure_project_lease(project_id):
@@ -262,9 +246,6 @@ class Orchestrator:
         if self._competition_project(project_id):
             owner = getattr(self.state, "competition_engine_owner", None)
             if not owner:
-                # During an incremental migration the coordinator may not yet
-                # be attached.  Fail closed instead of letting the old engine
-                # claim a project that belongs to an active competition.
                 return None
             return "competition", str(owner)
         return "legacy", self._engine_owner
@@ -280,13 +261,10 @@ class Orchestrator:
                 seconds=max(30, self.state.config.runtime.interval * 6),
             )
         except (UndefinedColumn, UndefinedTable):
-            # Old databases can be opened briefly before the additive schema
-            # patch runs.  Preserve legacy startup compatibility in that
-            # narrow window; once the column exists, conflicts are fail-closed.
             return True
         if lease is None:
-            self.state.logger.project(
-                "engine_lease_conflict", project_id,
+            self._throttled_log(
+                "engine_lease_conflict", project_id, project_id,
                 requested_kind=kind, requested_owner=owner,
             )
             return False
@@ -308,8 +286,6 @@ class Orchestrator:
                 self.state.db, project_id, context[0], context[1], epoch=context[2]
             )
         except Exception:
-            # Shutdown/recovery must not mask the primary project cleanup
-            # failure.  The bounded lease expiry still fences stale work.
             return
 
     def _ensure_project_lease(self, project_id: str) -> bool:
@@ -797,7 +773,6 @@ class Orchestrator:
             )
             raise
 
-    # ---- reinforcements ----
 
     def handle_report(self, project_id: str, report) -> None:
         if self.lifecycle.status(project_id) != "running":
@@ -921,8 +896,6 @@ class Orchestrator:
                 )
                 competition.publish_recon(message)
         except Exception as exc:
-            # Collaboration is useful but must never make the primary graph
-            # report fail. The durable event/log still exposes the reason.
             self.state.logger.project(
                 "competition_recon_publish_failed",
                 project_id,
@@ -971,7 +944,6 @@ class Orchestrator:
                 targets=bumped,
             )
 
-    # ---- member execution ----
 
     def _member_config(self, name: str):
         for m in self.state.config.members:
@@ -991,8 +963,6 @@ class Orchestrator:
                     (project_id,),
                 ).fetchone())
         except Exception:
-            # The legacy engine must remain usable during the first migration
-            # boot, before the competition tables exist.
             return False
 
     def _competition_running(self, project_id: str) -> bool:
@@ -1039,8 +1009,6 @@ class Orchestrator:
                 ).fetchone()
             return row["member"] if row else None
         except Exception:
-            # Keep the standalone project engine compatible with pre-competition
-            # databases during an incremental migration.
             return None
 
     def _competition_assignment(self, project_id: str, member_name: str) -> dict | None:
@@ -1074,6 +1042,65 @@ class Orchestrator:
                 for name in project_members
             }
 
+    def _throttled_log(
+        self, event: str, project_id: str, key: str, **fields: Any
+    ) -> None:
+        """Emit ``event`` for ``(project, key)`` with exponential-backoff folding.
+
+        A steady-state rejection logged on every tick drowns the log. This emits
+        the first occurrence, then backs off 1, 2, 4 ... seconds (capped at 300)
+        and folds suppressed hits into an ``attempts`` count on the next line
+        that fires. The suppressed window is time-based, so a burst collapses to
+        a logarithmic number of lines regardless of tick rate.
+        """
+        throttle_key = (event, key)
+        count = self._throttle_counts.get(throttle_key, 0) + 1
+        self._throttle_counts[throttle_key] = count
+        now = monotonic()
+        due = self._throttle_next_log.get(throttle_key)
+        if due is not None and now < due:
+            return
+        emitted = self._throttle_emitted.get(throttle_key, 0)
+        delay = min(2.0 ** emitted, 300.0)
+        self._throttle_next_log[throttle_key] = now + delay
+        self._throttle_emitted[throttle_key] = emitted + 1
+        self.state.logger.project(
+            event, project_id,
+            attempts=count, next_log_in_seconds=round(delay, 1),
+            **fields,
+        )
+
+    def _log_legacy_block(self, project_id: str, member_name: str, intent_id: str) -> None:
+        """Rate-limit the ``legacy_member_blocked_by_competition`` event.
+
+        While a competition owns a project, every legacy dispatch attempt for a
+        non-seated Member is rejected here.  That is expected steady state, but
+        logging it on each attempt produced thousands of identical lines (one
+        project emitted one per second).  Emit the first occurrence per
+        (project, member, intent), then back off exponentially (1, 2, 4, ...
+        seconds, capped at 300) and fold the suppressed attempts into an
+        ``attempts`` count on the next line that does fire.
+        """
+        key = (project_id, member_name, intent_id or "")
+        count = self._legacy_block_counts.get(key, 0) + 1
+        self._legacy_block_counts[key] = count
+        now = monotonic()
+        due = self._legacy_block_next_log.get(key)
+        if due is not None and now < due:
+            return
+        emitted = self._legacy_block_emitted_counts.get(key, 0)
+        delay = min(2.0 ** emitted, 300.0)
+        self._legacy_block_next_log[key] = now + delay
+        self._legacy_block_emitted_counts[key] = emitted + 1
+        self.state.logger.project(
+            "legacy_member_blocked_by_competition",
+            project_id,
+            member=member_name,
+            intent=intent_id,
+            attempts=count,
+            next_log_in_seconds=round(delay, 1),
+        )
+
     def _launch_member(
         self, project_id, member_name, intent_id, category, is_initial,
         *, reserved: bool = False,
@@ -1083,12 +1110,7 @@ class Orchestrator:
         if self._competition_project(project_id):
             seats = self._competition_members(project_id)
             if seats is not None and member_name not in seats:
-                self.state.logger.project(
-                    "legacy_member_blocked_by_competition",
-                    project_id,
-                    member=member_name,
-                    intent=intent_id,
-                )
+                self._log_legacy_block(project_id, member_name, intent_id)
                 return False
         cfg = self._member_config(member_name)
         if cfg is None:
@@ -1137,9 +1159,6 @@ class Orchestrator:
                 from backend.competition.store import CompetitionStore
 
                 competition_store = CompetitionStore(self.state.db)
-                # Detached jobs are keyed by the agent session, which only a
-                # competition seat has; standalone projects keep the 60s
-                # foreground path.
                 job_store = AgentJobStore(self.state.db)
             deps = MemberDeps(
                 db=self.state.db,
@@ -1344,7 +1363,6 @@ class Orchestrator:
                 if row is not None and row["status"] == "running":
                     graph_store.set_agent_state(conn, project_id, member.name, "idle")
 
-    # ---- stop ----
 
     def stop_member(self, member_name: str) -> bool:
         """Cancel one Member's in-flight work without touching its project.
@@ -1381,21 +1399,15 @@ class Orchestrator:
         self.projects.teardown(project_id)
         status = self.lifecycle.status(project_id)
         if status in ("created", "running"):
-            # The scheduler tick adopts any project still marked running as a
-            # crashed worker orphan.  An explicit Stop must leave a durable
-            # stopped status, or the next process resumes cancelled work.
             with suppress(LifecycleError):
                 self.lifecycle.transition(project_id, "stopped")
         phase = "solved" if status == "solved" else "stopped"
         self._set_runtime_phase(project_id, phase)
         self._release_project_lease(project_id)
 
-    # ---- flag found -> close pipeline ----
 
     def on_flag_found(self, project_id: str) -> None:
         if self._competition_project(project_id):
-            # The competition coordinator ingests this durable candidate and
-            # waits for a platform verdict before stopping either solver.
             competition = getattr(self.state, "competition", None)
             if competition is not None:
                 competition.wake()
@@ -1421,7 +1433,6 @@ class Orchestrator:
         now owns the ``_completing`` guard; the job clears it on exit.
         """
 
-        # Stop competing solvers as soon as a candidate reaches verification.
         with self._lock:
             members = list(self._members.get(project_id, {}).values())
         for member in members:
@@ -1477,7 +1488,6 @@ class Orchestrator:
         self.stop_project(project_id)
         self._dispatch_postprocess()
 
-    # ---- platform verdict gate (ret2shell) ----
 
     def _platform_verdict_needed(self, project_id: str) -> bool:
         with self.state.db.connect() as conn:
@@ -1488,10 +1498,6 @@ class Orchestrator:
         with self.state.db.connect() as connection:
             project = graph_store.get_project_row(connection, project_id)
         if not project or project["platform"] != "ret2shell" or getattr(self.state, "ret2shell_client", None) is None:
-            # Without credentials the candidate cannot be judged.  Stay in
-            # flag_found: the scheduler tick re-arms verification, so the
-            # project completes as soon as credentials appear.  Log once —
-            # the tick would otherwise repeat this every interval.
             with self._lock:
                 already_logged = project_id in self._verdict_deferred_logged
                 self._verdict_deferred_logged.add(project_id)
@@ -1532,7 +1538,6 @@ class Orchestrator:
         client = self.state.ret2shell_client
         while not self._stop.is_set():
             with self.state.db.connect() as conn:
-                # A crashed judge may already have sent the external request.
                 conn.execute(
                     "UPDATE flag_submissions SET status = 'unknown' "
                     "WHERE project_id = %s AND status = 'judging'",
@@ -1558,7 +1563,6 @@ class Orchestrator:
                 ).fetchone()
                 row = graph_store.get_project_row(conn, project_id)
             if submission is None:
-                # Nothing left to judge and no Flag was accepted: resume solving.
                 self._resume_after_verdict(project_id, reason="no pending flag submissions")
                 return
             external_id = str(row["external_id"] or "") if row else ""
@@ -1617,15 +1621,13 @@ class Orchestrator:
             submission = client.submit_flag(challenge_id, flag)
         except Ret2ShellPreflightError as exc:
             if "already solved" in str(exc):
-                # Team credit does not prove that this particular candidate
-                # was correct (another teammate may have solved the challenge).
                 return "unknown", "platform already solved externally; candidate remains unverified"
             return "unknown", f"submit preflight failed: {exc}"
         except Ret2ShellRateLimitError as exc:
             return "unknown", str(exc)
         except Ret2ShellError as exc:
             return "unknown", f"platform submit failed: {exc}"
-        except Exception as exc:  # requests/session failures
+        except Exception as exc:
             return "unknown", f"{type(exc).__name__}: {exc}"
         solved = submission.get("solved") if isinstance(submission, dict) else None
         if solved is True:
@@ -1646,8 +1648,6 @@ class Orchestrator:
             external_id=project_row["external_id"] if project_row else None,
             verdict=detail,
         )
-        # Surface the rejection through experience memory so Members never
-        # resubmit the same string (BaseMember lists 'rejected-flag' notes).
         if project_row is not None:
             try:
                 category = str(project_row["category"] or "misc")
@@ -1790,9 +1790,6 @@ class Orchestrator:
         written_memories = []
         try:
             with self.state.db.connect() as connection:
-                # Serialize with finalizer transactions (accept + enqueue) per
-                # project; without this gate the jobs->projects lock order here
-                # deadlocks against their projects->jobs order.
                 lock_project_completion(connection, job.project_id)
                 if not lock_job(
                     connection,
@@ -1836,9 +1833,6 @@ class Orchestrator:
                     )
                 row = graph_store.get_project_row(connection, job.project_id)
                 if row is not None and row["postprocess_status"] == "completed":
-                    # Draw the completion links in the same transaction so an
-                    # observer never sees postprocess_status='completed' before
-                    # the Diamond -> IPC return edge exists.
                     self.diamond.draw_completion(job.project_id, connection=connection)
         except Exception:
             if rollback_file is not None:
@@ -1880,7 +1874,6 @@ class Orchestrator:
             stage=stage,
         )
 
-    # ---- scheduler loop ----
 
     def _run_loop(self) -> None:
         interval = max(1, self.state.config.runtime.interval)
@@ -1888,14 +1881,44 @@ class Orchestrator:
             try:
                 self._tick()
             except Exception as exc:
-                # The fallback handler itself must never kill the loop: it
-                # logs through the DB-backed resolver, which is exactly what
-                # fails when the tick died on a database error.
                 try:
                     self.state.logger.project("scheduler_error", "system", error=str(exc))
                 except Exception:
                     print(f"[ipc-orchestrator] tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             self._stop.wait(interval)
+
+    def _competition_project_ownership(
+        self, conn
+    ) -> tuple[set[str], set[str]]:
+        """Partition competition-linked projects into active vs. terminal (T4).
+
+        ``active`` projects are owned by a live competition run through the
+        coordinator; the generic recovery loop must leave them alone. ``terminal``
+        projects are linked only to runs that have stopped or finished - a graph
+        status still reading ``running`` there is stale, and resurrecting a
+        session is the stop-then-restart bug. Any query failure (an old schema
+        opened before the additive patch) returns empty sets, preserving the
+        prior fail-open behaviour rather than blocking recovery outright.
+        """
+        active: set[str] = set()
+        terminal: set[str] = set()
+        try:
+            for row in conn.execute(
+                """SELECT c.project_id,
+                          bool_or(r.status NOT IN ('finished','stopped')) AS has_active
+                   FROM competition_challenges c
+                   JOIN competition_run_challenges rc ON rc.challenge_id=c.id
+                   JOIN competition_runs r ON r.id=rc.run_id
+                   WHERE c.project_id IS NOT NULL
+                   GROUP BY c.project_id"""
+            ).fetchall():
+                if row["has_active"]:
+                    active.add(row["project_id"])
+                else:
+                    terminal.add(row["project_id"])
+        except Exception:
+            return set(), set()
+        return active, terminal
 
     def _tick(self) -> None:
         self._heartbeat_project_leases()
@@ -1910,26 +1933,21 @@ class Orchestrator:
         self._reap_finished_futures()
         with self.state.db.connect() as conn:
             summaries = graph_store.project_summaries(conn)
-            try:
-                competition_projects = {
-                    row["project_id"] for row in conn.execute(
-                        """SELECT DISTINCT c.project_id FROM competition_challenges c
-                           JOIN competition_run_challenges rc ON rc.challenge_id=c.id
-                           JOIN competition_runs r ON r.id=rc.run_id
-                           WHERE c.project_id IS NOT NULL
-                             AND r.status NOT IN ('finished','stopped')"""
-                    ).fetchall()
-                }
-            except Exception:
-                competition_projects = set()
+            competition_projects, competition_terminal_projects = (
+                self._competition_project_ownership(conn)
+            )
         self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
             if summary.id in competition_projects:
+                if summary.status == "running" and not self._startup_in_progress(summary.id):
+                    try:
+                        self._dispatch_project(summary.id)
+                    except Exception as exc:
+                        self.state.logger.project("scheduler_error", summary.id, error=str(exc))
+                continue
+            if summary.id in competition_terminal_projects:
                 continue
             if summary.status == "flag_found":
-                # ``flag_found`` is a durable commit-in-progress state. If an
-                # instance died between recording evidence and atomically
-                # accepting it, the lease winner resumes verification here.
                 if self._ensure_project_lease(summary.id):
                     self.state.logger.project(
                         "flag_verification_recovered",
@@ -1947,9 +1965,6 @@ class Orchestrator:
             if not owned_before:
                 self._schedule_running_recovery(summary.id)
                 continue
-            # ``start_project`` marks the project running before slow Docker
-            # setup so the UI can expose a Stop control.  Do not dispatch a
-            # second Member until that startup worker reaches ``ready``.
             if self._startup_in_progress(summary.id):
                 continue
             if not self.resources.acquire_task(summary.id):
@@ -2069,8 +2084,6 @@ class Orchestrator:
                     trigger=reason_trigger,
                     intent=created.id,
                 )
-                # The reason pass produced dispatchable work; select a Member
-                # for it now instead of waiting for the next coordinator tick.
                 self._dispatch_project(project_id)
             return
         ordered = (
@@ -2148,8 +2161,6 @@ class Orchestrator:
             if should_defer:
                 self._member_retry_not_before[key] = monotonic() + self._STALL_DEFER_SECONDS
         if should_defer:
-            # The finished-future path has already released the intent claim;
-            # only the redispatch backoff is needed here.
             self.state.logger.project(
                 "member_intent_deferred",
                 project_id,
@@ -2241,7 +2252,14 @@ class Orchestrator:
 
     def _select_member_for_intent(self, project_id: str, detail, intent, active: set[str]) -> str | None:
         preferred = self._intent_member_candidates(detail, intent)
-        return self._pick_idle_member(project_id, detail=detail, active=active, preferred=preferred)
+        allowed = None
+        if self._competition_project(project_id):
+            allowed = self._competition_members(project_id)
+            if allowed is not None:
+                preferred = [name for name in preferred if name in allowed]
+        return self._pick_idle_member(
+            project_id, detail=detail, active=active, preferred=preferred, allowed=allowed,
+        )
 
     def _intent_member_candidates(self, detail, intent) -> list[str]:
         roles = {agent.name: agent.role for agent in detail.agents}
@@ -2265,6 +2283,7 @@ class Orchestrator:
         detail=None,
         active: set[str] | None = None,
         preferred: list[str] | None = None,
+        allowed: set[str] | None = None,
     ) -> str | None:
         if active is None:
             with self._lock:
@@ -2275,6 +2294,8 @@ class Orchestrator:
             member.name for member in self.state.config.available_members()
             if member.name not in active and member.name not in globally_occupied
         ]
+        if allowed is not None:
+            idle = [name for name in idle if name in allowed]
         if not idle:
             return None
         preferred = preferred or []
@@ -2439,9 +2460,6 @@ class Orchestrator:
                     error_kind=result.error_kind,
                 )
                 if result.retryable is False:
-                    # A terminal validation/configuration result must also
-                    # invalidate any backoff left by an earlier transient
-                    # failure for the same intent.
                     self._clear_member_retry(project_id, intent_id)
                 else:
                     self._schedule_member_retry(
@@ -2481,7 +2499,6 @@ class Orchestrator:
             row = edge_store.get_intent(conn, project_id, intent_id)
             return row["worker"] if row is not None else None
 
-    # ---- test helper ----
 
     def wait(self, project_id: str, timeout: float = 30.0) -> None:
         from time import monotonic, sleep

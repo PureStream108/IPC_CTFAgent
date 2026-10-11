@@ -15,12 +15,10 @@ from tests.helpers import setup_test_auth, write_mock_config
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    # isolated root + config dir so tests don't touch the repo's data/
     cfgdir = write_mock_config(tmp_path / "config")
     monkeypatch.setenv("IPC_ROOT", str(tmp_path))
 
     app = create_app(root=tmp_path)
-    # point state at the temp config dir
     with TestClient(app) as c:
         setup_test_auth(c)
         c.app.state.ipc.config_dir = cfgdir
@@ -47,6 +45,49 @@ def test_list_projects(client):
     assert r.status_code == 200
     assert len(r.json()) == 1
     assert r.json()[0]["member_count"] == 0
+
+
+def test_get_project_retries_once_on_a_deadlock(client, monkeypatch):
+    """T12: a single DeadlockDetected on a read is retried transparently."""
+    import psycopg.errors
+    from backend.api import project as project_api
+
+    pid = client.post(
+        "/projects", json={"title": "D", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+
+    real_expire = project_api.graph_store.expire_reason_leases
+    calls = {"n": 0}
+
+    def flaky(conn, timeout, project_id=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise psycopg.errors.DeadlockDetected("deadlock detected")
+        return real_expire(conn, timeout, project_id)
+
+    monkeypatch.setattr(project_api.graph_store, "expire_reason_leases", flaky)
+    r = client.get(f"/projects/{pid}")
+    assert r.status_code == 200
+    assert calls["n"] == 2
+
+
+def test_get_project_degrades_to_last_snapshot_instead_of_500(client, monkeypatch):
+    """T12: a persistent deadlock degrades to the last good snapshot, not 500."""
+    import psycopg.errors
+    from backend.api import project as project_api
+
+    pid = client.post(
+        "/projects", json={"title": "E", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    assert client.get(f"/projects/{pid}").status_code == 200
+
+    def always_deadlocks(conn, timeout, project_id=None):
+        raise psycopg.errors.DeadlockDetected("deadlock detected")
+
+    monkeypatch.setattr(project_api.graph_store, "expire_reason_leases", always_deadlocks)
+    r = client.get(f"/projects/{pid}")
+    assert r.status_code == 200
+    assert r.json()["project"]["id"] == pid
 
 
 def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
@@ -81,17 +122,13 @@ def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
 
 def test_intent_protocol_flow(client):
     pid = client.post("/projects", json={"title": "A", "origin": "o", "goal": "g", "category": "crypto"}).json()["project"]["id"]
-    # declare intent
     r = client.post(f"/projects/{pid}/intents", json={"from": ["origin"], "description": "factor n", "creator": "diamond"})
     assert r.status_code == 201
     iid = r.json()["id"]
-    # claim
     r = client.post(f"/projects/{pid}/intents/{iid}/heartbeat", json={"worker": "aventurine"})
     assert r.json()["worker"] == "aventurine"
-    # double-claim by another worker rejected
     r = client.post(f"/projects/{pid}/intents/{iid}/heartbeat", json={"worker": "pearl"})
     assert r.status_code == 409
-    # conclude
     r = client.post(f"/projects/{pid}/intents/{iid}/conclude", json={"worker": "aventurine", "description": "n = p*q found"})
     assert r.status_code == 200
     assert r.json()["fact"]["description"] == "n = p*q found"
@@ -224,7 +261,6 @@ def test_project_logs_list_and_derive(client):
     assert (client.app.state.ipc.log_export_dir / "llm_logs" / "Demo.log").exists()
     assert (client.app.state.ipc.log_export_dir / "memory_logs" / "Demo.log").exists()
 
-    # A repeated export is a new snapshot and never overwrites the first.
     r = client.post("/logs/derive")
     assert r.json()["files"]["project_logs"] == ["Demo01.log"]
     assert export.exists()
@@ -263,7 +299,6 @@ def test_report_submission(client):
     })
     assert r.status_code == 201
     assert r.json()["difficulty"] == "high"
-    # report drew a Member->Diamond link
     detail = client.get(f"/projects/{pid}").json()
     assert any(link["src"] == "aventurine" and link["dst"] == "diamond" for link in detail["agent_links"])
 
@@ -271,14 +306,12 @@ def test_report_submission(client):
 def test_complete_marks_flag(client):
     pid = client.post("/projects", json={"title": "A", "origin": "o", "goal": "g", "category": "web"}).json()["project"]["id"]
     fid = client.post(f"/projects/{pid}/intents", json={"from": ["origin"], "description": "x", "creator": "diamond"}).json()
-    # conclude to make a fact
     client.post(f"/projects/{pid}/intents/{fid['id']}/heartbeat", json={"worker": "aventurine"})
     fact = client.post(f"/projects/{pid}/intents/{fid['id']}/conclude", json={"worker": "aventurine", "description": "rce achieved"}).json()["fact"]
     r = client.post(f"/projects/{pid}/complete", json={"from": [fact["id"]], "description": "flag captured", "worker": "aventurine", "flag": "flag{win}"})
     assert r.status_code == 200
     assert r.json()["to"] == "goal"
     detail = client.get(f"/projects/{pid}").json()
-    # Flag verification is durable; writeup/memory/archive run asynchronously.
     assert detail["project"]["status"] in ("flag_found", "solved")
     assert detail["project"]["flag"].startswith("sha256:")
 
@@ -388,7 +421,7 @@ def test_config_api_update_and_redaction(client):
     r = client.put("/config", json={"diamond": {"api_format": "openai", "api_key": "secretkey", "base_url": "http://u"}})
     assert r.status_code == 200
     assert r.json()["diamond"]["api_key_set"] is True
-    assert "secretkey" not in str(r.json())  # redacted
+    assert "secretkey" not in str(r.json())
 
 
 def test_config_api_updates_validated_browser_runtime(client):
@@ -497,9 +530,6 @@ def test_exports_survive_a_fresh_app_state_and_share_one_log_suffix(
                 graph_store.set_status(conn, pid, "solved")
             wp_snapshot = current.post("/wp/derive").json()
             log_snapshot = current.post("/logs/derive").json()
-            # PostgreSQL is shared across fresh AppState instances. Remove the
-            # first live row so the second snapshot proves Artifact durability
-            # without re-exporting both live projects.
             with current.app.state.ipc.db.connect() as conn:
                 conn.execute("DELETE FROM projects WHERE id = %s", (pid,))
             return wp_snapshot, log_snapshot

@@ -25,17 +25,52 @@ class Diamond:
         self.config = config
         self.logger = logger
 
-    # ---- member availability ----
 
     def available_member_configs(self) -> list[MemberConfig]:
         return self.config.available_members()
 
     def _idle_members(self, project_id: str) -> list[MemberConfig]:
+        """Members free to take new work on this project.
+
+        Both fences matter: a Member already active on this project, and a
+        Member holding a durable competition seat on a *different* challenge.
+        """
+
         with self.db.connect() as conn:
             active = set(graph_store.active_member_names(conn, project_id))
-        return [m for m in self.available_member_configs() if m.name not in active]
+        occupied = active | self._members_seated_elsewhere(project_id)
+        return [m for m in self.available_member_configs() if m.name not in occupied]
 
-    # ---- initial deployment ----
+    def _members_seated_elsewhere(self, project_id: str) -> set[str]:
+        """Members holding a durable competition seat on another challenge.
+
+        Without this the nomination only considered the current project, so a
+        Member already seated elsewhere was picked, the orchestrator's seat
+        fence refused the launch, the intent fell back to the primary, and the
+        reinforcement silently never happened — while filling the log with
+        ``legacy_member_blocked_by_competition``.
+
+        Failure is deliberately non-fatal: with no competition tables (a plain
+        standalone project, or the first boot of a migration) there are no
+        seats to respect.
+        """
+
+        try:
+            with self.db.connect() as conn:
+                rows = conn.execute(
+                    """SELECT DISTINCT a.member
+                         FROM competition_assignments a
+                         JOIN competition_challenges c ON c.id=a.challenge_id
+                         JOIN competition_runs r ON r.id=a.run_id
+                        WHERE a.released_at IS NULL
+                          AND r.status NOT IN ('finished','stopped')
+                          AND (c.project_id IS NULL OR c.project_id <> %s)""",
+                    (project_id,),
+                ).fetchall()
+        except Exception:
+            return set()
+        return {row["member"] for row in rows}
+
 
     def assign_initial(
         self, project_id: str, excluded_members: set[str] | None = None,
@@ -48,15 +83,12 @@ class Diamond:
         ]
         if not avail:
             return None
-        # Aventurine is the default first worker by config convention only; all
-        # Members are equal CTF solvers and reinforcements use the same class.
         initial = next(
             (m for m in avail if preferred_member and m.name == preferred_member),
             next((m for m in avail if m.name == "aventurine"), avail[0]),
         )
         with self.db.connect() as conn:
             graph_store.set_agent_state(conn, project_id, "diamond", "active")
-            # IPC -> Diamond (start solving)
             if not graph_store.link_exists(conn, project_id, "ipc", "diamond", "start"):
                 graph_store.add_link(conn, project_id, "ipc", "diamond", "start")
             intent = edge_store.create_intent(conn, project_id, ["origin"], BOOTSTRAP_DESC, "diamond")
@@ -67,7 +99,6 @@ class Diamond:
         self.logger.project("diamond_assign_initial", project_id, member=initial.name, intent=intent.id)
         return Assignment(member=initial.name, intent_id=intent.id, is_initial=True)
 
-    # ---- reinforcements on report ----
 
     def decide_reinforcements(self, project_id: str, report, available_slots: int | None = None) -> list[Assignment]:
         """On a difficulty report, add 1..N idle members on fresh directions."""
@@ -132,7 +163,6 @@ class Diamond:
             unique.append(text)
         return unique
 
-    # ---- checkpoint-gated re-planning ----
 
     def plan_next_intent(self, project_id: str, detail, trigger: str):
         """Create one follow-up intent after a real graph-state checkpoint change."""
@@ -176,7 +206,6 @@ class Diamond:
         )
         return intent
 
-    # ---- closing the project ----
 
     def write_wp(self, project_id: str, wp_dir) -> str:
         """Generate Diamond's final WP from graph state and the relevant execution evidence."""

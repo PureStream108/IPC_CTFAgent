@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pathlib import Path
+from typing import Any, Callable, TypeVar
+
+import psycopg.errors
 
 from backend.api.deps import get_state
 from backend.blackboard import edge_store, graph_store, node_store
@@ -25,6 +28,26 @@ from backend.core.redaction import redact_object
 router = APIRouter(tags=["projects"])
 MAX_PROJECT_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
+_T = TypeVar("_T")
+
+_last_project_detail: dict[str, ProjectDetail] = {}
+_last_project_list: dict[str, list[ProjectSummary]] = {}
+
+
+def _with_deadlock_retry(operation: Callable[[], _T]) -> _T:
+    """Run a DB operation, retrying once on a deadlock.
+
+    A migration ``ALTER TABLE`` and a read-path lease-expiry ``UPDATE`` can
+    deadlock; Postgres kills one with DeadlockDetected. The victim's locks are
+    already gone by the time this returns, so an immediate single retry almost
+    always succeeds. The retry is deliberately bounded to one: a persistent
+    deadlock is a real problem the caller must still see.
+    """
+    try:
+        return operation()
+    except psycopg.errors.DeadlockDetected:
+        return operation()
+
 
 def _expire(state: AppState, conn, project_id: str | None = None) -> None:
     it, rt = graph_store.get_timeouts(conn)
@@ -41,9 +64,19 @@ def _public_detail(detail):
 
 @router.get("/projects", response_model=list[ProjectSummary])
 def list_projects(state: AppState = Depends(get_state)):
-    with state.db.connect() as conn:
-        _expire(state, conn)
-        return graph_store.project_summaries(conn)
+    def read() -> list[ProjectSummary]:
+        with state.db.connect() as conn:
+            _expire(state, conn)
+            return graph_store.project_summaries(conn)
+
+    try:
+        summaries = _with_deadlock_retry(read)
+    except psycopg.errors.OperationalError:
+        if "all" in _last_project_list:
+            return _last_project_list["all"]
+        raise
+    _last_project_list["all"] = summaries
+    return summaries
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
@@ -60,17 +93,27 @@ def create_project(body: CreateProjectRequest, state: AppState = Depends(get_sta
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: str, state: AppState = Depends(get_state)):
-    with state.db.connect() as conn:
-        _expire(state, conn, project_id)
-        detail = graph_store.project_detail(conn, project_id)
+    def read():
+        with state.db.connect() as conn:
+            _expire(state, conn, project_id)
+            return graph_store.project_detail(conn, project_id)
+
+    try:
+        detail = _with_deadlock_retry(read)
+    except psycopg.errors.OperationalError:
+        cached = _last_project_detail.get(project_id)
+        if cached is not None:
+            return cached
+        raise
     if detail is None:
         raise HTTPException(404, "Project not found")
-    return _public_detail(detail)
+    public = _public_detail(detail)
+    _last_project_detail[project_id] = public
+    return public
 
 
 @router.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: str, state: AppState = Depends(get_state)):
-    # tear down this project's sandboxes + challenge env before removing files.
     state.pool.stop_project(project_id)
     state.network.stop(project_id)
     with state.db.connect() as conn:
@@ -119,7 +162,6 @@ async def upload_attachment(
     return att
 
 
-# ---- hints ----
 
 
 @router.post("/projects/{project_id}/hints", response_model=Hint, status_code=201)
@@ -130,7 +172,6 @@ def create_hint(project_id: str, body: CreateHintRequest, state: AppState = Depe
         return graph_store.create_hint(conn, project_id, body.content, body.creator)
 
 
-# ---- intents (knowledge-graph protocol) ----
 
 
 def _require_active(conn, project_id: str):
@@ -210,7 +251,6 @@ def release_intent(
         return edge_store.intent_to_model(conn, edge_store.get_intent(conn, project_id, intent_id), project_id)
 
 
-# ---- reason lease ----
 
 
 @router.post("/projects/{project_id}/reason/claim")
@@ -266,9 +306,6 @@ def conclude_intent(
         if row["worker"] is not None and row["worker"] != body.worker:
             raise HTTPException(409, f"Intent is currently claimed by {row['worker']}")
         fact = node_store.create_fact(conn, project_id, body.description)
-        # Older clients do not send the fencing token. Preserve that
-        # compatibility path explicitly; passing only ``lease_owner`` would
-        # intentionally fail closed as an incomplete fencing tuple.
         if body.lease_token:
             concluded = edge_store.conclude_intent(
                 conn,
