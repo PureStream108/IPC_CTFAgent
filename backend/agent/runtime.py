@@ -34,11 +34,15 @@ from backend.agent.context import (
     infer_context_limit,
     should_compact,
 )
+from backend.agent.session import SessionConflict, SessionNeedsRebuild
 from backend.competition.conversation import (
     CONTINUATION_INSTRUCTION,
     ToolCall,
     TurnTruncated,
 )
+from backend.competition.store import CompetitionConflict
+
+_EVENT_KEY_REUSE_MESSAGE = "event key reused with different content"
 
 
 class ToolExecutor(Protocol):
@@ -208,6 +212,7 @@ class AgentRuntime:
         tools: list[dict[str, Any]],
         cancel: threading.Event | None = None,
         emit: Callable[[str], None] | None = None,
+        emit_reasoning: Callable[[str], None] | None = None,
         compressor: Callable[[list[dict[str, Any]]], tuple[str, list[dict[str, Any]]]] | None = None,
         before_turn: Callable[[AgentRuntime], list[dict[str, Any]]] | None = None,
         context_bytes: int = 1_000_000,
@@ -230,17 +235,13 @@ class AgentRuntime:
         self.tools = tools
         self.cancel = cancel or threading.Event()
         self.emit = emit or (lambda _text: None)
+        self.emit_reasoning = emit_reasoning or (lambda _text: None)
         self.compressor = compressor
         self.before_turn = before_turn
         self.context_bytes = max(16_384, context_bytes)
         self.repeated_batch_limit = max(3, repeated_batch_limit)
         self.truncation_retry_limit = max(1, truncation_retry_limit)
-        # 0 means "no ceiling": convergence comes from the provider finishing,
-        # cancellation, the repeated-batch detector and the watchdog.
         self.max_turns = max(0, max_turns)
-        # A token budget replaces the byte approximation. An explicit limit
-        # wins; 0 means "infer it from the model", and inference returning 0 in
-        # turn means the model is unknown, leaving only the byte ceiling.
         self.context_token_limit = max(0, context_token_limit) or infer_context_limit(
             model_snapshot if model_snapshot is not None
             else getattr(adapter, "config", None),
@@ -249,9 +250,6 @@ class AgentRuntime:
         self.compaction_trigger_ratio = compaction_trigger_ratio
         self.calibration = calibration
         self.keep_recent_messages = max(2, keep_recent_messages)
-        # Tool concurrency is opt-in and host-supplied: only the host knows
-        # which of its tools are reads. Without these the loop runs every call
-        # sequentially, which is the behaviour every existing caller relies on.
         self.parallel_safe = parallel_safe or (lambda _name: False)
         self.is_terminal = is_terminal or (lambda _name: False)
         self.max_parallel_tools = max(1, max_parallel_tools)
@@ -263,7 +261,35 @@ class AgentRuntime:
         return self.writer.session_id
 
     def _append(self, event_key: str, kind: str, payload: dict[str, Any]) -> dict:
-        return self.writer.append(event_key, kind, payload)
+        try:
+            return self.writer.append(event_key, kind, payload)
+        except (SessionConflict, CompetitionConflict) as exc:
+            if _EVENT_KEY_REUSE_MESSAGE in str(exc):
+                raise SessionNeedsRebuild(
+                    f"event key {event_key!r} collided with durably different content",
+                    reason="event_key_conflict",
+                ) from exc
+            raise
+
+    def _writer_epoch(self) -> int:
+        """The current owner epoch, used to scope continuation keys.
+
+        The epoch advances on every handoff/rebuild, so a key that embeds it
+        can never collide across generations: a rebuilt session writing a
+        differently worded continuation lands under a fresh key instead of
+        hitting the reused-key conflict. Writers that do not model an epoch
+        (the in-memory test writer, bootstrap-only recorders) report 0, which
+        is a stable scope for a single-generation session.
+        """
+        epoch = getattr(self.writer, "epoch", None)
+        if epoch is None:
+            assignment = getattr(self.writer, "assignment", None)
+            if isinstance(assignment, dict):
+                epoch = assignment.get("epoch")
+        try:
+            return int(epoch)
+        except (TypeError, ValueError):
+            return 0
 
     def _all_events(self) -> list[dict]:
         events: list[dict] = []
@@ -281,10 +307,6 @@ class AgentRuntime:
     def _history(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         for event in self._all_events():
-            # ``user_message`` carries operator input: the Ops bootstrap of
-            # pre-runtime history and every follow-up turn in a live
-            # conversation. Skipping it would replay the transcript without the
-            # question that was actually asked.
             if event["kind"] in ("provider_messages", "user_message"):
                 messages.extend(event["payload"].get("messages", []))
                 if event["event_key"].startswith("provider:"):
@@ -296,16 +318,13 @@ class AgentRuntime:
             elif event["kind"] == "tool_result":
                 messages.append(event["payload"]["message"])
             elif event["kind"] == "context_compacted":
-                # Compaction replaces the transcript with its retained tail.
-                # The summary describes what was dropped, so it has to lead the
-                # rebuilt history or the session loses every earlier finding.
                 messages = compacted_history(event["payload"])
         return messages
 
     def record_user_message(
         self, content: str, *, event_key: str = "session:user:initial"
     ) -> dict:
-        return self._append(
+        return self.writer.append(
             event_key, "provider_messages",
             {"messages": [{"role": "user", "content": content}]},
         )
@@ -392,7 +411,7 @@ class AgentRuntime:
                 messages, keep_recent=self.keep_recent_messages
             )
             self._append(
-                f"compact-degraded:{turn}", "error",
+                f"compact-degraded:{self._writer_epoch()}:{turn}", "error",
                 {**detail, "status": "no_compressor",
                  "note": "compacted deterministically; no semantic summarizer configured"},
             )
@@ -406,12 +425,12 @@ class AgentRuntime:
                     messages, keep_recent=self.keep_recent_messages
                 )
                 self._append(
-                    f"compact-degraded:{turn}", "error",
+                    f"compact-degraded:{self._writer_epoch()}:{turn}", "error",
                     {**detail, "status": "compressor_failed",
                      "error": f"{type(exc).__name__}: {exc}"[:2000]},
                 )
         payload = {"summary": summary, "messages": compacted}
-        self._append(f"compact:{turn}", "context_compacted", payload)
+        self._append(f"compact:{self._writer_epoch()}:{turn}", "context_compacted", payload)
         record = getattr(self.writer, "record_compaction", None)
         if callable(record):
             record(summary, token_estimate=detail.get("tokens"))
@@ -419,8 +438,6 @@ class AgentRuntime:
             {"turn": turn, "status": "compacted", "message_count": len(compacted),
              **detail}
         )
-        # Use the same projection the restore path builds, so a compaction
-        # mid-run and one replayed after a restart look identical.
         return compacted_history(payload)
 
     def _pending_tool_calls(self) -> list[ToolCall]:
@@ -598,9 +615,15 @@ class AgentRuntime:
         event like any other, or the loop re-runs over the old history and
         answers the previous question again.
 
-        The event key is derived from the transcript position rather than from
-        the content, so replaying an interrupted turn deduplicates while two
-        genuinely different messages never collide.
+        The continuation key is stable per (epoch, content) rather than derived
+        from the transcript length. A position key drifts: the same logical
+        message lands under a different key once the event count changes (a
+        repaired turn, a compaction), so a replay re-appends it as a duplicate
+        or, worse, a genuinely new message reuses an old position and trips the
+        reused-key conflict. Embedding the epoch keeps a rebuilt generation from
+        colliding with the one it replaced; embedding the content makes a replay
+        of the identical message idempotent while two different messages keep
+        distinct keys.
         """
         if self.adapter is None or self.executor is None:
             raise RuntimeError("this runtime is configured for event recording only")
@@ -615,17 +638,27 @@ class AgentRuntime:
             return [first]
         if initial_message and initial_message.strip():
             text = initial_message.strip()
-            # Resuming a session without new input is also legitimate (a
-            # watchdog takeover, a restart mid-turn). Only record a message
-            # that is not already the tail of the transcript.
             if not self._is_last_user_message(messages, text):
                 follow_up = {"role": "user", "content": text}
                 self._append(
-                    f"session:user:{len(self._all_events())}",
+                    self._continuation_key(text),
                     "user_message", {"messages": [follow_up]},
                 )
                 messages.append(follow_up)
         return messages
+
+    def _continuation_key(self, text: str) -> str:
+        """Stable per-(epoch, content) key for a resumed-session user message.
+
+        Content lives in the key via a short digest so the identical message
+        always maps to the same event (idempotent replay) and two different
+        messages never share a key (no false reused-key conflict). The epoch
+        prefix scopes the key to the current owner generation: a rebuild writing
+        a reworded continuation lands under a fresh namespace instead of
+        colliding with the stalled generation's events.
+        """
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"session:user:continue:{self._writer_epoch()}:{digest}"
 
     @staticmethod
     def _is_last_user_message(messages: list[dict[str, Any]], text: str) -> bool:
@@ -636,8 +669,6 @@ class AgentRuntime:
         return False
 
     def _record_usage(self, turn_number: int, status: str, usage: dict | None) -> None:
-        # Each real prompt_tokens report tightens the local estimate, so the
-        # compaction threshold tracks the provider's tokenizer over time.
         if usage and usage.get("prompt_tokens") and self._last_estimate:
             updated = calibrate(
                 self.calibration, self._last_estimate, usage.get("prompt_tokens")
@@ -689,6 +720,17 @@ class AgentRuntime:
                 groups.append([call])
         return groups
 
+    def _turn_args(self, messages: list[dict[str, Any]], on_delta, on_reasoning):
+        """Positional arguments for ``adapter.turn``.
+
+        ``emit_reasoning`` is appended only for adapters that advertise it, so
+        the five-argument doubles used throughout the tests keep working.
+        """
+        args = [messages, self.system, self.tools, on_delta, self.cancel]
+        if getattr(self.adapter, "emits_reasoning", False):
+            args.append(on_reasoning)
+        return args
+
     def _record_tool_call(self, call: ToolCall) -> None:
         self._append(
             f"tool-call:{call.id}", "tool_call",
@@ -703,6 +745,90 @@ class AgentRuntime:
         )
         return result_message
 
+    @staticmethod
+    def _is_invalid_tool_order_turn(exc: BaseException) -> bool:
+        """Classify a provider rejection as an invalid tool-order 400.
+
+        A poisoned transcript - a ``tool`` result with no preceding assistant
+        ``tool_calls`` that declares it, or a dangling call with no result -
+        makes a strict provider reject every turn with an opaque 400. Only a 400
+        qualifies: a 429/5xx is transient and must keep its existing retry path,
+        and a non-HTTP error is unrelated to history shape. The runtime stays
+        provider-agnostic by duck-typing the status code rather than importing a
+        concrete adapter's exception type.
+        """
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+        return status == 400
+
+    def _repair_poisoned_history(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Re-apply the bootstrap repairs to a mid-loop transcript.
+
+        Returns the repaired projection when it actually differs from what was
+        just rejected, or ``None`` when repair is a no-op - meaning the 400 is
+        not a tool-order problem this pass can fix and the caller must escalate
+        rather than retry the identical history forever.
+
+        The repair is the same one the bootstrap trusts: fence any interrupted
+        call as ``unknown`` and reattach every orphaned ``tool`` result behind
+        the assistant message that declared it. Running it mid-loop lets a
+        session that was poisoned *after* it started (a crash between a batch and
+        its results) heal in place instead of 400-ing until a watchdog rebuild.
+        """
+        repaired = self._restore_unknown_side_effects(list(messages))
+        repaired = self._normalize_tool_order(repaired)
+        if repaired == messages:
+            return None
+        return repaired
+
+    def _handle_turn_failure(
+        self,
+        exc: Exception,
+        messages: list[dict[str, Any]],
+        turn_number: int,
+        repaired_turn: int,
+    ) -> list[dict[str, Any]]:
+        """Self-heal an invalid tool-order 400, or let the error propagate.
+
+        A 400 that a tool-order repair has not yet been tried against gets one
+        in-place repair: the next turn runs over the fixed projection and the
+        session continues. If repair cannot change the history (``None``), or
+        the previous turn already repaired and the provider still rejects it,
+        the transcript is poisoned beyond in-loop recovery - escalate to the
+        shared new-epoch rebuild (``session.rebuilt`` reason=invalid_tool_order)
+        rather than looping on the same poison.
+
+        Any other failure (truncation handled earlier, transient 429/5xx, a
+        provider auth error) is not ours to swallow: re-raise so the existing
+        provider-error classification and retry path upstream still apply.
+        """
+        if not self._is_invalid_tool_order_turn(exc):
+            raise exc
+        if repaired_turn == turn_number:
+            raise SessionNeedsRebuild(
+                "transcript still rejected after an in-loop tool-order repair",
+                reason="invalid_tool_order",
+            ) from exc
+        repaired = self._repair_poisoned_history(messages)
+        if repaired is None:
+            raise SessionNeedsRebuild(
+                "provider rejected the transcript and no tool-order repair applies",
+                reason="invalid_tool_order",
+            ) from exc
+        self._append(
+            f"session-heal:{turn_number}", "status",
+            {"status": "tool_order_repaired", "reason": "invalid_tool_order"},
+        )
+        self.writer.save_checkpoint(
+            {"turn": turn_number, "status": "tool_order_repaired",
+             "reason": "invalid_tool_order"}
+        )
+        return repaired
+
     def run(self, initial_message: str | None = None) -> SessionResult:
         messages = self._bootstrap(initial_message)
         turn_number = self._completed_turns
@@ -710,6 +836,7 @@ class AgentRuntime:
         repeat_count = 0
         last_text = ""
         truncated_attempts = 0
+        repaired_turn = -1
         while not self.cancel.is_set():
             turn_number += 1
             if self._budget_exhausted(turn_number):
@@ -725,7 +852,7 @@ class AgentRuntime:
 
             try:
                 turn = self.adapter.turn(
-                    messages, self.system, self.tools, on_delta, self.cancel
+                    *self._turn_args(messages, on_delta, self.emit_reasoning)
                 )
             except TurnTruncated as exc:
                 truncated_attempts += 1
@@ -737,6 +864,14 @@ class AgentRuntime:
                 )
                 last_text = exc.turn.text or last_text
                 continue
+            except Exception as exc:
+                messages = self._handle_turn_failure(
+                    exc, messages, turn_number, repaired_turn
+                )
+                repaired_turn = turn_number
+                turn_number -= 1
+                continue
+            repaired_turn = -1
             truncated_attempts = 0
             last_text = turn.text
             self._append(
@@ -771,10 +906,6 @@ class AgentRuntime:
                 )
                 messages.append(self._record_tool_result(call, output))
                 if self.is_terminal(call.name):
-                    # A terminal action ends the batch: running the rest would
-                    # apply side effects after the decision that concluded the
-                    # task, and the dangling-call repair path assumes nothing
-                    # lands after that point.
                     break
         return SessionResult("cancelled", turn_number, last_text)
 
@@ -794,6 +925,7 @@ class AgentRuntime:
         repeat_count = 0
         last_text = ""
         truncated_attempts = 0
+        repaired_turn = -1
         while not self.cancel.is_set():
             turn_number += 1
             if self._budget_exhausted(turn_number):
@@ -809,8 +941,8 @@ class AgentRuntime:
 
             try:
                 turn = await asyncio.to_thread(
-                    self.adapter.turn, messages, self.system, self.tools,
-                    on_delta, self.cancel,
+                    self.adapter.turn,
+                    *self._turn_args(messages, on_delta, self.emit_reasoning),
                 )
             except TurnTruncated as exc:
                 truncated_attempts += 1
@@ -822,6 +954,14 @@ class AgentRuntime:
                 )
                 last_text = exc.turn.text or last_text
                 continue
+            except Exception as exc:
+                messages = self._handle_turn_failure(
+                    exc, messages, turn_number, repaired_turn
+                )
+                repaired_turn = turn_number
+                turn_number -= 1
+                continue
+            repaired_turn = -1
             truncated_attempts = 0
             last_text = turn.text
             self._append(
@@ -851,10 +991,6 @@ class AgentRuntime:
                     return SessionResult("cancelled", turn_number, last_text)
                 messages.extend(await self._run_tool_group(group))
                 if any(self.is_terminal(call.name) for call in group):
-                    # A terminal action ends the batch: running the rest would
-                    # apply side effects after the decision that concluded the
-                    # task, and the dangling-call repair path assumes nothing
-                    # lands after that point.
                     break
         return SessionResult("cancelled", turn_number, last_text)
 
@@ -916,9 +1052,6 @@ class AgentRuntime:
             self.executor.execute, call.name, call.arguments,
             idempotency_key=f"{self.session_id}:{call.id}",
         )
-        # A lightweight bridge may expose an ``async def execute`` without
-        # using the optional ``execute_async`` name. Do not leave that
-        # coroutine un-awaited.
         if hasattr(output, "__await__"):
             output = await output
         return output

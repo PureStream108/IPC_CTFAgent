@@ -24,8 +24,6 @@ class JobConflict(ValueError):
 
 
 JOB_STATES = ("running", "exited", "cancelled", "lost")
-# Inline output stays small enough to sit in a tool result without crowding out
-# the transcript; anything larger is referenced as an artifact instead.
 INLINE_LIMIT = 32_768
 
 
@@ -165,4 +163,30 @@ class AgentJobStore:
                        finished_at=now()
                    WHERE session_id=%s AND state='running' RETURNING *""",
                 (session_id,),
+            ).fetchall()
+
+    def sweep_stale(self, *, idle_seconds: int, limit: int = 200) -> list[dict]:
+        """Mark long-silent ``running`` jobs ``lost``.
+
+        A job whose process vanished without recording an exit status leaves a
+        permanently ``running`` row (observed: a container removed out from
+        under a background job).  No poller will ever close it, so a periodic
+        sweep closes any job whose ``last_progress_at`` is older than
+        ``idle_seconds``.  ``lost`` (never ``exited``) because the exit status
+        was never seen -- inventing an exit code here would fabricate evidence.
+
+        Returns the rows it closed so the caller can emit one event per job.
+        """
+        if idle_seconds <= 0:
+            raise ValueError("idle_seconds must be positive")
+        with self.db.connect() as connection:
+            return connection.execute(
+                """UPDATE agent_jobs SET state='lost',finished_at=now()
+                   WHERE id IN (
+                     SELECT id FROM agent_jobs
+                     WHERE state='running'
+                       AND last_progress_at < now() - make_interval(secs => %s)
+                     ORDER BY last_progress_at LIMIT %s
+                   ) RETURNING *""",
+                (idle_seconds, max(1, min(limit, 1000))),
             ).fetchall()

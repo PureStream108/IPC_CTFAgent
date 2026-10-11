@@ -27,6 +27,23 @@ class SessionConflict(ValueError):
     """The requested session transition contradicts a durable invariant."""
 
 
+class SessionNeedsRebuild(RuntimeError):
+    """The transcript is poisoned and only a new-epoch rebuild can recover it.
+
+    Raised by the runtime when in-loop repair cannot make the durable history
+    replayable: a provider keeps rejecting the projection with an invalid
+    tool-order 400 even after the orphaned calls are repaired, or a continuation
+    append collides with a durably different event under the same key. Both are
+    terminal for the current epoch, so the signal converges on the same
+    new-epoch rebuild the stall self-heal already performs instead of retrying
+    the same poison forever.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 KINDS = ("ops", "competition", "project")
 LINEAGE_REASONS = (
     "fork", "resume", "redirect", "member_handoff", "model_switch", "helper",
@@ -34,8 +51,6 @@ LINEAGE_REASONS = (
 EVENT_KINDS = (
     "user_message", "provider_messages", "reasoning", "tool_call",
     "tool_result", "status", "error", "handoff", "loop_detected",
-    # Transitional kinds still written by the competition runtime; Phase 2
-    # replaces them with rows in agent_compactions.
     "context_compacted", "compression_failed",
 )
 _SECRET_KEYS = frozenset({
@@ -87,7 +102,6 @@ class AgentSessionStore:
     def __init__(self, db):
         self.db = db
 
-    # ---------------------------------------------------------------- sessions
 
     def create_session(
         self,
@@ -203,7 +217,6 @@ class AgentSessionStore:
                 (Jsonb(budget), session_id),
             )
 
-    # ----------------------------------------------------------------- writers
 
     def claim_writer(
         self,
@@ -333,7 +346,6 @@ class AgentSessionStore:
             )
             return row
 
-    # ------------------------------------------------------------------ events
 
     def append_event(
         self,
@@ -383,9 +395,6 @@ class AgentSessionStore:
             (session_id, event_key),
         ).fetchone()
         if existing is not None:
-            # Replaying the identical event after a restart is the intended
-            # path; the same key with different content means two writers
-            # disagree about history.
             if existing["kind"] != kind or existing["payload"] != payload:
                 raise SessionConflict("event key reused with different content")
             return existing
@@ -455,7 +464,6 @@ class AgentSessionStore:
                 tuple(params),
             ).fetchall()
 
-    # ------------------------------------------------------------------ health
 
     def health(self, session_id: str) -> dict | None:
         """Read one session's progress signals from ``agent_session_health``."""
@@ -499,7 +507,6 @@ class AgentSessionStore:
                 tuple(params),
             ).fetchall()
 
-    # ------------------------------------------------------------------- turns
 
     def start_turn(
         self, session_id: str, turn: int, owner: str, epoch: int
@@ -558,7 +565,6 @@ class AgentSessionStore:
                 (session_id, max(1, min(limit, 500))),
             ).fetchall()
 
-    # -------------------------------------------------------------- compaction
 
     def record_compaction(
         self,

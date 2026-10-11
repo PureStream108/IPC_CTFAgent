@@ -13,14 +13,16 @@ import pytest
 
 from backend.agent.context import compacted_history, summary_message
 from backend.agent.runtime import AgentRuntime, SessionResult
+from backend.agent.session import SessionConflict, SessionNeedsRebuild
 from backend.competition.conversation import ToolCall, Turn, TurnTruncated
 
 
 class MemoryWriter:
     """Append-only transcript with the same idempotency rule as the store."""
 
-    def __init__(self, session_id: str = "s1") -> None:
+    def __init__(self, session_id: str = "s1", epoch: int = 1) -> None:
         self._session_id = session_id
+        self.epoch = epoch
         self.items: list[dict] = []
         self.checkpoints: list[dict] = []
         self.usage: list[tuple] = []
@@ -33,6 +35,8 @@ class MemoryWriter:
     def append(self, event_key, kind, payload):
         existing = next((item for item in self.items if item["event_key"] == event_key), None)
         if existing:
+            if existing["kind"] != kind or existing["payload"] != payload:
+                raise SessionConflict("event key reused with different content")
             return existing
         item = {
             "session_id": self._session_id,
@@ -174,8 +178,6 @@ def test_interrupted_side_effects_are_marked_unknown_after_a_restart():
     resumed = Adapter([Turn([{"role": "assistant", "content": "resume"}], [], "resume")])
     assert runtime(writer, resumed).run().status == "idle"
 
-    # The side effect may already have happened, so it is reported as unknown
-    # rather than silently retried.
     replayed = resumed.seen[0]
     assert any(
         message.get("role") == "tool" and "unknown" in message.get("content", "")
@@ -235,9 +237,6 @@ def test_tool_results_are_reattached_to_their_declaring_turn():
         "tool-result:c1", "tool_result",
         {"id": "c1", "message": {"role": "tool", "tool_call_id": "c1", "content": "{}"}},
     )
-    # A restart directive can land before the repaired result of the second
-    # call; replaying that order verbatim makes strict providers reject the
-    # whole request with an opaque 400.
     writer.append(
         "session:user:i001", "provider_messages",
         {"messages": [{"role": "user", "content": "New assigned intent i001"}]},
@@ -322,7 +321,6 @@ def test_compaction_without_a_compressor_degrades_instead_of_failing():
     assert result.status == "idle"
     degraded = [item for item in writer.items if item["kind"] == "error"]
     assert degraded and degraded[0]["payload"]["status"] == "no_compressor"
-    # The transcript was still compacted, deterministically.
     assert any(item["kind"] == "context_compacted" for item in writer.items)
 
 
@@ -346,7 +344,6 @@ def test_a_failing_semantic_compressor_degrades_and_keeps_running():
 def test_compaction_triggers_on_the_token_budget_not_only_bytes():
     writer = MemoryWriter()
     adapter = Adapter([Turn([{"role": "assistant", "content": "ok"}], [], "ok")])
-    # Well under the byte ceiling, but over a small token budget.
     result = runtime(
         writer, adapter,
         context_bytes=10_000_000,
@@ -395,7 +392,6 @@ def test_a_follow_up_message_reaches_the_provider_instead_of_replaying_the_first
     assert runtime(writer, adapter).run("third question").text == "re: third question"
     assert adapter.prompts == ["first question", "second question", "third question"]
 
-    # Each follow-up is durable, so a restart replays the real conversation.
     recorded = [
         message["content"]
         for item in writer.items
@@ -416,7 +412,6 @@ def test_resuming_without_new_input_does_not_duplicate_the_last_message():
     ])
     runtime(writer, adapter).run("only question")
     runtime(writer, adapter).run(None)
-    # Re-sending the identical message (a client retry) must not double it.
     runtime(writer, adapter).run("only question")
 
     users = [
@@ -455,10 +450,9 @@ def test_an_unset_token_limit_is_inferred_from_the_adapter_model():
 
     writer = MemoryWriter()
     adapter = Configured([Turn([{"role": "assistant", "content": "ok"}], [], "ok")])
-    instance = runtime(writer, adapter)  # context_token_limit left at 0
+    instance = runtime(writer, adapter)
     assert instance.context_token_limit > 100_000
 
-    # An unknown model stays off rather than taking a guessed ceiling.
     class Unknown(Adapter):
         class config:
             model = "bespoke-internal-llm"
@@ -466,6 +460,176 @@ def test_an_unset_token_limit_is_inferred_from_the_adapter_model():
     assert runtime(
         MemoryWriter(), Unknown([Turn([{"role": "assistant", "content": "ok"}], [], "ok")])
     ).context_token_limit == 0
+
+
+class _Status400Error(Exception):
+    """Stand-in for a strict provider rejecting an invalid tool-order turn."""
+
+    def __init__(self, status_code: int = 400) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def test_continuation_message_uses_a_stable_epoch_scoped_key_not_a_position():
+    """A resumed-session follow-up must key on (epoch, content), not length.
+
+    A position key (`session:user:{len(events)}`) drifts the moment the event
+    count changes, so a replay re-appends the same message or a new one reuses
+    an old slot. The stable key keeps replay idempotent and distinct messages
+    distinct, with the epoch rooting out cross-generation collisions.
+    """
+    writer = MemoryWriter(epoch=7)
+    adapter = Adapter([
+        Turn([{"role": "assistant", "content": "a"}], [], "a"),
+        Turn([{"role": "assistant", "content": "b"}], [], "b"),
+    ])
+    runtime(writer, adapter).run("first")
+    runtime(writer, adapter).run("second")
+
+    follow_ups = [item for item in writer.items if item["kind"] == "user_message"]
+    assert len(follow_ups) == 1
+    key = follow_ups[0]["event_key"]
+    assert key.startswith("session:user:continue:7:")
+    import hashlib
+
+    expected = (
+        "session:user:continue:7:"
+        + hashlib.sha256(b"second").hexdigest()[:16]
+    )
+    assert key == expected
+
+
+def test_replaying_the_same_continuation_is_idempotent_under_the_stable_key():
+    """Re-running the identical resume must not double the follow-up event."""
+    writer = MemoryWriter(epoch=2)
+    runtime(writer, Adapter([Turn([{"role": "assistant", "content": "x"}], [], "x")])).run("start")
+
+    def resume():
+        adapter = Adapter([Turn([{"role": "assistant", "content": "y"}], [], "y")])
+        runtime(writer, adapter).run("please continue the work")
+
+    resume()
+    before = len([i for i in writer.items if i["kind"] == "user_message"])
+    resume()
+    resume()
+    after = len([i for i in writer.items if i["kind"] == "user_message"])
+    assert before == after == 1
+
+
+def test_watchdog_resume_without_new_input_never_triggers_a_rebuild():
+    """Resuming with no input must stay a plain replay, not a rebuild signal."""
+    writer = MemoryWriter(epoch=3)
+    adapter = Adapter([
+        Turn([{"role": "assistant", "content": "a"}], [], "a"),
+        Turn([{"role": "assistant", "content": "b"}], [], "b"),
+    ])
+    runtime(writer, adapter).run("only question")
+    result = runtime(writer, adapter).run(None)
+    assert result.status == "idle"
+    assert not [i for i in writer.items if i["kind"] == "user_message"]
+
+
+def test_an_invalid_tool_order_turn_is_repaired_in_place_before_a_retry():
+    """A 400 whose repair changes the projection retries over the fixed history.
+
+    The handler is exercised directly: bootstrap already pre-repairs durable
+    poison, so the realistic path for a healable 400 reaching the loop is a
+    projection that still carries a fenceable dangling call. ``_handle_turn_failure``
+    must return the repaired projection (not raise) so the loop retries.
+    """
+    writer = MemoryWriter()
+    writer.append(
+        "session:user:initial", "provider_messages",
+        {"messages": [{"role": "user", "content": "go"}]},
+    )
+    inst = runtime(writer, Adapter([]))
+    poisoned = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "shell"}}]},
+    ]
+    repaired = inst._handle_turn_failure(_Status400Error(), poisoned, turn_number=5, repaired_turn=-1)
+    assert repaired != poisoned
+    assert any(m.get("role") == "tool" for m in repaired)
+    healed = [i for i in writer.items if i["kind"] == "status"
+              and i["payload"].get("status") == "tool_order_repaired"]
+    assert healed
+
+
+def test_a_second_400_on_an_already_repaired_turn_escalates_to_rebuild():
+    """One repair per turn: a persistent 400 after repair must rebuild, not loop."""
+    writer = MemoryWriter()
+    inst = runtime(writer, Adapter([]))
+    clean = [{"role": "user", "content": "go"}]
+    with pytest.raises(SessionNeedsRebuild) as caught:
+        inst._handle_turn_failure(_Status400Error(), clean, turn_number=5, repaired_turn=5)
+    assert caught.value.reason == "invalid_tool_order"
+
+
+def test_a_400_that_repair_cannot_fix_escalates_to_a_rebuild_without_looping():
+    """If repair changes nothing and the 400 persists, rebuild once - no loop."""
+    writer = MemoryWriter()
+    writer.append(
+        "session:user:initial", "provider_messages",
+        {"messages": [{"role": "user", "content": "go"}]},
+    )
+
+    class AlwaysRejects:
+        def __init__(self):
+            self.calls = 0
+
+        def turn(self, messages, system, tools, emit, cancel):
+            self.calls += 1
+            raise _Status400Error()
+
+        def tool_result(self, call, output):
+            return {"role": "tool", "tool_call_id": call.id, "content": str(output)}
+
+    adapter = AlwaysRejects()
+    with pytest.raises(SessionNeedsRebuild) as caught:
+        runtime(writer, adapter).run(None)
+    assert caught.value.reason == "invalid_tool_order"
+    assert adapter.calls == 1
+
+
+def test_a_non_400_provider_error_still_propagates_unchanged():
+    """Transient 429/5xx must keep their existing retry path, not self-heal."""
+    writer = MemoryWriter()
+    writer.append(
+        "session:user:initial", "provider_messages",
+        {"messages": [{"role": "user", "content": "go"}]},
+    )
+
+    class RateLimited:
+        def turn(self, messages, system, tools, emit, cancel):
+            raise _Status400Error(status_code=429)
+
+        def tool_result(self, call, output):
+            return {"role": "tool", "tool_call_id": call.id, "content": str(output)}
+
+    with pytest.raises(_Status400Error):
+        runtime(writer, RateLimited()).run(None)
+
+
+def test_a_reused_continuation_key_with_different_content_needs_a_rebuild():
+    """A durable collision under a reused key is classified as needs-rebuild."""
+    writer = MemoryWriter(epoch=1)
+    writer.append(
+        "session:user:initial", "provider_messages",
+        {"messages": [{"role": "user", "content": "go"}]},
+    )
+    import hashlib
+
+    text = "resume please"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    writer.append(
+        f"session:user:continue:1:{digest}", "user_message",
+        {"messages": [{"role": "user", "content": "a DIFFERENT stored message"}]},
+    )
+    adapter = Adapter([Turn([{"role": "assistant", "content": "ok"}], [], "ok")])
+    with pytest.raises(SessionNeedsRebuild) as caught:
+        runtime(writer, adapter).run(text)
+    assert caught.value.reason == "event_key_conflict"
+
 
 
 def test_an_explicit_token_limit_overrides_the_inferred_window():
@@ -484,7 +648,6 @@ def test_an_explicit_token_limit_overrides_the_inferred_window():
 def test_calibration_follows_the_real_prompt_token_count():
     writer = MemoryWriter()
     turn = Turn([{"role": "assistant", "content": "done"}], [], "done")
-    # A provider that charges roughly twice the local estimate.
     turn.usage = {"prompt_tokens": 10_000, "output_tokens": 10}
     instance = runtime(writer, Adapter([turn]), context_token_limit=100_000)
     instance.run("hello world, this is a modest prompt")
@@ -584,7 +747,6 @@ def test_summary_projection_accepts_structured_and_legacy_summaries():
     assert summary_message("plain text")["content"].endswith("plain text")
     assert summary_message("") is None
     assert summary_message({}) is None
-    # An empty summary leaves the retained tail untouched.
     assert compacted_history({"summary": "", "messages": [{"role": "user", "content": "t"}]}) == [
         {"role": "user", "content": "t"}
     ]

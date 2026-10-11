@@ -60,15 +60,11 @@ def test_job_rows_record_lifecycle_and_keep_the_first_terminal_state(jobs, sessi
     assert job["exit_code"] is None
 
     jobs.note_progress(job["id"], stdout_offset=120)
-    # Offsets only move forward: a re-read from an older offset is a valid
-    # retry and must not rewind the cursor for the next incremental poll.
     assert jobs.note_progress(job["id"], stdout_offset=40)["stdout_offset"] == 120
 
     finished = jobs.finish(job["id"], "exited", exit_code=7)
     assert finished["exit_code"] == 7
     assert finished["finished_at"] is not None
-    # A cancel racing the process's own exit must not overwrite the recorded
-    # exit code with 'cancelled'.
     assert jobs.finish(job["id"], "cancelled")["state"] == "exited"
     assert jobs.finish(job["id"], "cancelled")["exit_code"] == 7
 
@@ -84,7 +80,6 @@ def test_jobs_of_a_vanished_container_are_lost_not_exited(jobs, session):
     lost = jobs.mark_lost_for_session(session["id"])
     assert [row["id"] for row in lost] == [one["id"]]
     assert jobs.job(one["id"])["state"] == "lost"
-    # No exit code was invented for the job whose fate is unknown.
     assert jobs.job(one["id"])["exit_code"] is None
     assert jobs.job(two["id"])["state"] == "exited"
 
@@ -95,13 +90,10 @@ def test_detached_job_outlives_the_sixty_second_foreground_ceiling(
     """The point of P4a: a command longer than the exec timeout can finish."""
     sandbox = LocalSandbox("member", tmp_path)
     service = JobService(jobs, sandbox, session["id"])
-    # Shell builtins rather than an interpreter path: an absolute host path
-    # would be refused by the very command policy this feature must respect.
     started = service.start("echo phase-1; sleep 1; echo phase-2; exit 3")
     assert started["ok"] is True
 
     job_id = started["job_id"]
-    # Polling while it runs is non-blocking and reports progress, not an exit.
     assert service.status(job_id)["state"] in {"running", "exited"}
 
     final = wait_for(
@@ -110,13 +102,10 @@ def test_detached_job_outlives_the_sixty_second_foreground_ceiling(
         )
     )
     assert final is not None, "detached job never reached a terminal state"
-    # The real exit code survives, rather than being flattened to ok/not-ok.
     assert final["exit_code"] == 3
 
     first = service.logs(job_id)
     assert "phase-1" in first["text"]
-    # The stored cursor advances, so a second poll returns only new bytes
-    # instead of re-reading what the model has already seen.
     assert service.logs(job_id)["text"] == ""
     assert service.logs(job_id, offset=0)["text"] == first["text"]
 
@@ -135,7 +124,6 @@ def test_job_logs_report_truncation_instead_of_hiding_it(jobs, session, tmp_path
     assert page["truncated"] is True
     assert len(page["text"]) == 1000
     assert page["next_offset"] == 1000
-    # Continuing from the cursor reaches the rest rather than restarting.
     assert service.logs(job_id, limit=1000)["offset"] == 1000
 
 
@@ -147,7 +135,6 @@ def test_job_start_applies_the_same_host_path_policy_as_bash(jobs, session, tmp_
     blocked = service.start("cat /host/etc/shadow")
     assert blocked["ok"] is False
     assert "blocked" in blocked["error"]
-    # Nothing was started and no row was left behind to poll.
     assert jobs.jobs(session["id"]) == []
 
 
@@ -164,7 +151,6 @@ def test_cancelling_a_job_kills_it_and_records_the_cancellation(
     assert service.cancel(job_id)["ok"] is True
     assert jobs.job(job_id)["state"] == "cancelled"
     assert jobs.job(job_id)["finished_at"] is not None
-    # Cancelling an already finished job is reported, not retried.
     assert service.cancel(job_id)["note"] == "job had already finished"
 
 
@@ -175,8 +161,6 @@ def test_a_job_whose_process_disappeared_is_reported_as_unknown(
     sandbox = LocalSandbox("member", tmp_path)
     service = JobService(jobs, sandbox, session["id"])
     job = jobs.start(session["id"], "sleep 300", pid=0)
-    # Simulate the container having restarted: a row still marked running, a
-    # pid file naming a process that is gone, and no recorded exit status.
     directory = sandbox._job_dir(job["id"])
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "pid").write_text("2147483646", encoding="utf-8")
@@ -234,7 +218,6 @@ def test_stopping_a_run_resolves_its_jobs_as_lost_not_exited(db, tmp_path):
     assert [row["id"] for row in lost] == [running_job["id"]]
     assert jobs.job(running_job["id"])["state"] == "lost"
     assert jobs.job(running_job["id"])["exit_code"] is None
-    # An already finished job keeps its real outcome.
     assert jobs.job(done_job["id"])["state"] == "exited"
     assert jobs.job(done_job["id"])["exit_code"] == 0
 
@@ -292,8 +275,6 @@ def test_a_long_in_flight_turn_does_not_accumulate_quiet_time(db, session):
     assert fresh["quiet_seconds"] < 60
     assert classify(fresh).level == "ok"
 
-    # But a turn that has been 'running' for an hour with no events is a real
-    # stall, and must escalate rather than be excused as "slow".
     with db.connect() as connection:
         connection.execute(
             """UPDATE agent_turns SET started_at=now()-interval '1 hour'
@@ -332,3 +313,36 @@ def test_incremental_log_reads_tile_the_output_exactly(jobs, session, tmp_path):
     before = jobs.job(job_id)["stdout_offset"]
     service.logs(job_id, offset=0, limit=50)
     assert jobs.job(job_id)["stdout_offset"] == before
+
+
+def test_sweep_stale_closes_only_long_silent_running_jobs(jobs, session, db):
+    """T5: a periodic sweep closes jobs idle past the threshold as lost.
+
+    A job whose process vanished without an exit status leaves a permanently
+    ``running`` row that no poll will ever close.  The time-based sweep closes
+    it; a job that is merely slow but still reporting progress is left alone.
+    """
+    stale = jobs.start(session["id"], "sleep 99999")
+    fresh = jobs.start(session["id"], "sleep 1")
+    done = jobs.start(session["id"], "echo hi")
+    jobs.finish(done["id"], "exited", exit_code=0)
+
+    with db.connect() as connection:
+        connection.execute(
+            "UPDATE agent_jobs SET last_progress_at=now()-interval '2 hours' WHERE id=%s",
+            (stale["id"],),
+        )
+
+    swept = jobs.sweep_stale(idle_seconds=1800)
+    assert [row["id"] for row in swept] == [stale["id"]]
+    assert jobs.job(stale["id"])["state"] == "lost"
+    assert jobs.job(stale["id"])["exit_code"] is None
+    assert jobs.job(fresh["id"])["state"] == "running"
+    assert jobs.job(done["id"])["state"] == "exited"
+
+    assert jobs.sweep_stale(idle_seconds=1800) == []
+
+
+def test_sweep_stale_rejects_a_nonpositive_threshold(jobs):
+    with pytest.raises(ValueError):
+        jobs.sweep_stale(idle_seconds=0)
