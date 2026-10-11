@@ -44,16 +44,16 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     engine = create_engine(_migration_database_url(), poolclass=pool.NullPool)
     with engine.connect() as connection:
+        lock_timeout_ms = int(os.environ.get("IPC_MIGRATION_LOCK_TIMEOUT_MS", "5000"))
+        if lock_timeout_ms > 0:
+            connection.exec_driver_sql(f"SET lock_timeout TO {lock_timeout_ms}")
+            connection.commit()
         context.configure(connection=connection)
         with context.begin_transaction():
             context.run_migrations()
     engine.dispose()
 
 
-# Some tooling imports this module only to resolve the configured DSN.  A real
-# Alembic ``EnvironmentContext`` always provides ``configure`` and transaction
-# helpers; leave a deliberately minimal stand-in untouched so those callers do
-# not accidentally start a migration during import.
 if hasattr(config, "get_main_option") and all(
     hasattr(context, attribute)
     for attribute in ("is_offline_mode", "configure", "begin_transaction", "run_migrations")
