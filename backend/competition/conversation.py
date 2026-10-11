@@ -27,7 +27,6 @@ class ToolCall:
     arguments: dict
 
 
-# Every surface reports "I ran out of output budget" with its own token.
 _OUTPUT_LIMIT_REASONS = frozenset({"max_tokens", "max_output_tokens", "length"})
 
 _PARTIAL_PLACEHOLDER = "[no output was produced before the limit was reached]"
@@ -58,9 +57,6 @@ class Turn:
     messages: list[dict]
     tools: list[ToolCall] = field(default_factory=list)
     text: str = ""
-    # Real token counts from the provider, when it reports them. These
-    # calibrate the local estimate so the compaction threshold tracks the
-    # tokenizer in use instead of a guess.
     usage: dict | None = None
 
 
@@ -88,9 +84,6 @@ def normalize_usage(raw: Any) -> dict | None:
             break
     if reasoning is None:
         reasoning = raw.get("reasoning_tokens")
-    # Anthropic reports cache reads separately; they are still prompt tokens
-    # the model had to process, so a threshold based on prompt size must count
-    # them or it will compact far too late on a cached prefix.
     if prompt is not None:
         for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
             extra = raw.get(key)
@@ -156,6 +149,8 @@ def sse(response):
 
 
 class ConversationAdapter:
+    emits_reasoning = True
+
     def __init__(
         self,
         config,
@@ -168,17 +163,11 @@ class ConversationAdapter:
         self.config = config
         self.request = request
         self.max_output_tokens = max_output_tokens
-        # This is the gap between streamed chunks, not a wall-clock budget for
-        # the turn. A model that reasons for a while before its first token
-        # would be killed by a short value here.
         self.read_timeout = max(30, read_timeout)
         self.surface = "anthropic" if config.api_format == "anthropic" else (
             "responses" if config.api_surface == "responses" else "chat_completions"
         )
-        # Provider session affinity must survive reconnects, so the caller can
-        # supply the durable id stored on the agent session.
         self._provider_session = provider_session_id or f"ipc-session-{uuid.uuid4().hex[:16]}"
-        # Cleared permanently if the provider rejects stream_options.
         self._stream_usage_supported = True
 
     @property
@@ -194,12 +183,10 @@ class ConversationAdapter:
         return {"role": "tool", "tool_call_id": call.id, "content": text}
 
     def turn(self, messages: list[dict], system: str, tools: list[dict],
-             emit: Callable[[str], None], cancel: threading.Event) -> Turn:
+             emit: Callable[[str], None], cancel: threading.Event,
+             emit_reasoning: Callable[[str], None] | None = None) -> Turn:
         config = self.config
         if config.api_format == "mock":
-            # The offline mock has no provider to call. Echoing the latest user
-            # message keeps a mock-configured deployment interactive and lets a
-            # test assert that its own input reached the runtime.
             latest = ""
             for message in reversed(messages):
                 if isinstance(message, dict) and message.get("role") == "user":
@@ -233,21 +220,18 @@ class ConversationAdapter:
             if config.reasoning_effort not in {"auto", "none", "minimal"} and config.api_format != "deepseek":
                 body["reasoning_effort"] = config.reasoning_effort
             if self._stream_usage_supported:
-                # A streamed chat completion omits usage unless asked. Without
-                # it the token budget has nothing to calibrate against.
                 body["stream_options"] = {"include_usage": True}
         if cancel.is_set():
             raise InterruptedError("session cancelled")
+        think = emit_reasoning or (lambda _text: None)
         try:
             with self.request(
                 endpoint, headers=headers, json=body, stream=True,
                 timeout=(15, self.read_timeout),
             ) as response:
                 response.raise_for_status()
-                return self._read(response, emit, cancel)
+                return self._read(response, emit, cancel, think)
         except requests.HTTPError as exc:
-            # Not every OpenAI-compatible provider accepts stream_options.
-            # Losing usage reporting is acceptable; failing the turn is not.
             if not self._should_drop_stream_options(exc, body):
                 raise
             self._stream_usage_supported = False
@@ -257,7 +241,7 @@ class ConversationAdapter:
                 timeout=(15, self.read_timeout),
             ) as response:
                 response.raise_for_status()
-                return self._read(response, emit, cancel)
+                return self._read(response, emit, cancel, think)
 
     @staticmethod
     def _should_drop_stream_options(exc: requests.HTTPError, body: dict) -> bool:
@@ -269,11 +253,12 @@ class ConversationAdapter:
             return False
         try:
             detail = response.text or ""
-        except Exception:  # pragma: no cover - defensive
+        except Exception:
             detail = ""
         return "stream_options" in detail or "include_usage" in detail
 
-    def _read(self, response, emit, cancel):
+    def _read(self, response, emit, cancel, emit_reasoning=None):
+        think = emit_reasoning or (lambda _text: None)
         text = ""
         calls: dict[int, dict] = {}
         blocks: dict[int, dict] = {}
@@ -285,12 +270,18 @@ class ConversationAdapter:
             if cancel.is_set():
                 raise InterruptedError("session cancelled")
             delta_text = ""
+            reasoning_text = ""
             kind = event.get("type", "")
             if "error" in event or kind in {"error", "response.failed"}:
                 raise RuntimeError("provider stream did not complete successfully")
             if self.surface == "responses":
                 if kind == "response.output_text.delta":
                     delta_text = event.get("delta", "")
+                elif kind in {
+                    "response.reasoning_summary_text.delta",
+                    "response.reasoning_text.delta",
+                }:
+                    reasoning_text = str(event.get("delta") or "")
                 elif kind in {"response.completed", "response.incomplete"}:
                     payload = event.get("response") or {}
                     output = payload.get("output") or []
@@ -317,16 +308,14 @@ class ConversationAdapter:
                     elif delta.get("type") == "input_json_delta":
                         blocks[index]["_json"] += delta.get("partial_json", "")
                     elif delta.get("type") == "thinking_delta":
-                        blocks[index]["thinking"] = blocks[index].get("thinking", "") + delta.get("thinking", "")
+                        reasoning_text = delta.get("thinking", "")
+                        blocks[index]["thinking"] = blocks[index].get("thinking", "") + reasoning_text
                     elif delta.get("type") == "signature_delta":
                         blocks[index]["signature"] = blocks[index].get("signature", "") + delta.get("signature", "")
                 elif kind == "message_delta":
                     usage = merge_usage(usage, normalize_usage(event.get("usage")))
                     stop = (event.get("delta") or {}).get("stop_reason")
                     if stop in _OUTPUT_LIMIT_REASONS:
-                        # An output-limit stop is a budget event, not a broken
-                        # session.  Keep reading so the partial turn can be
-                        # assembled and continued on the next request.
                         truncated = str(stop)
                     elif stop == "refusal":
                         raise RuntimeError("provider refused to complete the turn")
@@ -344,6 +333,10 @@ class ConversationAdapter:
                         continue
                     delta = choice.get("delta") or {}
                     delta_text += delta.get("content") or ""
+                    for field in ("reasoning_content", "reasoning"):
+                        value = delta.get(field)
+                        if isinstance(value, str):
+                            reasoning_text += value
                     for item in delta.get("tool_calls") or []:
                         item = item or {}
                         entry = calls.setdefault(item.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
@@ -360,6 +353,8 @@ class ConversationAdapter:
                         complete = True
                     elif reason is not None:
                         raise RuntimeError(f"provider turn interrupted: {reason}")
+            if reasoning_text:
+                think(reasoning_text)
             if delta_text:
                 text += delta_text
                 emit(delta_text)
@@ -407,8 +402,6 @@ class ConversationAdapter:
                     and block.get("type") == "thinking"
                     and not block.get("signature")
                 ):
-                    # A thinking block cut before its signature cannot be
-                    # replayed to the provider.
                     continue
                 content.append(block)
             if truncated is not None and not content:

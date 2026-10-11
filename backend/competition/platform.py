@@ -46,6 +46,25 @@ class CompetitionPlatform:
         declared = getattr(self.adapter, "supports_instances", False)
         return bool(declared() if callable(declared) else declared)
 
+    def instance_limit(self) -> int | None:
+        """Per-team container limit read from the platform, if it reports one.
+
+        ``None`` leaves the decision to the workflow's own
+        ``remote_instance_limit``.
+        """
+        method = getattr(self.adapter, "instance_limit", None)
+        if not callable(method):
+            return None
+        try:
+            limit = method()
+        except Exception:
+            return None
+        try:
+            limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            return None
+        return limit if limit and limit > 0 else None
+
     def preflight(self):
         if not self.spec.competition_id or not self.spec.team_id:
             raise ValueError("Workflow needs explicit competition_id and team_id before Start")

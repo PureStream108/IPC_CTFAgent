@@ -6,7 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.api.deps import get_state
 from backend.competition.service import CompetitionService
@@ -20,6 +20,25 @@ router = APIRouter(prefix="/api", tags=["competition"])
 class StartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idempotency_key: str = Field(min_length=8, max_length=200)
+    select: list[str] | None = Field(default=None, max_length=1000)
+
+    @field_validator("select")
+    @classmethod
+    def validate_select(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("challenge ids must be strings")
+            item = item.strip()
+            if not item or len(item) > 256:
+                raise ValueError("challenge ids must be 1 to 256 characters")
+            if item not in cleaned:
+                cleaned.append(item)
+        if not cleaned:
+            raise ValueError("select must contain at least one challenge id")
+        return cleaned
 
 
 class ControlRequest(BaseModel):
@@ -72,7 +91,7 @@ def start(
     body: StartRequest,
     service: CompetitionService = Depends(get_competition),
 ):
-    return _call(service.start, workflow_id, body.idempotency_key)
+    return _call(service.start, workflow_id, body.idempotency_key, body.select)
 
 
 @router.get("/runs")

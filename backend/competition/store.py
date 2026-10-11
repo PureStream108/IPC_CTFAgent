@@ -23,16 +23,9 @@ _SECRET_KEYS = {
     "client_secret", "secret_value",
 }
 
-# How long a worker's self-renewed liveness lease stays valid.
-#
-# Deliberately far longer than the 60s assignment heartbeat. The worker renews
-# per provider response and per tool call, but a single provider turn can
-# legitimately run for minutes (the read timeout alone is 300s), and treating
-# one slow turn as death would release a seat mid-exploit. This expiry is only
-# the coarse "definitely gone" signal; graded stall detection reads
-# ``last_renewed_at`` instead, which distinguishes 2 minutes of silence from
-# 20 without ever revoking a live seat.
 WRITER_LEASE_SECONDS = 600
+
+SERVICE_MEMBER_ID = "competition-control"
 
 
 def _redact_snapshot(value):
@@ -131,7 +124,6 @@ class CompetitionStore:
         if not identity_key.strip() or not idempotency_key.strip():
             raise ValueError("identity and idempotency keys are required")
         with self.db.connect() as connection:
-            # Cross-run: enforces "at most one active competition".
             self._lock(connection, None)
             existing = connection.execute(
                 "SELECT * FROM competition_runs WHERE idempotency_key = %s", (idempotency_key,),
@@ -257,8 +249,6 @@ class CompetitionStore:
         if member not in MEMBER_NAMES or role not in {"primary", "helper"} or not owner:
             raise ValueError("invalid Member assignment")
         with self.db.connect() as connection:
-            # Seat occupancy is a per-run race: only one run is active at a
-            # time, and uq_competition_member_slot is the hard guarantee.
             self._lock(connection, run_id)
             row = connection.execute(
                 """SELECT c.*,r.status AS run_status FROM competition_challenges c
@@ -400,8 +390,6 @@ class CompetitionStore:
                 parent = parent_row["id"]
                 reason = "helper"
         if parent is None:
-            # Only one live root session per task; an earlier seat for the same
-            # challenge is retired rather than competing for the slot.
             connection.execute(
                 """UPDATE agent_sessions SET state='superseded',updated_at=now()
                    WHERE task_key=%s AND parent_session_id IS NULL AND state='active'""",
@@ -683,7 +671,6 @@ class CompetitionStore:
     def claim_submission(self, run_id: str) -> dict | None:
         with self.db.connect() as connection:
             self._lock(connection, run_id)
-            # Never reset submitting/unknown to queued after a process crash.
             return connection.execute(
                 """UPDATE competition_submissions SET status='submitting',submitted_at=now()
                    WHERE id=(SELECT s.id FROM competition_submissions s
@@ -701,16 +688,11 @@ class CompetitionStore:
 
     def finish_submission(self, submission_id: str, result: dict) -> dict:
         status = result["verdict"]
-        # A pending response without a durable platform id cannot be queried
-        # after a restart.  Keep it visibly uncertain instead of creating an
-        # unresolvable pending row.
         if status == "pending" and not result.get("submission_id"):
             status = "unknown"
         if status not in {"correct", "wrong", "pending", "unknown", "rate_limited", "auth_required", "rejected"}:
             raise ValueError("unknown verdict state")
         with self.db.connect() as connection:
-            # Resolve the shard before locking; the authoritative read below
-            # still takes FOR UPDATE, so a concurrent verdict cannot slip in.
             owner_run = connection.execute(
                 "SELECT run_id FROM competition_submissions WHERE id=%s",
                 (submission_id,),
@@ -736,7 +718,6 @@ class CompetitionStore:
                     (wrong_count, cooldown_seconds(wrong_count), challenge["id"]),
                 )
             elif status == "rate_limited":
-                # Conservatively apply platform rate limiting to the entire run.
                 connection.execute(
                     """UPDATE competition_challenges c SET next_submission_at=GREATEST(
                        COALESCE(next_submission_at,now()),now()+(%s*interval '1 second'))
@@ -980,9 +961,6 @@ class CompetitionStore:
 
     def run_snapshot(self, run_id: str) -> dict:
         run = self.get_run(run_id)
-        # Older runs may predate credential redaction.  Never echo sensitive
-        # snapshot fields through a status endpoint, even before a migration
-        # has scrubbed the persisted JSON.
         run = dict(run)
         snapshot = run.get("config_snapshot")
         if isinstance(snapshot, (dict, list)):
@@ -1320,7 +1298,6 @@ class CompetitionStore:
                    WHERE id=%s RETURNING *""",
                 (member, owner, assignment_id),
             ).fetchone()
-            # Same transaction, same epoch: the two fences stay in agreement.
             self._sync_assignment_writer(connection, row)
             self._append_locked_event(
                 connection,
@@ -1419,6 +1396,19 @@ class CompetitionStore:
         if data.get("protocol_version") != 1:
             return False
         with self.db.connect() as connection:
+            receiver = connection.execute(
+                """SELECT 1 FROM competition_assignments
+                   WHERE run_id=%s AND challenge_id=%s AND member=%s AND session_id=%s
+                   AND released_at IS NULL AND lease_expires_at>now()""",
+                (
+                    data.get("run_id"), data.get("challenge_id"),
+                    data.get("receiver_member_id"), data.get("receiver_session_id"),
+                ),
+            ).fetchone()
+            if not receiver:
+                return False
+            if data.get("sender_member_id") == SERVICE_MEMBER_ID:
+                return data.get("message_type") == "recon"
             sender = connection.execute(
                 """SELECT 1 FROM competition_assignments
                    WHERE run_id=%s AND challenge_id=%s AND member=%s AND session_id=%s
@@ -1429,26 +1419,13 @@ class CompetitionStore:
                     data.get("lease_epoch"),
                 ),
             ).fetchone()
-            receiver = connection.execute(
-                """SELECT 1 FROM competition_assignments
-                   WHERE run_id=%s AND challenge_id=%s AND member=%s AND session_id=%s
-                   AND released_at IS NULL AND lease_expires_at>now()""",
-                (
-                    data.get("run_id"), data.get("challenge_id"),
-                    data.get("receiver_member_id"), data.get("receiver_session_id"),
-                ),
-            ).fetchone()
-            return bool(sender and receiver)
+            return bool(sender)
 
     def claim_message(self, message) -> dict | None:
         data = message.model_dump(mode="json") if hasattr(message, "model_dump") else dict(message)
         if not self.authorize_message(data):
             raise CompetitionConflict("message session or lease is not active")
         with self.db.connect() as connection:
-            # No advisory lock: UNIQUE (run_id,request_id) is the idempotency
-            # guarantee, so a concurrent claim of the same request loses the
-            # insert and falls through to the stored row below.  Every teammate
-            # message used to queue behind one database-wide lock here.
             existing = self._message_row(connection, data)
             if existing is None:
                 inserted = connection.execute(
@@ -1492,8 +1469,6 @@ class CompetitionStore:
         if not self.authorize_message(data):
             raise CompetitionConflict("message session or lease is not active")
         with self.db.connect() as connection:
-            # Recon is the highest-volume writer in a run; it relies on the
-            # same UNIQUE (run_id,request_id) idempotency instead of a lock.
             existing = self._message_row(connection, data)
             if existing is None:
                 row = connection.execute(
@@ -1513,8 +1488,6 @@ class CompetitionStore:
             if existing is None:
                 raise CompetitionConflict("message row disappeared during persist")
             previous = dict(existing["envelope"])
-            # The database sequence is authoritative.  A retry normally
-            # rebuilds the envelope with its default sequence of zero.
             previous.pop("sequence", None)
             candidate = dict(data)
             candidate.pop("sequence", None)
@@ -1584,6 +1557,44 @@ class CompetitionStore:
             ).fetchone()
             return row["sequence"]
 
+    def message_cursor(self, session_id: str) -> int:
+        with self.db.connect() as connection:
+            row = connection.execute(
+                "SELECT sequence FROM competition_message_cursors WHERE session_id=%s",
+                (session_id,),
+            ).fetchone()
+            return int(row["sequence"]) if row else 0
+
+    def undelivered_messages(self, run_id: str, *, older_than_seconds: int) -> list[dict]:
+        """Recon that landed but whose receiver cursor never advanced past it.
+
+        A receiver session consumes recon by calling ``advance_message_cursor``;
+        until it does, the message sits in ``competition_messages`` ahead of the
+        cursor.  This surfaces every such message older than the grace period so
+        the coordinator can degrade it into durable blackboard facts rather than
+        leaving a teammate's finding stranded in a queue no live session drains.
+
+        The receiver must still be a live seat: a message addressed to a session
+        that was handed off or released is not "undelivered", it is obsolete, and
+        re-injecting it would resurrect stale direction.
+        """
+        with self.db.connect() as connection:
+            return connection.execute(
+                """SELECT m.sequence, m.challenge_id, m.envelope, m.created_at,
+                          a.member AS receiver_member, a.session_id AS receiver_session_id
+                     FROM competition_messages m
+                     LEFT JOIN competition_message_cursors cur
+                       ON cur.session_id=(m.envelope->>'receiver_session_id')
+                     JOIN competition_assignments a
+                       ON a.session_id=(m.envelope->>'receiver_session_id')
+                      AND a.run_id=m.run_id AND a.released_at IS NULL
+                    WHERE m.run_id=%s
+                      AND m.sequence>COALESCE(cur.sequence,0)
+                      AND m.created_at < now() - make_interval(secs => %s)
+                    ORDER BY m.sequence""",
+                (run_id, max(0, older_than_seconds)),
+            ).fetchall()
+
     def claim_wp_job(self, run_id: str, owner: str) -> dict | None:
         with self.db.connect() as connection:
             self._lock(connection, run_id)
@@ -1619,11 +1630,6 @@ class CompetitionStore:
                    WHERE challenge_id=%s""",
                 (job["challenge_id"],),
             )
-            # A WP attempt reuses the solver's session id, so its writer row has
-            # to move with it; otherwise the row still names the released solver
-            # and the WP worker cannot renew its own liveness. A WP attempt runs
-            # as one long model call rather than a turn loop, so it never
-            # renews: the lease covers its whole 10 minute seat deadline.
             self._sync_assignment_writer(connection, assignment, seconds=600)
             return {"job": {**job, "status": "running", "attempts": job["attempts"] + 1},
                     "assignment": assignment}

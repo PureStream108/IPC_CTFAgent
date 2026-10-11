@@ -83,10 +83,6 @@ class _FixtureOps:
                         external_id=external_id,
                         platform="fixture",
                     )
-                    # The coordinator's verified-flag path intentionally
-                    # requires a completion edge.  A real Member would create
-                    # this edge before submitting; the fixture creates the
-                    # equivalent durable fact explicitly.
                     connection.execute(
                         """INSERT INTO intents
                            (id,project_id,to_fact_id,description,creator,created_at)
@@ -173,9 +169,6 @@ class _FixtureOrchestrator:
 
 
 def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_path):
-    # The autouse PostgreSQL fixture exposes the configured database through
-    # the normal runtime environment; importing here avoids constructing an
-    # application (and its background workers) for this focused acceptance.
     from backend.persistence.database import Database
 
     db = Database().configure()
@@ -207,7 +200,6 @@ def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_pa
 
     platform = FixturePlatform(
         [
-            # Web remote is intentionally first in scheduler priority.
             PlatformChallenge(
                 external_id="remote", title="Remote", category="web",
                 description="remote fixture", remote=True,
@@ -240,9 +232,6 @@ def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_pa
         snapshot = service.start(workflow_id, "fixture-run")
         run_id = snapshot["run"]["id"]
 
-        # First tick prepares the remote instance and reserves both primary
-        # seats.  The next tick reconciles the asynchronous project owners and
-        # persists a helper seat for the two-person collaboration path.
         service.tick()
         service.tick()
         assignments = service.store.assignments(run_id, active_only=True)
@@ -258,9 +247,6 @@ def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_pa
             if item["role"] == "primary"
         }
 
-        # Wrong verdicts are persisted and apply a cooldown.  Move the clock
-        # forward in the database before the next candidate to keep the test
-        # deterministic and fast.
         local = by_external["local"]
         local_assignment = primary[local["id"]]
         service.submit_candidate(
@@ -279,8 +265,6 @@ def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_pa
                 (local["id"],),
             )
 
-        # The remote challenge exercises asynchronous pending -> query ->
-        # correct reconciliation, including instance release and WP creation.
         remote = by_external["remote"]
         remote_assignment = primary[remote["id"]]
         service.submit_candidate(
@@ -301,7 +285,7 @@ def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_pa
             "flag{local}", "fixture correct evidence", local["instance_generation"],
         )
         service.tick()
-        service.tick()  # resolves the remote pending submission
+        service.tick()
 
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -422,16 +406,12 @@ def test_paused_run_reconciles_pending_submission_and_renews_without_new_submit(
         calls_before = list(platform.calls)
         service.tick()
 
-        # Pause still performs the two operations that are safe and required:
-        # renew the owned target and reconcile the already accepted request.
         assert platform.renew_calls == ["paused-remote"]
         assert platform.query_calls == [("paused-remote", pending["platform_submission_id"])]
         assert platform.calls == calls_before
         assert service.store.get_run(run_id)["status"] == "paused"
         assert service.store.challenges(run_id)[0]["deadline_at"] == deadline_before
 
-        # A candidate queued while paused remains local.  It is sent only after
-        # an explicit Resume, never as a side effect of reconciliation.
         service.store.queue_recovered_candidate(
             run_id, challenge["id"], "fixture:correct", "resume evidence"
         )
@@ -490,6 +470,49 @@ def test_instance_renewal_failure_rebuilds_and_fences_new_generation(tmp_path):
             for kind, _fields in _state.logger.events
         )
         assert platform.instances()[0]["generation"] == 2
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_stop_teardown_is_resilient_to_a_failing_instance_cleanup(tmp_path):
+    """T4: a raising instance teardown must not strand the stop.
+
+    The run transition has already landed, so the run is stopped regardless.
+    The hazard the old ordering carried was that a raising
+    ``_stop_owned_instances`` skipped ``run.stopped`` and left assignments live,
+    so the orchestrator's recovery loop later resurrected the seat. The teardown
+    must now release every seat, still write the terminal event, and record the
+    failed step instead of aborting.
+    """
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="teardown-remote", title="Teardown remote", category="web",
+            description="teardown fixture", remote=True,
+        )],
+        flags={"teardown-remote": "fixture:correct"},
+        remote_limit=1,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "teardown"
+    )
+    try:
+        run_id = service.start(workflow_id, "teardown-run")["run"]["id"]
+        service.tick()
+        assert service.store.assignments(run_id, active_only=True)
+
+        def boom(_run):
+            raise RuntimeError("docker daemon unreachable")
+
+        service._stop_owned_instances = boom
+        revision = service.store.get_run(run_id)["revision"]
+        snapshot = service.control(run_id, "stop", revision)
+
+        assert snapshot["run"]["status"] == "stopped"
+        assert service.store.assignments(run_id, active_only=True) == []
+        kinds = {event["kind"] for event in service.store.run_events(run_id)}
+        assert "run.stopped" in kinds
+        assert "run.teardown_failed" in kinds
     finally:
         service.shutdown()
         db.close()
@@ -581,8 +604,6 @@ def test_late_correct_verdict_wins_end_state_race_and_creates_one_wp(tmp_path):
         claimed = service.store.claim_submission(run_id)
         assert claimed["id"] == queued["id"]
 
-        # Simulate the coordinator entering drain after the request was sent,
-        # followed by the platform's correct response arriving late.
         service.store.release(
             assignment["id"], assignment["lease_owner"], assignment["epoch"]
         )
@@ -597,7 +618,6 @@ def test_late_correct_verdict_wins_end_state_race_and_creates_one_wp(tmp_path):
         service._on_correct(
             service.store.get_run(run_id), challenge, "fixture:correct"
         )
-        # A delayed wrong callback is idempotently ignored by the terminal row.
         assert service.store.finish_submission(
             claimed["id"], {"verdict": "wrong"}
         )["status"] == "correct"
@@ -813,8 +833,6 @@ def test_a_silent_worker_is_reported_as_stalled_instead_of_quietly_expiring(tmp_
         assert active, "fixture produced no assignment to stall"
         seat = active[0]
 
-        # assign() gave the seat a writer row; expire it to represent a worker
-        # that stopped proving it is alive.
         with db.connect() as connection:
             assert connection.execute(
                 """SELECT 1 FROM agent_session_writers
@@ -848,10 +866,8 @@ def test_a_silent_worker_is_reported_as_stalled_instead_of_quietly_expiring(tmp_
             ).fetchone()
         assert len(stalled_events) == 1
         assert stalled_events[0]["payload"]["assignment_id"] == seat["id"]
-        # The seat was not renewed: liveness now means the worker, not the tick.
         assert extended["extended"] is False
 
-        # A second tick must not duplicate the report.
         service.tick()
         with db.connect() as connection:
             again = connection.execute(
@@ -890,13 +906,10 @@ def test_watchdog_hands_a_dead_seat_to_another_member_keeping_the_findings(tmp_p
         service.tick()
         service.tick()
         active = service.store.assignments(run_id, active_only=True)
-        # A challenge can carry a primary and a helper seat; stall the primary
-        # so the assertions below are about one unambiguous seat.
         primaries = [item for item in active if item["role"] == "primary"]
         assert primaries, "fixture produced no primary assignment to stall"
         seat = primaries[0]
 
-        # A finding the replacement must inherit.
         service.store.append_event(
             seat["session_id"], "evidence-1", "tool_result",
             {"evidence": "found an admin panel"},
@@ -904,8 +917,6 @@ def test_watchdog_hands_a_dead_seat_to_another_member_keeping_the_findings(tmp_p
             epoch=seat["epoch"],
         )
 
-        # Represent a worker that died: its own lease lapsed and nothing has
-        # made progress for long enough to exhaust every escalation step.
         with db.connect() as connection:
             connection.execute(
                 """UPDATE agent_session_writers
@@ -939,7 +950,6 @@ def test_watchdog_hands_a_dead_seat_to_another_member_keeping_the_findings(tmp_p
         taken = current[0]
         assert moved is None, "the stalled Member still holds the seat"
         assert taken["member"] != seat["member"]
-        # The transcript carried over rather than restarting.
         assert taken["session_id"] == seat["session_id"]
 
         with db.connect() as connection:
@@ -957,7 +967,6 @@ def test_watchdog_hands_a_dead_seat_to_another_member_keeping_the_findings(tmp_p
         assert any(row["kind"] == "session.handed_off" for row in events)
         assert inherited["count"] == 1, "the handoff lost the prior finding"
 
-        # The replacement can actually write: both fences moved together.
         service.store.append_event(
             taken["session_id"], "evidence-2", "tool_result",
             {"evidence": "continued from the panel"},

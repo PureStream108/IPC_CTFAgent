@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 
 from backend.competition.platform import CompetitionPlatform
 from backend.competition.policy import Challenge, plan_assignments
-from backend.competition.store import CompetitionConflict, CompetitionStore
+from backend.competition.store import SERVICE_MEMBER_ID, CompetitionConflict, CompetitionStore
 from backend.competition.transport import Envelope, PairCoordinator, ReconPublisher
 from backend.core.ipc import accept_verified_flag
 from backend.core.wp_writer import (
@@ -112,10 +112,6 @@ class CompetitionService:
         self.sync_interval = max(5, sync_interval)
         self.tick_interval = max(0.1, tick_interval)
         self.owner = f"{state.instance_id}:competition"
-        # The legacy Member runtime may still execute a competition Project,
-        # but this token identifies the coordinator that owns scheduling it.
-        # The orchestrator reads the same token when it bootstraps assigned
-        # Members, so a second legacy engine cannot pass the project fence.
         self.engine_owner = self.owner
         state.competition_engine_owner = self.engine_owner
         self._stop = threading.Event()
@@ -125,37 +121,26 @@ class CompetitionService:
         self._start_lock = threading.Lock()
         self._tick_lock = threading.Lock()
         self._starting_projects: set[str] = set()
-        # A project can have a primary and a helper assignment.  The legacy
-        # orchestrator API is project-scoped, so remember each member request
-        # until its durable assignment is visible in the orchestrator.  This
-        # prevents the helper branch from enqueueing the same bootstrap on
-        # every scheduler tick while a worker is still starting.
         self._starting_members: set[tuple[str, str]] = set()
         self._pair: PairCoordinator | None = None
         self._recon: ReconPublisher | None = None
         self._recon_endpoint: str | None = None
-        # The application uses the real declarative platform adapter.  Keeping
-        # the constructor seam explicit lets deterministic platforms exercise
-        # the same persistent coordinator in acceptance tests and in local
-        # replay tools without monkeypatching network clients.
         self._platform_factory = platform_factory
         self._ops_service = ops_service
         self._wp_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ipc-wp")
         self._wp_futures: dict[str, Any] = {}
-        # Capability failures are durable run facts, but do not need to be
-        # emitted on every scheduler tick while an unsupported remote task is
-        # waiting for an operator to change the workflow.
         self._instance_capability_warnings: set[tuple[str, str]] = set()
+        self._published_instance_entries: set[tuple[str, str, str]] = set()
         self._engine_conflicts: set[tuple[str, str]] = set()
         self._engine_epochs: dict[str, int] = {}
         self.observation_interval = 10.0
         self._last_observation_at = 0.0
-        # Seats already reported as stalled, so each stall is one event rather
-        # than one per tick.
         self._reported_stalls: set[str] = set()
-        # (assignment_id, level) pairs already acted on, so an escalation
-        # happens once per level instead of every tick.
         self._watchdog_actions: set[tuple[str, str]] = set()
+        self._message_delivery_window = 300
+        self._undelivered_injected: set[int] = set()
+        self._receiver_cursors: dict[str, int] = {}
+        self._stale_job_seconds = 1800
 
     @property
     def ops(self) -> OpsAgentService:
@@ -199,8 +184,6 @@ class CompetitionService:
                     )
                     self._recon_endpoint = endpoint
                 except Exception:
-                    # The durable store remains authoritative if a live PUB
-                    # socket cannot be bound; subscribers can still replay.
                     self._recon = None
                     self._recon_endpoint = None
 
@@ -231,7 +214,7 @@ class CompetitionService:
             )
             try:
                 self._start_loop_thread()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(
                     f"[ipc-competition] supervisor restart failed:"
                     f" {type(exc).__name__}: {exc}",
@@ -253,9 +236,6 @@ class CompetitionService:
             self._recon.close()
             self._recon = None
             self._recon_endpoint = None
-        # Release only leases claimed by this coordinator instance.  A bulk
-        # owner-only cleanup could clear a newer epoch after a restart that
-        # reused the same durable owner identity.
         for project_id, epoch in list(self._engine_epochs.items()):
             with suppress(Exception):
                 self.store.release_engine_lease(
@@ -394,8 +374,6 @@ class CompetitionService:
             "member_config_source": "runtime-config",
         }
         if select is not None:
-            # Keep the operator's selection durable: periodic platform sync
-            # must not pull the remaining challenges into this run.
             snapshot["selected_external_ids"] = [
                 str(item.external_id) for item in discovered
             ]
@@ -450,7 +428,13 @@ class CompetitionService:
 
     @staticmethod
     def _challenge_metadata(item) -> dict[str, Any]:
-        return {
+        platform_data = getattr(item, "platform_data", None) or {}
+        solve_count = platform_data.get("solve_count")
+        try:
+            solve_count = int(solve_count) if solve_count is not None else None
+        except (TypeError, ValueError):
+            solve_count = None
+        metadata: dict[str, Any] = {
             "title": item.title,
             "category": item.category,
             "description": item.description,
@@ -460,6 +444,12 @@ class CompetitionService:
             "hints": list(item.hints),
             "ready_at": datetime.now(timezone.utc).isoformat(),
         }
+        if solve_count is not None:
+            metadata["solve_count"] = solve_count
+        container_type = platform_data.get("container_type")
+        if container_type:
+            metadata["container_type"] = str(container_type)
+        return metadata
 
     def control(self, run_id: str, action: str, revision: int) -> dict:
         if not self._tick_lock.acquire(blocking=False):
@@ -474,23 +464,76 @@ class CompetitionService:
             target = {"pause": "paused", "resume": "running", "stop": "stopped"}.get(action)
             if target is None:
                 raise ValueError("unsupported run action")
-            # The revision transition is the first operation.  A stale control
-            # request therefore cannot stop projects or release assignments.
             changed = self.store.transition_run(
                 run_id, target, revision=revision,
                 permit_active=action == "stop",
             )
-            if action in {"pause", "stop"}:
+            if action == "stop":
+                self._teardown_stopped_run(run_id, run)
+            elif action == "pause":
                 self._stop_run_projects(run_id)
                 self.store.release_run_assignments(run_id)
-            if action == "stop":
-                self._stop_owned_instances(run)
             self.store.append_run_event(run_id, f"run.{target}", {})
             if action == "resume":
                 self.wake()
             return self.store.run_snapshot(changed["id"])
         finally:
             self._tick_lock.release()
+
+    def _teardown_stopped_run(self, run_id: str, run: dict) -> None:
+        """Tear a stopped run down so no step's failure strands a seat (T4).
+
+        The revision transition has already landed, so the run *is* stopped the
+        instant this returns regardless of what happens here. The danger the old
+        ordering carried was that a raising ``_stop_owned_instances`` skipped the
+        ``run.stopped`` event and left assignments live, so the orchestrator's
+        recovery loop later resurrected the seat. Every step here is therefore
+        best-effort and isolated: a failure in one is recorded and the rest
+        still run, and releasing the seats/leases is attempted before the slow,
+        failure-prone container teardown so a container error can never leave a
+        lease holding a seat the scheduler would reclaim.
+        """
+        steps = (
+            ("stop_projects", lambda: self._stop_run_projects(run_id)),
+            ("release_assignments", lambda: self.store.release_run_assignments(run_id)),
+            ("stop_instances", lambda: self._stop_owned_instances(run)),
+        )
+        for label, step in steps:
+            try:
+                self._run_teardown_step(step)
+            except Exception as exc:
+                self.state.logger.project(
+                    "competition_teardown_step_failed", run_id,
+                    step=label, error=f"{type(exc).__name__}: {exc}",
+                )
+                with suppress(Exception):
+                    self.store.append_run_event(
+                        run_id, "run.teardown_failed",
+                        {"step": label, "error": f"{type(exc).__name__}: {exc}"},
+                    )
+
+    @staticmethod
+    def _run_teardown_step(step, *, attempts: int = 3, base_delay: float = 0.2) -> None:
+        """Run one teardown step with a bounded retry on a transient failure.
+
+        Teardown races the very conditions that make it necessary (a dying
+        engine, a container mid-removal), so a first attempt can fail on a
+        transient error that a short retry clears. The budget is small and
+        bounded: a step that still fails after it propagates to the caller,
+        which records it and moves on rather than looping forever.
+        """
+        last: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                step()
+                return
+            except Exception as exc:
+                last = exc
+                if attempt >= attempts:
+                    break
+                time.sleep(base_delay * attempt)
+        if last is not None:
+            raise last
 
     def _stop_run_projects(self, run_id: str) -> None:
         orchestrator = self.state.orchestrator
@@ -524,15 +567,43 @@ class CompetitionService:
                         },
                     )
 
+    def _sweep_stale_jobs(self, run: dict) -> None:
+        """Periodically close jobs whose process went silent (T5).
+
+        ``_resolve_orphaned_jobs`` only fires on an explicit stop and only for a
+        run's own seats.  A background job can also be orphaned mid-run -- its
+        container removed, its process killed -- leaving a ``running`` row no
+        poller will ever close.  This time-based sweep closes any job idle past
+        the threshold as ``lost`` and records it once as ``job.swept_lost``.
+        """
+        from backend.agent.jobs import AgentJobStore
+
+        try:
+            jobs = AgentJobStore(self.state.db)
+            swept = jobs.sweep_stale(idle_seconds=self._stale_job_seconds)
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_job_sweep_failed", run["id"],
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        for job in swept:
+            self.store.append_run_event(
+                run["id"], "job.swept_lost",
+                {
+                    "job_id": job["id"],
+                    "session_id": job["session_id"],
+                    "command": (job.get("command") or "")[:500],
+                    "idle_seconds": self._stale_job_seconds,
+                },
+            )
+
     def _claim_project_engine(self, run: dict, project_id: str) -> bool:
         try:
             lease = self.store.claim_engine_lease(
                 project_id, "competition", self.engine_owner, seconds=60
             )
         except (UndefinedColumn, UndefinedTable):
-            # Keep old deployments readable during the additive migration; a
-            # configured database gets the durable fence and cannot silently
-            # fall back after the columns are present.
             return True
         except Exception as exc:
             self.store.append_run_event(
@@ -564,9 +635,6 @@ class CompetitionService:
                 continue
             epoch = self._engine_epochs.get(project_id)
             if epoch is None:
-                # A coordinator restart must recover the current fencing
-                # token through claim before it can renew.  Owner identity
-                # alone is insufficient when an old worker is still draining.
                 self._claim_project_engine(run, project_id)
                 continue
             try:
@@ -577,8 +645,6 @@ class CompetitionService:
             except Exception:
                 renewed = True
             if not renewed:
-                # A coordinator restart may have allowed an expired lease to
-                # be reclaimed; claim_engine_lease also fences that takeover.
                 self._claim_project_engine(run, project_id)
 
     def _release_project_engine(self, project_id: str) -> None:
@@ -638,6 +704,7 @@ class CompetitionService:
                    FROM competition_instances i
                    JOIN competition_runs r ON r.id=i.run_id
                    WHERE i.state='stop_pending'
+                     AND i.updated_at <= now() - interval '60 seconds'
                    ORDER BY i.updated_at LIMIT 20"""
             ).fetchall()
         for row in rows:
@@ -745,7 +812,7 @@ class CompetitionService:
         while not self._stop.is_set():
             try:
                 self.tick()
-            except BaseException as exc:  # noqa: BLE001 - the loop must survive
+            except BaseException as exc:
                 try:
                     run = self.store.active_run()
                 except Exception:
@@ -775,9 +842,6 @@ class CompetitionService:
             run = self.store.active_run()
             if run is None or not self.store.claim_run_lease(run["id"], self.owner):
                 return
-            # Renew seats before the platform refresh.  A sync that outlives
-            # the seat lease used to expire every seat and restart its Member
-            # session even though the work was healthy.
             if run["status"] in {"running", "paused", "draining"}:
                 self.store.heartbeat_run_assignments(run["id"], self.owner)
             if run["status"] in {"running", "paused"}:
@@ -792,11 +856,6 @@ class CompetitionService:
                         self.store.append_run_event(
                             run["id"], "run.sync_failed", {"error": str(exc)}
                         )
-            # Paused runs stop new solver work, but they still have to reconcile
-            # already accepted platform submissions and renew instances that
-            # are needed to finish an in-flight judge request.  Returning here
-            # used to strand pending submissions until Resume and could let a
-            # short-lived instance expire while the operator was paused.
             if run["status"] not in {"running", "paused", "draining"}:
                 return
             self._expire_at_competition_end(run)
@@ -812,18 +871,17 @@ class CompetitionService:
                     },
                 )
             self.store.release_expired_assignments(run["id"])
-            # A process can die after the platform accepted a request but
-            # before the local row received its submission id.  Preserve that
-            # uncertainty and reconcile it through the platform query path;
-            # never silently send the candidate again.
             self.store.reconcile_inflight_submissions(run["id"])
             self._stop_expired_challenges(run)
             self.store.heartbeat_run_assignments(run["id"], self.owner)
             self._report_stalled_assignments(run)
+            self._check_message_delivery(run)
+            self._sweep_stale_jobs(run)
             self._renew_project_engines(run)
             if run["status"] == "running":
                 self._sync_orchestrator_assignments(run)
             self._renew_instances(run)
+            self._publish_instance_entries(run)
             self._process_submissions(
                 run,
                 allow_new=run["status"] == "running",
@@ -875,10 +933,151 @@ class CompetitionService:
                 },
             )
         live = {assignment["id"] for assignment in stalled}
-        # Forget seats that recovered or were released, so a later stall on the
-        # same seat is reported again instead of being suppressed forever.
         self._reported_stalls &= live
         self._run_session_watchdog(run)
+
+    def _check_message_delivery(self, run: dict) -> None:
+        """Fallback for recon that a live receiver session never consumed.
+
+        建議3 (附属保险): the trunk fix is giving every seat an intent so its
+        session actually runs and drains recon.  This is the safety net for the
+        residual case where a session is live yet its message cursor stays put:
+        a teammate's finding would otherwise sit in ``competition_messages``
+        forever, invisible to the model.
+
+        When a message addressed to a live seat is older than the grace window
+        and still ahead of that seat's cursor, its payload is degraded into
+        durable blackboard facts/hints on the receiver's project -- the same
+        surface the model reads at the start of every turn -- and a
+        ``competition.message_undelivered`` run event is written.  When a
+        receiver's cursor later advances past a message we worried about, a
+        ``competition.message_consumed`` metric event records that recovery.
+
+        Best-effort throughout: a probe or injection failure is logged and the
+        next tick retries; it must never interrupt judging or seat leases.
+        """
+        try:
+            stranded = self.store.undelivered_messages(
+                run["id"], older_than_seconds=self._message_delivery_window
+            )
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_message_probe_failed", run["id"],
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return
+        for message in stranded:
+            sequence = int(message["sequence"])
+            session_id = message.get("receiver_session_id")
+            if session_id and session_id not in self._receiver_cursors:
+                self._receiver_cursors[session_id] = self._cursor_or_zero(session_id)
+            if sequence in self._undelivered_injected:
+                continue
+            if self._degrade_recon_to_blackboard(run, message):
+                self._undelivered_injected.add(sequence)
+        live_sequences = {int(message["sequence"]) for message in stranded}
+        for session_id in list(self._receiver_cursors):
+            self._note_cursor(run, session_id)
+        self._undelivered_injected &= live_sequences
+
+    def _cursor_or_zero(self, session_id: str) -> int:
+        try:
+            return self.store.message_cursor(session_id)
+        except Exception:
+            return 0
+
+    def _note_cursor(self, run: dict, session_id: str) -> None:
+        """Emit competition.message_consumed when a receiver cursor advances."""
+        try:
+            current = self.store.message_cursor(session_id)
+        except Exception:
+            return
+        previous = self._receiver_cursors.get(session_id, 0)
+        if current > previous:
+            self.store.append_run_event(
+                run["id"], "competition.message_consumed",
+                {"session_id": session_id, "cursor": current, "previous": previous},
+            )
+        self._receiver_cursors[session_id] = current
+
+    def _degrade_recon_to_blackboard(self, run: dict, message: dict) -> bool:
+        """Inject a stranded recon payload into the receiver's blackboard.
+
+        Returns True once the payload is durably recorded (or there is nothing
+        actionable to record) so the caller stops retrying it; returns False on
+        a transient failure so the next tick tries again.
+        """
+        from backend.blackboard import graph_store, node_store
+
+        envelope = message.get("envelope") or {}
+        payload = envelope.get("payload") if isinstance(envelope, dict) else None
+        if not isinstance(payload, dict):
+            payload = {}
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        receiver = message.get("receiver_member") or envelope.get("receiver_member_id") or "?"
+        sender = envelope.get("sender_member_id") or report.get("member") or "teammate"
+        challenge_id = message.get("challenge_id")
+        try:
+            with self.state.db.connect() as connection:
+                row = connection.execute(
+                    "SELECT project_id FROM competition_challenges WHERE id=%s",
+                    (challenge_id,),
+                ).fetchone()
+                project_id = row["project_id"] if row else None
+                if not project_id:
+                    return True
+                knowledge = [
+                    str(item).strip()
+                    for item in (report.get("knowledge") or [])
+                    if str(item).strip()
+                ]
+                directions = [
+                    str(item).strip()
+                    for item in (report.get("directions") or [])
+                    if str(item).strip()
+                ]
+                progress = str(report.get("progress") or "").strip()
+                creator = f"recon:{sender}"
+                recorded = False
+                for item in knowledge[:8]:
+                    graph_store.create_hint(
+                        connection, project_id,
+                        f"[teammate {sender}] {item}", creator,
+                    )
+                    recorded = True
+                for item in directions[:4]:
+                    graph_store.create_hint(
+                        connection, project_id,
+                        f"[teammate {sender} suggests] {item}", creator,
+                    )
+                    recorded = True
+                if progress:
+                    node_store.create_fact(
+                        connection, project_id,
+                        f"Undelivered teammate recon from {sender}: {progress}"[:4000],
+                    )
+                    recorded = True
+                if not recorded:
+                    return True
+        except Exception as exc:
+            self.state.logger.project(
+                "competition_message_degrade_failed", run["id"],
+                error=f"{type(exc).__name__}: {exc}", challenge_id=str(challenge_id),
+            )
+            return False
+        self.store.append_run_event(
+            run["id"], "competition.message_undelivered",
+            {
+                "sequence": int(message["sequence"]),
+                "challenge_id": challenge_id,
+                "receiver": receiver,
+                "sender": sender,
+                "session_id": message.get("receiver_session_id"),
+                "age_seconds": self._message_delivery_window,
+                "injected_hints": True,
+            },
+        )
+        return True
 
     def _run_session_watchdog(self, run: dict) -> None:
         """Escalate quiet sessions: diagnose, then cancel, then hand off."""
@@ -894,9 +1093,6 @@ class CompetitionService:
             return
         for row in rows:
             if row.get("role") == "wp":
-                # A WP attempt is one long model call with no turn loop, so it
-                # has no progress signal to grade; its own 10 minute seat
-                # deadline is what bounds it.
                 continue
             verdict = classify(row)
             if not verdict.actionable:
@@ -905,8 +1101,6 @@ class CompetitionService:
             if key in self._watchdog_actions:
                 continue
             self._watchdog_actions.add(key)
-            # The evidence is recorded before acting, so a postmortem can tell
-            # "we killed a working Member" from "the Member was gone".
             self.store.append_run_event(
                 run["id"], f"session.{verdict.level}",
                 {
@@ -952,6 +1146,11 @@ class CompetitionService:
         Keeping the session is the entire point: the replacement inherits every
         finding the stalled Member recorded instead of restarting the challenge
         from nothing.
+
+        With no idle Member there is still one escalation left: rebuild the
+        seat in place under a new epoch. Previously this branch only wrote
+        ``session.handoff_skipped`` and the seat sat untouched — the last
+        competition had stalled seats that never moved again.
         """
         replacement = self._idle_member(run)
         if replacement is None:
@@ -962,6 +1161,7 @@ class CompetitionService:
                     "reason": "no idle Member available to take the seat",
                 },
             )
+            self._rebuild_stalled_seat(run, row)
             return
         try:
             moved = self.store.handoff_assignment(
@@ -983,15 +1183,111 @@ class CompetitionService:
                 "epoch": moved["epoch"],
             },
         )
+        self._restart_seat_project(run, moved)
+
+    def _rebuild_stalled_seat(self, run: dict, row: dict) -> None:
+        """Re-seat the same Member under a new epoch and restart its project.
+
+        The last resort when nobody else is free. Advancing the epoch fences
+        out whatever the old worker was still doing and lets a fresh one claim
+        the same session, so the transcript and every recorded finding survive.
+        """
+        member = row.get("member")
+        if not member:
+            return
+        try:
+            rebuilt = self.store.handoff_assignment(
+                row["assignment_id"], member, self.owner, require_stalled=False,
+            )
+        except (CompetitionConflict, ValueError) as exc:
+            self.store.append_run_event(
+                run["id"], "session.rebuild_failed",
+                {"assignment_id": row["assignment_id"], "error": str(exc)},
+            )
+            return
+        self.store.append_run_event(
+            run["id"], "session.rebuilt",
+            {
+                "assignment_id": rebuilt["id"],
+                "session_id": rebuilt["session_id"],
+                "member": rebuilt["member"],
+                "epoch": rebuilt["epoch"],
+                "reason": "stalled_seat_no_replacement",
+            },
+        )
+        self._restart_seat_project(run, rebuilt)
+
+    def _restart_seat_project(self, run: dict, assignment: dict) -> None:
+        """Ask the orchestrator to launch work for a seat that just moved.
+
+        A new epoch alone does not start anything: the recovery only completes
+        when the project is dispatched again, which is what turns a seat the
+        watchdog repaired into a Member that is actually running.
+        """
+        orchestrator = getattr(self.state, "orchestrator", None)
+        start = getattr(orchestrator, "start_project_async", None) if orchestrator else None
+        if not callable(start):
+            return
+        try:
+            with self.state.db.connect() as connection:
+                challenge = connection.execute(
+                    "SELECT project_id FROM competition_challenges WHERE id=%s",
+                    (assignment["challenge_id"],),
+                ).fetchone()
+        except Exception:
+            return
+        project_id = challenge["project_id"] if challenge else None
+        if not project_id:
+            return
+        try:
+            start(project_id)
+        except Exception as exc:
+            self.store.append_run_event(
+                run["id"], "session.recovery_start_failed",
+                {
+                    "assignment_id": assignment["id"],
+                    "project_id": project_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return
+        self.store.append_run_event(
+            run["id"], "session.recovered",
+            {
+                "assignment_id": assignment["id"],
+                "session_id": assignment["session_id"],
+                "member": assignment["member"],
+                "epoch": assignment["epoch"],
+                "project_id": project_id,
+            },
+        )
 
     def _idle_member(self, run: dict) -> str | None:
-        """Pick a Member holding no seat in this run."""
+        """Pick a Member holding no seat in any live run.
+
+        Scoping this to one run was wrong: a Member seated on another live run
+        is not idle, and handing it a second seat means the receiving seat gets
+        a Member that cannot write (one seat per Member is enforced by a unique
+        index), so the handoff silently achieved nothing.
+        """
         from backend.core.config import MEMBER_NAMES
 
         taken = {
             assignment["member"]
             for assignment in self.store.assignments(run["id"], active_only=True)
         }
+        try:
+            with self.state.db.connect() as connection:
+                rows = connection.execute(
+                    """SELECT DISTINCT a.member
+                         FROM competition_assignments a
+                         JOIN competition_runs r ON r.id=a.run_id
+                        WHERE a.released_at IS NULL
+                          AND r.status NOT IN ('finished','stopped')""",
+                ).fetchall()
+            taken.update(row["member"] for row in rows)
+        except Exception:
+            pass
         for name in MEMBER_NAMES:
             if name not in taken:
                 return name
@@ -1019,9 +1315,6 @@ class CompetitionService:
             self.store.observe_run(run["id"], self.owner)
             self._last_observation_at = now
         except Exception as exc:
-            # Observability must not stop judging or release a live lease.  A
-            # later tick retries, and the coordinator error stream remains the
-            # visible signal if the schema/storage is unavailable.
             self.store.append_run_event(
                 run["id"], "observation.failed", {"error": str(exc)}
             )
@@ -1116,9 +1409,6 @@ class CompetitionService:
         self._starting_members.intersection_update(active_start_keys)
         self._starting_projects.intersection_update({key[0] for key in active_start_keys})
         for assignment in active:
-            # A live lease still belongs to the previous coordinator.  Do not
-            # bootstrap a new Member with that stale fencing tuple; the next
-            # tick will reclaim it after the bounded lease timeout.
             if assignment["lease_owner"] != self.owner:
                 continue
             project_id = next(
@@ -1130,12 +1420,6 @@ class CompetitionService:
             )
             owner_project = owners.get(assignment["member"])
             start_key = (project_id, assignment["member"])
-            # During restart the persisted competition assignment is the
-            # source of truth while the legacy orchestrator is rebuilding its
-            # in-memory Member objects.  Releasing it merely because the
-            # process has just restarted would lose the original session and
-            # let a different member take the seat.  A concrete conflicting
-            # owner, however, is a fencing violation and must be released.
             if owner_project == project_id:
                 self._starting_projects.discard(project_id)
                 self._starting_members.discard(start_key)
@@ -1146,10 +1430,6 @@ class CompetitionService:
                 )
             elif owner_project is None and project_id and assignment["role"] != "wp":
                 if start_key in self._starting_members and not orchestrator.startup_in_progress(project_id):
-                    # The earlier bootstrap finished without registering this
-                    # Member (for example nothing was claimable at that
-                    # moment).  Clear the stale marker so a fresh bootstrap
-                    # request can actually be issued.
                     self._starting_members.discard(start_key)
                     if not any(key[0] == project_id for key in self._starting_members):
                         self._starting_projects.discard(project_id)
@@ -1158,13 +1438,7 @@ class CompetitionService:
                         continue
                     self._starting_members.add(start_key)
                     if orchestrator.startup_in_progress(project_id):
-                        # A bootstrap or redispatch for this project is
-                        # already in flight.  It reconciles every idle seat,
-                        # so another request would only add churn.
                         continue
-                    # The legacy API starts a whole project, not one Member.
-                    # Multiple durable seats share one request per tick; the
-                    # orchestrator coalesces overlapping redispatches itself.
                     self._starting_projects.add(project_id)
                     try:
                         orchestrator.start_project_async(project_id)
@@ -1210,9 +1484,6 @@ class CompetitionService:
         rows = self.store.challenges(run["id"])
         active = self.store.assignments(run["id"], active_only=True)
         if not active:
-            # A resumed run starts with every seat released.  Put each
-            # Member back on the challenge whose session they already own
-            # before planning anything new.
             self._restore_paused_seats(run, rows)
             active = self.store.assignments(run["id"], active_only=True)
         members_by_challenge: dict[str, list[str]] = {}
@@ -1225,6 +1496,11 @@ class CompetitionService:
         for row in rows:
             metadata = row["metadata"]
             ready_at = _timestamp(metadata.get("ready_at")) or datetime.now(timezone.utc)
+            raw_solve_count = metadata.get("solve_count")
+            try:
+                solve_count = int(raw_solve_count) if raw_solve_count is not None else None
+            except (TypeError, ValueError):
+                solve_count = None
             challenges.append(Challenge(
                 row["id"], metadata.get("category", "misc"), ready_at,
                 remote=bool(metadata.get("remote")),
@@ -1233,8 +1509,9 @@ class CompetitionService:
                 deadline_at=_timestamp(row.get("deadline_at")),
                 members=tuple(members_by_challenge.get(row["id"], [])),
                 state=row["state"],
+                solve_count=solve_count,
             ))
-        remote_limit = int(run["config_snapshot"]["workflow_spec"].get("remote_instance_limit", 0))
+        remote_limit = self._remote_instance_limit(run, platform)
         with self.state.db.connect() as connection:
             used_rows = connection.execute(
                 """SELECT count(*) AS count FROM competition_instances
@@ -1265,8 +1542,6 @@ class CompetitionService:
                 if instance_active and external_id not in local_ids:
                     external_used += 1
         except Exception as exc:
-            # A quota query failure must not cause an over-allocation.  Treat
-            # the entire remote capacity as occupied until the next refresh.
             external_used = remote_limit
             self.store.append_run_event(
                 run["id"], "instance.quota_unknown", {"error": str(exc)}
@@ -1309,10 +1584,6 @@ class CompetitionService:
                         continue
                     if not self._start_instance(run, challenge):
                         continue
-                # Reserve the durable competition seat before the asynchronous
-                # project bootstrap starts.  This makes the assignment visible
-                # to restarts and lets the legacy orchestrator select the same
-                # Member instead of racing Diamond's in-memory allocator.
                 if self.store.find_assignment(run["id"], challenge["id"], plan.member) is None:
                     try:
                         self.store.assign(
@@ -1322,9 +1593,6 @@ class CompetitionService:
                     except CompetitionConflict:
                         continue
             elif plan.role == "helper":
-                # A helper is a second durable seat on an already-running
-                # challenge.  Persist it before asking the orchestrator to
-                # reconcile the project so a restart cannot lose the handoff.
                 if self.store.find_assignment(run["id"], challenge["id"], plan.member) is None:
                     try:
                         self.store.assign(
@@ -1333,6 +1601,7 @@ class CompetitionService:
                         )
                     except CompetitionConflict:
                         continue
+                self._ensure_helper_intent(run, challenge, project_id, plan.member)
                 try:
                     self._starting_members.add(start_key)
                     if project_id not in self._starting_projects:
@@ -1361,6 +1630,103 @@ class CompetitionService:
                     run["id"], "assignment.start_failed",
                     {"challenge_id": challenge["id"], "error": str(exc)},
                 )
+
+    def _ensure_helper_intent(
+        self, run: dict, challenge: dict, project_id: str, member: str
+    ) -> str | None:
+        """Give a freshly seated helper an intent it alone can work on.
+
+        The orchestrator dispatches Members per open intent, and the seat fence
+        only lets a seated Member run. A helper seat with no intent therefore
+        produced a live seat with an idle session; this closes that gap by
+        creating one intent owned by that Member.
+
+        The direction comes from the primary's most recent report, so the
+        helper pursues a stated alternative rather than redoing the main line.
+        Without a report it is given an explicit cross-check brief.
+        """
+
+        from backend.blackboard import edge_store, graph_store, node_store
+
+        try:
+            with self.state.db.connect() as connection:
+                detail = graph_store.project_detail(connection, project_id)
+                if detail is None:
+                    return None
+                for intent in detail.intents:
+                    if intent.to is None and intent.worker == member:
+                        return intent.id
+                reports = sorted(
+                    (report for report in detail.reports if report.member != member),
+                    key=lambda report: report.created_at,
+                )
+                direction = ""
+                start_node = "origin"
+                if reports:
+                    latest = reports[-1]
+                    candidates = [text.strip() for text in (latest.directions or []) if text.strip()]
+                    taken = {
+                        edge_store.normalize_intent_description(item.description)
+                        for item in detail.intents
+                        if item.to is None
+                    }
+                    for candidate in candidates:
+                        if edge_store.normalize_intent_description(candidate) not in taken:
+                            direction = candidate
+                            break
+                    if latest.node_id and node_store.fact_exists(
+                        connection, project_id, latest.node_id
+                    ):
+                        start_node = latest.node_id
+                if not direction:
+                    direction = (
+                        "Cross-check the primary solver's findings on this challenge: "
+                        "read the blackboard facts and the latest report first, then "
+                        "independently verify the current hypothesis and explore a "
+                        "different approach instead of repeating the main line."
+                    )
+                existing = edge_store.find_similar_open_intent(
+                    connection, project_id, [start_node], direction
+                )
+                if existing is not None and existing.worker is None:
+                    edge_store.claim_intent(connection, project_id, existing.id, member)
+                    intent_id = existing.id
+                elif existing is not None:
+                    return existing.id
+                else:
+                    intent = edge_store.create_intent(
+                        connection, project_id, [start_node], direction,
+                        "diamond", worker=member,
+                    )
+                    intent_id = intent.id
+                graph_store.add_agent(
+                    connection, project_id, member, "member",
+                    state="active", start_fact_id=start_node,
+                )
+                graph_store.add_link(connection, project_id, "diamond", member, "assign")
+                graph_store.add_link(
+                    connection, project_id, member, f"intent:{intent_id}", "explore"
+                )
+        except Exception as exc:
+            self.store.append_run_event(
+                run["id"], "assignment.helper_intent_failed",
+                {
+                    "challenge_id": challenge["id"],
+                    "member": member,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return None
+        self.store.append_run_event(
+            run["id"], "assignment.helper_intent",
+            {
+                "challenge_id": challenge["id"],
+                "member": member,
+                "intent_id": intent_id,
+                "source": "report_direction" if reports else "cross_check_template",
+            },
+        )
+        return intent_id
 
     def _restore_paused_seats(self, run: dict, rows: list[dict]) -> None:
         """Re-seat paused Members on their original challenges.
@@ -1394,6 +1760,48 @@ class CompetitionService:
                 run["id"], "assignment.restored",
                 {"challenge_id": challenge["id"], "member": member, "role": seat["role"]},
             )
+
+    def _remote_instance_limit(self, run: dict, platform: Any) -> int:
+        """How many containers this run may hold at once.
+
+        The platform wins when it publishes a per-team limit, because that is
+        the number actually enforced; the workflow's ``remote_instance_limit``
+        is the manual override for platforms that stay silent. With neither,
+        one container is assumed and the decision is recorded, which is safer
+        than unbounded allocation and more useful than refusing to start a
+        container challenge at all.
+        """
+
+        configured = run["config_snapshot"]["workflow_spec"].get("remote_instance_limit", 0)
+        try:
+            configured = max(0, int(configured))
+        except (TypeError, ValueError):
+            configured = 0
+        reported = None
+        reader = getattr(platform, "instance_limit", None)
+        if callable(reader):
+            try:
+                reported = reader()
+            except Exception:
+                reported = None
+        if reported:
+            return int(reported)
+        if configured:
+            return configured
+        if not self._supports_instance_lifecycle(platform):
+            return 0
+        warning_key = (run["id"], "instance_limit_default")
+        if warning_key not in self._instance_capability_warnings:
+            self._instance_capability_warnings.add(warning_key)
+            self.store.append_run_event(
+                run["id"], "instance.limit_defaulted",
+                {
+                    "limit": 1,
+                    "reason": "platform reported no per-team container limit and "
+                              "the workflow sets no remote_instance_limit",
+                },
+            )
+        return 1
 
     def _instance_ready(self, challenge_id: str) -> bool:
         with self.state.db.connect() as connection:
@@ -1439,12 +1847,74 @@ class CompetitionService:
                         expiry = None
                     if expiry is not None:
                         remaining = max(5, int((expiry - now).total_seconds()))
-                        # Renew halfway through the advertised lease, with a
-                        # small floor so a short TTL still gets a chance.
                         return now + timedelta(
                             seconds=max(5, min(3600, remaining // 2))
                         )
         return now + timedelta(seconds=default_seconds)
+
+    def _publish_instance_entries(self, run: dict) -> None:
+        """Push each live instance entry to its seated Members over recon.
+
+        The project facts only carry the platform list URL, so without this a
+        container challenge leaves the Member guessing its target — observed
+        behaviour was Members probing the platform host itself.  Entries change
+        on every rebuild, so the notice is republished whenever the stored
+        entry differs from what this session last heard.
+        """
+        with self.state.db.connect() as connection:
+            instances = connection.execute(
+                """SELECT challenge_id, external_id, metadata FROM competition_instances
+                   WHERE run_id=%s AND state IN ('ready','running','active')""",
+                (run["id"],),
+            ).fetchall()
+        if not instances:
+            return
+        now = datetime.now(timezone.utc)
+        for instance in instances:
+            metadata = instance.get("metadata") or {}
+            entry = metadata.get("entry") or metadata.get("url")
+            if not entry:
+                continue
+            for assignment in self.store.assignments(run["id"], active_only=True):
+                if assignment["challenge_id"] != instance["challenge_id"]:
+                    continue
+                if assignment["role"] == "wp":
+                    continue
+                key = (instance["challenge_id"], assignment["session_id"], str(entry))
+                if key in self._published_instance_entries:
+                    continue
+                message = Envelope(
+                    run_id=run["id"],
+                    challenge_id=instance["challenge_id"],
+                    sender_member_id=SERVICE_MEMBER_ID,
+                    receiver_member_id=assignment["member"],
+                    sender_session_id=assignment["session_id"],
+                    receiver_session_id=assignment["session_id"],
+                    request_id=f"target-instance:{instance['challenge_id']}:{assignment['session_id']}:{entry}"[:128],
+                    correlation_id=f"target-instance:{instance['challenge_id']}",
+                    lease_epoch=int(assignment["epoch"]),
+                    created_at=now,
+                    deadline_at=now + timedelta(hours=6),
+                    message_type="recon",
+                    payload={
+                        "kind": "target_instance",
+                        "external_id": instance["external_id"],
+                        "entry": str(entry),
+                        "instruction": (
+                            "This challenge's live target is the per-team instance at this entry. "
+                            "Attack only this address. Never probe, scan, or submit to the "
+                            "competition platform itself."
+                        ),
+                    },
+                )
+                try:
+                    self.publish_recon(message)
+                    self._published_instance_entries.add(key)
+                except Exception as exc:
+                    self.store.append_run_event(
+                        run["id"], "instance.entry_publish_failed",
+                        {"challenge_id": instance["challenge_id"], "error": str(exc)},
+                    )
 
     def _renew_instances(self, run: dict) -> None:
         platform = self._platform_for_run(run)
@@ -1502,9 +1972,6 @@ class CompetitionService:
                         logger = getattr(self.state, "logger", None)
                         log_project = getattr(logger, "project", None)
                         if callable(log_project):
-                            # Keep the durable run event authoritative while
-                            # exposing the lifecycle transition in the same
-                            # project stream used by the legacy runtime.
                             log_project(
                                 "instance.rebuilt",
                                 str(instance["challenge_id"]),
@@ -1597,8 +2064,6 @@ class CompetitionService:
                     (challenge["id"],),
                 )
         except Exception as exc:
-            # The remote side effect happened before local registration.  Keep
-            # a durable stop_pending row so the retry worker can compensate it.
             try:
                 with self.state.db.connect() as connection:
                     connection.execute(
@@ -1645,11 +2110,6 @@ class CompetitionService:
                     if item["id"] == submission["challenge_id"]
                 )
                 self._on_correct(run, challenge, submission["candidate"])
-        # A paused/draining run may finish an already accepted submission, but
-        # must not send a newly queued candidate.  The distinction is kept in
-        # the coordinator rather than relying only on the SQL status guard so
-        # a future store implementation cannot accidentally submit during a
-        # pause.
         if not allow_new:
             return
         while not self._stop.is_set():

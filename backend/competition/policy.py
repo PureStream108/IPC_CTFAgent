@@ -22,6 +22,7 @@ class Challenge:
     deadline_at: datetime | None = None
     members: tuple[str, ...] = ()
     state: str = "ready"
+    solve_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -66,8 +67,12 @@ def plan_assignments(
     running = sum(bool(c.members) for c in challenges)
     available_local = max(0, local_capacity - running)
     candidates = [c for c in eligible if not c.members]
-    candidates.sort(key=lambda c: (0 if c.remote and c.category == "web" else 1 if c.remote else 2,
-                                   c.ready_at, c.id))
+    candidates.sort(key=lambda c: (
+        -(c.solve_count if c.solve_count is not None else -1),
+        0 if c.remote else 1,
+        c.ready_at,
+        c.id,
+    ))
     result: list[Assignment] = []
     assigned: set[str] = set()
     for challenge in candidates:
@@ -81,8 +86,6 @@ def plan_assignments(
         available_local -= 1
         if needs_instance:
             remote_capacity -= 1
-    # Helpers only reinforce already-running challenges. A newly reserved
-    # challenge first needs a primary session with useful progress to hand off.
     if len(eligible) < 10:
         helpers = [c for c in eligible if len(c.members) == 1 and c.id not in assigned]
         helpers.sort(key=lambda c: (c.first_assigned_at or c.ready_at, c.id))

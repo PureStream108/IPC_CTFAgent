@@ -53,7 +53,6 @@ def _track_entries(challenge: dict[str, Any]) -> list[dict[str, Any]]:
                 ]
             result.append(joined)
         return result
-    # Some GZCTF versions expose the per-track level state under `flags`.
     entries = challenge.get("flags")
     if isinstance(entries, list):
         return [item for item in entries if isinstance(item, dict) and _track_id(item)]
@@ -134,9 +133,6 @@ def validate_submission(
 
     challenge_lock = challenge.get("challengeLock", challenge.get("challengeLocked", False))
     if isinstance(challenge_lock, dict):
-        # Current GZCTF returns a status object such as
-        # ``{"isLocked": false, "unlocksAt": null}``; treating the
-        # object itself as truthy would incorrectly reject every preflight.
         challenge_lock = challenge_lock.get(
             "isLocked", challenge_lock.get("locked", challenge_lock.get("is_locked", False))
         )
@@ -396,10 +392,6 @@ class GZCTFClient:
             self.logged_in = False
             raise GZCTFLoginError("GZCTF account is not authorized for this GZCTF game")
         if response.status_code >= 400:
-            # Keep the platform's validation reason in the exception.  A bare
-            # ``raise_for_status`` only exposed ``400 Bad Request`` and made
-            # it impossible to distinguish a contract mismatch from a wrong
-            # answer without issuing another blind attempt.
             detail = response.text.strip().replace("\r", " ").replace("\n", " ")
             if len(detail) > 1000:
                 detail = detail[:1000] + "..."
@@ -439,6 +431,45 @@ class GZCTFClient:
 
     def get_profile(self) -> dict[str, Any]:
         return self._authorized_get("/api/Account/Profile")
+
+
+    def create_container(self, game_id: int, challenge_id: int) -> dict[str, Any]:
+        result = self._authorized_post(
+            f"/api/Game/{int(game_id)}/Container/{int(challenge_id)}"
+        )
+        return result if isinstance(result, dict) else {}
+
+    def extend_container(self, game_id: int, challenge_id: int) -> dict[str, Any]:
+        result = self._authorized_post(
+            f"/api/Game/{int(game_id)}/Container/{int(challenge_id)}/Extend"
+        )
+        return result if isinstance(result, dict) else {}
+
+    def delete_container(self, game_id: int, challenge_id: int) -> None:
+        self._require_base_url()
+        if not self.logged_in:
+            self.login()
+        response = self.session.delete(
+            self._url(f"/api/Game/{int(game_id)}/Container/{int(challenge_id)}"),
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code == 400 and "未创建容器" in response.text:
+            return None
+        response.raise_for_status()
+        return None
+
+    def get_container(self, game_id: int, challenge_id: int) -> dict[str, Any]:
+        """Read the live container state from the challenge detail.
+
+        GZCTF has no dedicated container status endpoint: the instance entry
+        and its close time live in the challenge's ``context``.
+        """
+
+        detail = self.get_challenge(int(game_id), int(challenge_id))
+        context = detail.get("context") if isinstance(detail, dict) else None
+        return context if isinstance(context, dict) else {}
 
     def get_game(self, game_id: int) -> dict[str, Any]:
         return self._authorized_get(f"/api/Game/{game_id}")
@@ -687,6 +718,120 @@ def _as_bool(value: Any) -> bool:
     return False
 
 
+_GZ_CONTAINER_TYPES = {
+    "dynamiccontainer",
+    "dynamicattachmentwithcontainer",
+    "containerdynamic",
+    "containerstatic",
+    "dynamicattachment",
+}
+_GZ_STATIC_TYPES = {"staticattachment", "staticcontainer", "static"}
+
+
+def _gz_container_type(raw: dict[str, Any]) -> str | None:
+    """Identify a per-team container challenge from its detail payload.
+
+    GZCTF spells the challenge type differently across versions, and some
+    deployments only reveal the container nature through the exposed port or a
+    live instance entry. Any one of those is enough; the name of whichever
+    signal fired is returned so the scheduler can record why.
+    """
+
+    declared = _first_value(raw, "type", "challengeType", "challenge_type")
+    if declared is not None:
+        normalised = str(declared).replace("_", "").replace("-", "").strip().lower()
+        if normalised in _GZ_CONTAINER_TYPES:
+            return str(declared)
+        if normalised in _GZ_STATIC_TYPES:
+            return None
+    for key in ("containerExposePort", "container_expose_port", "exposePort"):
+        port = _mapping_value(raw, key, None)
+        try:
+            if port is not None and int(port) > 0:
+                return key
+        except (TypeError, ValueError):
+            continue
+    context = _mapping_value(raw, "context", None)
+    if isinstance(context, dict):
+        for key in ("instanceEntry", "entry", "closeTime"):
+            if context.get(key):
+                return f"context.{key}"
+    return None
+
+
+def _gz_solve_count(raw: dict[str, Any]) -> int | None:
+    """Read how many teams already solved a challenge, if the API says so."""
+
+    value = _first_value(
+        raw, "solved", "solvedCount", "solved_count", "acceptedCount",
+        "accepted_count", "solveCount", "solve_count",
+    )
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def _gz_instance_view(payload: Any) -> dict[str, Any]:
+    """Normalise a GZCTF container payload into the scheduler's shape.
+
+    The scheduler only understands ``state``/``entry``/``expires_at``; GZCTF
+    reports the address as ``instanceEntry`` and the expiry as ``closeTime``,
+    nested in ``context`` on some responses and top level on others. Without an
+    entry there is nothing an agent could connect to, so that case is reported
+    as pending rather than ready.
+    """
+
+    if not isinstance(payload, dict):
+        return {"state": "pending"}
+    context = payload.get("context")
+    source = context if isinstance(context, dict) else payload
+    entry = _first_value(source, "instanceEntry", "instance_entry", "entry", "url")
+    expires = _first_value(source, "closeTime", "close_time", "expiresAt", "expires_at")
+    view: dict[str, Any] = {"state": "ready" if entry else "pending"}
+    if entry:
+        view["entry"] = str(entry)
+        view["url"] = str(entry)
+    if expires:
+        view["expires_at"] = str(expires)
+    return view
+
+
+def _gz_container_error(exc: requests.HTTPError, external_id: str) -> Exception:
+    """Translate a container HTTP failure into a classified error.
+
+    The scheduler reacts differently to each: a quota or rate limit should be
+    retried later, an auth failure needs a new token, and a missing challenge
+    is permanent.
+    """
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", 0)
+    if status in (401, 403):
+        return GZCTFLoginError(
+            "GZCTF container request was not authorized; provide a new token"
+        )
+    if status == 429:
+        return GZCTFError(
+            f"GZCTF rate limited the container request for challenge {external_id}"
+        )
+    if status == 404:
+        return GZCTFError(f"GZCTF container challenge {external_id} does not exist")
+    detail = ""
+    try:
+        detail = (response.text or "").strip()[:300] if response is not None else ""
+    except Exception:
+        detail = ""
+    suffix = f": {detail}" if detail else ""
+    return GZCTFError(
+        f"GZCTF container request for challenge {external_id} failed "
+        f"with status {status or 'unknown'}{suffix}"
+    )
+
+
 _ANSWER_RESULT_VERDICTS = {
     "correctanswer": "correct",
     "wronganswer": "wrong",
@@ -810,15 +955,22 @@ class GZCTFAdapter(PlatformAdapter):
                 self.team_identity = self.team_id
                 return
         participation_getter = getattr(self.client, "get_game_participation", None)
-        if not callable(participation_getter):
-            return
-        participation = participation_getter(self.game_id)
-        team_ids = self._ids(participation)
-        if self.team_id not in team_ids:
-            raise GZCTFPreflightError(
-                f"current GZCTF account is not a member of team {self.team_id} for game {self.game_id}"
-            )
-        self.team_identity = self.team_id
+        if callable(participation_getter):
+            try:
+                participation = participation_getter(self.game_id)
+                team_ids = self._ids(participation)
+            except GZCTFLoginError:
+                details_getter = getattr(self.client, "get_game_details", None)
+                if not callable(details_getter):
+                    raise
+                details = details_getter(self.game_id)
+                rank = details.get("rank") if isinstance(details, dict) else None
+                team_ids = self._ids(rank) if isinstance(rank, dict) else set()
+            if self.team_id not in team_ids:
+                raise GZCTFPreflightError(
+                    f"current GZCTF account is not a member of team {self.team_id} for game {self.game_id}"
+                )
+            self.team_identity = self.team_id
 
     @property
     def supports_submit(self) -> bool:
@@ -826,7 +978,42 @@ class GZCTFAdapter(PlatformAdapter):
 
     @property
     def supports_instances(self) -> bool:
-        return False
+        """Whether this client can own per-team containers.
+
+        Detected from the client rather than hardcoded: an older client object
+        (and every lightweight test double) has no container methods, and
+        claiming the capability there would make the scheduler reserve a seat
+        for a side effect that can never succeed.
+        """
+        return all(
+            callable(getattr(self.client, name, None))
+            for name in ("create_container", "extend_container", "delete_container")
+        )
+
+    def instance_limit(self) -> int | None:
+        """How many containers this team may hold at once, per the platform.
+
+        ``None`` means the platform did not say, in which case the caller falls
+        back to the workflow's ``remote_instance_limit``.
+        """
+        getter = getattr(self.client, "get_game", None)
+        if not callable(getter):
+            return None
+        try:
+            game = getter(self.game_id)
+        except (GZCTFError, requests.RequestException, ValueError, TypeError):
+            return None
+        if not isinstance(game, dict):
+            return None
+        value = _first_value(
+            game, "concurrentContainerLimit", "concurrent_container_limit",
+            "containerCountLimit", "container_count_limit", "containerLimit",
+        )
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            return None
+        return limit if limit > 0 else None
 
     def _normalise_files(self, raw: Any) -> tuple[list[str], list[dict[str, Any]]]:
         if raw is None:
@@ -871,14 +1058,22 @@ class GZCTFAdapter(PlatformAdapter):
             level = self.mapping.level
         track = _mapping_value(raw, self.mapping.track_id_field, self.mapping.track_id) if self.mapping.track_id_field else self.mapping.track_id
         solved = _as_bool(_first_value(raw, self.mapping.solved_field, "solved", "isSolved", "isCompleted", default=False))
-        platform_data = {"level": level, "track_id": str(track or ""), "files": descriptors}
+        container_type = _gz_container_type(raw)
+        solve_count = _gz_solve_count(raw)
+        platform_data: dict[str, Any] = {
+            "level": level, "track_id": str(track or ""), "files": descriptors,
+        }
+        if container_type is not None:
+            platform_data["container_type"] = container_type
+        if solve_count is not None:
+            platform_data["solve_count"] = solve_count
         return PlatformChallenge(
             external_id=str(external),
             title=str(title),
             category=category,
             description=str(_first_value(raw, self.mapping.description_field, "description", "content", default="") or ""),
             attachment_urls=[str(value) for value in files],
-            remote=False,
+            remote=container_type is not None,
             solved=solved,
             hints=[],
             platform_data=platform_data,
@@ -1082,14 +1277,93 @@ class GZCTFAdapter(PlatformAdapter):
             return {"verdict": "auth_required" if code in (401, 403) else "unknown", "submission_id": submission_id}
         return _normalise_gz_verdict(result, submission_id=submission_id)
 
+    def _container_context(self, external_id: str) -> dict[str, Any]:
+        """Read the live container context for one challenge.
+
+        ``get_container`` is the dedicated reader, but it is not part of the
+        capability check, so a client without it must still work: the same
+        information lives in the challenge detail's ``context``.
+        """
+        reader = getattr(self.client, "get_container", None)
+        if not callable(reader):
+            reader = getattr(self.client, "get_challenge", None)
+        if not callable(reader):
+            return {}
+        try:
+            payload = reader(self.game_id, int(external_id))
+        except (GZCTFError, requests.RequestException, ValueError, TypeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     def instances(self) -> list[dict[str, Any]]:
-        return []
+        """Report the containers this team currently holds.
 
-    def start_instance(self, _external_id: str) -> dict[str, Any]:
-        raise ValueError("GZCTF adapter does not expose a managed instance lifecycle")
+        Read from each known container challenge's live context, which is the
+        only place GZCTF exposes an existing instance. Used at startup to
+        reconcile against the local table so an orphan is not left running.
+        """
+        if not self.supports_instances:
+            return []
+        found: list[dict[str, Any]] = []
+        for challenge in self._by_id.values():
+            if not challenge.remote:
+                continue
+            instance = _gz_instance_view(self._container_context(challenge.external_id))
+            if instance.get("state") == "ready":
+                found.append({"external_id": challenge.external_id, **instance})
+        return found
 
-    def stop_instance(self, _external_id: str) -> None:
+    def start_instance(self, external_id: str) -> dict[str, Any]:
+        challenge = self._challenge(external_id)
+        if not self.supports_instances:
+            raise ValueError("GZCTF client does not expose the container lifecycle")
+        if not challenge.remote:
+            raise ValueError(
+                f"GZCTF challenge {external_id} is not a container challenge"
+            )
+        try:
+            created = self.client.create_container(self.game_id, int(external_id))
+        except requests.HTTPError as exc:
+            raise _gz_container_error(exc, external_id) from exc
+        instance = _gz_instance_view(created)
+        if instance.get("state") != "ready":
+            instance = _gz_instance_view(self._container_context(external_id)) or instance
+        return instance
+
+    def stop_instance(self, external_id: str) -> None:
+        if not self.supports_instances:
+            return None
+        try:
+            self.client.delete_container(self.game_id, int(external_id))
+        except requests.HTTPError as exc:
+            raise _gz_container_error(exc, external_id) from exc
         return None
 
-    def renew_instance(self, _external_id: str) -> None:
-        return None
+    def renew_instance(self, external_id: str) -> dict[str, Any]:
+        if not self.supports_instances:
+            raise ValueError("GZCTF client does not expose the container lifecycle")
+        try:
+            extended = self.client.extend_container(self.game_id, int(external_id))
+        except requests.HTTPError as exc:
+            raise _gz_container_error(exc, external_id) from exc
+        instance = _gz_instance_view(extended)
+        if not instance.get("expires_at"):
+            refreshed = _gz_instance_view(self._container_context(external_id))
+            if refreshed.get("expires_at"):
+                instance = refreshed
+        return instance
+
+    def rebuild_instance(self, external_id: str) -> dict[str, Any]:
+        """Destroy and recreate a container whose lease could not be extended.
+
+        GZCTF refuses to extend a container that already expired or was taken
+        over, and there is no in-place repair. Deleting first keeps the team
+        within its container quota, which a bare create would not.
+        """
+        if not self.supports_instances:
+            raise ValueError("GZCTF client does not expose the container lifecycle")
+        try:
+            self.client.delete_container(self.game_id, int(external_id))
+        except (GZCTFError, requests.RequestException, ValueError, TypeError):
+            pass
+        return self.start_instance(external_id)
