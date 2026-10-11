@@ -24,8 +24,6 @@ from backend.agent.session import (
 )
 from backend.competition.conversation import ConversationAdapter
 
-# The workflow proposal used to be a field the model wrote into its final JSON
-# reply, which meant parsing prose to find it. It is an action, so it is a tool.
 PROPOSE_WORKFLOW_TOOL = {
     "name": "propose_platform_workflow",
     "description": (
@@ -90,8 +88,6 @@ class OpsToolBridge:
             }
         )
         if name == "question" and result.get("state") == "pending":
-            # The operator has to answer before the dependent operation can
-            # continue, so the loop stops here instead of guessing.
             self.pending_question = True
         if self.on_event is not None:
             self.on_event(name, arguments, result)
@@ -137,8 +133,6 @@ def ensure_ops_agent_session(
         try:
             return agent_store.session(existing)
         except KeyError:
-            # The row was removed (for example by a database reset) while the
-            # conversation kept the dangling pointer.
             ops_store.set_agent_session_id(session_id, None)
 
     snapshot = redact_model_snapshot(
@@ -220,6 +214,7 @@ def build_ops_runtime(
     executor,
     cancel: threading.Event | None = None,
     emit=None,
+    emit_reasoning=None,
     log=None,
     runtime_config=None,
 ) -> AgentRuntime:
@@ -241,6 +236,7 @@ def build_ops_runtime(
         tools=tools,
         cancel=cancel,
         emit=emit,
+        emit_reasoning=emit_reasoning,
         compressor=build_ops_compressor(config),
         max_turns=getattr(limits, "max_turns", 0),
         context_token_limit=getattr(limits, "context_token_limit", 0),

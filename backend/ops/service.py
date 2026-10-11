@@ -88,6 +88,76 @@ class _OpsRunInterrupted(OpsAgentError):
     """Internal control flow used by API-backed IPC runs."""
 
 
+class _IncrementStream:
+    """Coalesce provider increments into a few ordered, durable run events.
+
+    The provider emits one increment per token; a row and a stream frame each
+    would flood both the event table and the browser. Increments are buffered
+    and flushed on size or elapsed time, whichever comes first.
+
+    Reasoning and answer text share one buffer so their relative order is
+    preserved: a switch between the two flushes what is pending. Two
+    independently buffered sinks would deliver whichever happened to fill
+    first, which shows reasoning *after* the answer it preceded.
+
+    A secret value can straddle two increments, so a tail as long as the
+    longest secret is held back from a size- or time-triggered flush and
+    redaction is applied to the flushed prefix. A kind switch and
+    :meth:`close` release the tail after a final redaction pass.
+    """
+
+    flush_bytes = 160
+    flush_seconds = 0.25
+
+    def __init__(self, emit_event, *, secret_values: dict[str, str]) -> None:
+        self._emit_event = emit_event
+        self._secrets = {name: value for name, value in secret_values.items() if value}
+        self._hold = max((len(value) for value in self._secrets.values()), default=0)
+        self._kind = ""
+        self._buffer = ""
+        self._deadline = 0.0
+        self._lock = threading.Lock()
+
+    def sink(self, kind: str):
+        return lambda text: self.write(kind, text)
+
+    def write(self, kind: str, text: str) -> None:
+        if not text:
+            return
+        pending: list[tuple[str, str]] = []
+        with self._lock:
+            if kind != self._kind:
+                if self._buffer:
+                    pending.append((self._kind, self._buffer))
+                self._kind, self._buffer = kind, ""
+                self._deadline = time.monotonic() + self.flush_seconds
+            if not self._buffer:
+                self._deadline = time.monotonic() + self.flush_seconds
+            self._buffer += text
+            ready = (
+                len(self._buffer) - self._hold >= self.flush_bytes
+                or time.monotonic() >= self._deadline
+            )
+            if ready:
+                keep = self._hold if self._hold < len(self._buffer) else len(self._buffer)
+                chunk = self._buffer[: len(self._buffer) - keep]
+                if chunk:
+                    pending.append((kind, chunk))
+                    self._buffer = self._buffer[len(chunk):]
+                    self._deadline = time.monotonic() + self.flush_seconds
+        for flushed_kind, chunk in pending:
+            self._write(flushed_kind, chunk)
+
+    def close(self) -> None:
+        with self._lock:
+            kind, chunk, self._buffer = self._kind, self._buffer, ""
+        if chunk:
+            self._write(kind, chunk)
+
+    def _write(self, kind: str, chunk: str) -> None:
+        self._emit_event(kind, _replace_secret_values(chunk, self._secrets))
+
+
 class OpsAgentService:
     def __init__(self, state: AppState) -> None:
         self.state = state
@@ -168,17 +238,19 @@ class OpsAgentService:
         active_run = self.store.active_run(session_id)
         messages = self.store.list_messages(session_id)
         agent_session = self.store.agent_session_id(session_id)
-        return {
+        view = {
             "session": self.store.get_session(session_id),
             "messages": messages,
             "events": self.store.list_events(session_id),
             "project_ids": self.store.list_session_projects(session_id),
             "active_run": _public_run(active_run) if active_run else None,
-            # One runtime, one context source: the durable agent transcript.
             "context_mode": "agent_session",
             "agent_session_id": agent_session,
             "agent_context_ready": bool(agent_session or messages),
         }
+        if active_run is not None:
+            view["active_stream"] = self.store.run_stream_text(active_run["id"])
+        return view
 
     def delete_session(self, session_id: str) -> bool:
         active = self.store.active_run(session_id)
@@ -200,10 +272,6 @@ class OpsAgentService:
         if run["status"] != "running":
             return {"ok": False, "run_id": run_id, "status": run["status"]}
 
-        # requests-based adapters cannot forcibly terminate an in-flight socket
-        # from another thread. The durable flag stops the run before the next
-        # model/tool round and discards a response that arrives after
-        # cancellation.
         result = {"ok": True, "run_id": run_id, "status": "interrupting"}
         self._stream_log(
             session_id,
@@ -363,8 +431,6 @@ class OpsAgentService:
             config,
             bootstrap_history=prior,
         )
-        # Ops permits one active run per conversation, so the next run is a
-        # legitimate successor of the previous writer rather than a competitor.
         writer_row = self.agent_store.claim_writer(
             session["id"], "ops-run", run_id or f"chat:{session_id}",
             seconds=3600, takeover=True,
@@ -391,6 +457,17 @@ class OpsAgentService:
             )
 
         bridge.on_event = log_tool
+
+        def emit_increment(kind: str, text: str) -> None:
+            self._stream_log(
+                session_id, run_id=run_id,
+                event={"kind": kind, "label": "IPC", "text": text},
+            )
+
+        stream = (
+            _IncrementStream(emit_increment, secret_values=known_secret_values)
+            if run_id else None
+        )
         runtime = build_ops_runtime(
             config=config,
             agent_store=self.agent_store,
@@ -401,11 +478,11 @@ class OpsAgentService:
             tools=[*self.tools.catalog(), PROPOSE_WORKFLOW_TOOL],
             executor=bridge,
             cancel=cancel,
+            emit=stream.sink("delta") if stream else None,
+            emit_reasoning=stream.sink("thinking") if stream else None,
             runtime_config=self.state.config.runtime if self.state.config else None,
         )
 
-        # Cancellation is cooperative: the durable flag is authoritative, and
-        # the loop observes it at each safe model/tool boundary.
         stop_polling = threading.Event()
 
         def watch_cancel() -> None:
@@ -434,6 +511,8 @@ class OpsAgentService:
             stop_polling.set()
             if watcher is not None:
                 watcher.join(timeout=1)
+            if stream is not None:
+                stream.close()
         self._raise_if_api_run_cancelled(run_id)
         if result.status == "cancelled":
             raise _OpsRunInterrupted("IPC interrupted by operator")
@@ -485,8 +564,6 @@ class OpsAgentService:
                 raise OpsAgentNotConfigured("configure the IPC API before starting a chat")
 
             if config.api_format == "mock":
-                # The local mock adapter has no streaming surface; keep the
-                # synchronous shape so tests and offline use still work.
                 result = self.chat(
                     message=message,
                     session_id=session_id,
@@ -656,11 +733,9 @@ class OpsAgentService:
             )
             for event in events:
                 after_id = max(after_id, int(event["id"]))
-                yield {"type": "log", "event": event}
+                yield _stream_frame(event)
             run = self.store.get_run(run_id)
             if run["status"] != "running":
-                # The worker stores every log before committing terminal state;
-                # one extra pass closes the tiny read race between both queries.
                 remaining = self.store.list_run_events(
                     session_id,
                     run_id,
@@ -670,7 +745,7 @@ class OpsAgentService:
                 if remaining:
                     for event in remaining:
                         after_id = max(after_id, int(event["id"]))
-                        yield {"type": "log", "event": event}
+                        yield _stream_frame(event)
                     continue
                 if isinstance(run.get("response"), dict):
                     yield {"type": "complete", "response": run["response"]}
@@ -700,15 +775,16 @@ class OpsAgentService:
             label=str(event.get("label", "IPC")),
             text=str(event.get("text", "")),
         )
-        for project_id in self.store.list_session_projects(session_id):
-            self.state.logger.llm(
-                "ops_agent_event",
-                project_id,
-                session_id=session_id,
-                kind=stored["kind"],
-                label=stored["label"],
-                text=stored["text"],
-            )
+        if stored["kind"] not in ("delta", "thinking"):
+            for project_id in self.store.list_session_projects(session_id):
+                self.state.logger.llm(
+                    "ops_agent_event",
+                    project_id,
+                    session_id=session_id,
+                    kind=stored["kind"],
+                    label=stored["label"],
+                    text=stored["text"],
+                )
         self._notify_run_followers()
         return {"type": "log", "event": stored}
 
@@ -759,9 +835,15 @@ class OpsAgentService:
     def confirmation_preview(self, workflow_id: str) -> dict[str, Any]:
         workflow = self.store.get_workflow(workflow_id)
         view = self.workflow_view(workflow)
+        spec: PlatformWorkflowSpec = workflow["spec"]
+        missing = sorted(
+            spec.required_secret_names() - set(self.store.workflow_secrets(workflow_id))
+        )
         return {
             "workflow": view,
             "confirmation_phrase": f"CONFIRM WORKFLOW {workflow_id}",
+            "missing_secrets": missing,
+            "ready": not missing,
             "warning": (
                 "Confirmation authorizes repeated network requests only to the displayed origins, "
                 "using the displayed methods and templates. Editing or revoking the workflow invalidates access."
@@ -958,7 +1040,6 @@ class OpsAgentService:
 
         imported: list[dict[str, Any]] = []
         created: list[str] = []
-        # Staging is on the same filesystem as the final attachment tree.
         self.state.projects_dir.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".import-", dir=self.state.projects_dir) as temporary:
             staged = stage_challenges(
@@ -1129,6 +1210,20 @@ def _normalize_secrets(values: dict[str, str]) -> dict[str, str]:
     if len(values) > 32:
         raise ValueError("at most 32 structured secrets may be supplied at once")
     return {validate_secret_name(name): str(value) for name, value in values.items()}
+
+
+def _stream_frame(event: dict[str, Any]) -> dict[str, Any]:
+    """Shape one stored run event for the NDJSON stream.
+
+    Assistant text and reasoning increments get their own frame types so the
+    browser can render them into the message bubble and the collapsible
+    reasoning panel. Everything else stays a ``log`` frame, which the live log
+    and any older client already understand.
+    """
+    kind = event.get("kind")
+    if kind in ("delta", "thinking"):
+        return {"type": kind, "text": event.get("text") or "", "id": event.get("id")}
+    return {"type": "log", "event": event}
 
 
 def _replace_secret_values(text: str, values: dict[str, str]) -> str:

@@ -20,6 +20,10 @@ _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
 _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
 
 
+class WorkflowInUse(RuntimeError):
+    """A workflow still referenced by a competition run cannot be deleted."""
+
+
 class OpsStore:
     def __init__(
         self,
@@ -37,8 +41,6 @@ class OpsStore:
         self.db = database or Database()
         self._owns_db = database is None
         self._lock = threading.RLock()
-        # Set when a stored config used a format that no longer exists; the
-        # API surfaces it as a startup warning instead of failing to load.
         self.migrated_api_format: str | None = None
         self._configure_database()
 
@@ -55,10 +57,6 @@ class OpsStore:
             secret_data = self._read_secrets()
         api_format = public.get("api_format", "openai")
         if api_format == "claudecode":
-            # The Claude Code sidecar was removed; its endpoint was always an
-            # Anthropic Messages API. Rewriting it here keeps an existing
-            # deployment loadable, since LLMConfig rejects unknown formats
-            # outright and would otherwise fail every startup.
             api_format = "anthropic"
             self.migrated_api_format = (
                 "IPC api_format 'claudecode' was migrated to 'anthropic': the "
@@ -370,12 +368,36 @@ class OpsStore:
                 """
                 SELECT id, kind, label, text, created_at FROM (
                     SELECT id, kind, label, text, created_at
-                    FROM events WHERE session_id = %s ORDER BY id DESC LIMIT %s
+                    FROM events
+                    WHERE session_id = %s AND kind NOT IN ('delta', 'thinking')
+                    ORDER BY id DESC LIMIT %s
                 ) ORDER BY id
                 """,
                 (session_id, max(1, min(int(limit), 5_000))),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def run_stream_text(self, run_id: str) -> dict[str, str]:
+        """Assistant text and reasoning accumulated by a run so far.
+
+        A page that reconnects mid-run (or polls instead of streaming) has no
+        way to replay the increments it missed. Re-reading them in id order
+        reproduces exactly what the stream would have delivered.
+        """
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT kind, text FROM events
+                WHERE run_id = %s AND kind IN ('delta', 'thinking')
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        collected = {"delta": "", "thinking": ""}
+        for row in rows:
+            collected[row["kind"]] += row["text"] or ""
+        return {"text": collected["delta"], "reasoning": collected["thinking"]}
 
     def list_run_events(
         self,
@@ -500,6 +522,15 @@ class OpsStore:
         return [self.get_workflow(row["id"]) for row in rows]
 
     def delete_workflow(self, workflow_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            runs = connection.execute(
+                "SELECT count(*) AS total FROM competition_runs WHERE workflow_id = %s",
+                (workflow_id,),
+            ).fetchone()
+        if runs and runs["total"]:
+            raise WorkflowInUse(
+                f"workflow is referenced by {runs['total']} competition run(s) and cannot be deleted"
+            )
         with self._lock, self._connect() as connection:
             cursor = connection.execute("DELETE FROM workflows WHERE id = %s", (workflow_id,))
         if cursor.rowcount:

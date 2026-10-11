@@ -20,6 +20,7 @@ from backend.ops.service import (
     OpsAgentUpstreamError,
     WorkflowConfirmationError,
 )
+from backend.ops.store import WorkflowInUse
 
 router = APIRouter(prefix="/api/ops", tags=["ipc-agent"])
 _SERVICE_LOCK = threading.Lock()
@@ -243,7 +244,11 @@ def update_workflow(
 
 @router.delete("/workflows/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops_service)):
-    if not service.delete_workflow(workflow_id):
+    try:
+        deleted = service.delete_workflow(workflow_id)
+    except WorkflowInUse as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "workflow not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
