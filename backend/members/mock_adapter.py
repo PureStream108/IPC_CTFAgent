@@ -4,6 +4,7 @@ import json
 
 from backend.core.config import LLMConfig
 from backend.members.adapters import BaseAdapter, MemberAction
+from backend.members.member_tools import tool_call_for_action
 
 
 class MockAdapter(BaseAdapter):
@@ -11,6 +12,8 @@ class MockAdapter(BaseAdapter):
         super().__init__(config, name=name)
         self._script = list(script) if script else None
         self._reported = False
+        self._stream_script = list(script) if script else None
+        self._stream_calls = 0
 
     def health(self) -> dict:
         return {"ok": True, "status": 200, "format": "mock"}
@@ -38,6 +41,65 @@ class MockAdapter(BaseAdapter):
                 return MemberAction.from_obj(self._script.pop(0))
             return MemberAction(kind="done", args={"reason": "script exhausted"})
         return self._default(context)
+
+
+    provider_session_id = "mock-session"
+
+    def tool_result(self, call, output) -> dict:
+        return {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(output, ensure_ascii=False),
+        }
+
+    def turn(self, messages, system, tools, emit, cancel, emit_reasoning=None):
+        """Produce one scripted turn as a native tool call, or finish idle.
+
+        Each scripted action maps to exactly one tool call via
+        ``tool_call_for_action`` (the inverse of ``action_payload``), so the
+        runtime's executor round-trips it back to the identical
+        ``MemberAction`` the legacy loop would have dispatched. With no script,
+        or once it is exhausted, the mock returns a plain assistant message and
+        no tools, which the runtime treats as an idle finish.
+        """
+        from backend.competition.conversation import ToolCall, Turn
+
+        if self._stream_script:
+            action = self._stream_script.pop(0)
+            name, arguments = tool_call_for_action(action)
+            thought = arguments.get("thought", "")
+            call = ToolCall(
+                id=f"mock-{self._stream_calls}", name=name, arguments=arguments
+            )
+            self._stream_calls += 1
+            if thought:
+                emit(thought)
+            assistant = {
+                "role": "assistant",
+                "content": thought or "",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json.dumps(arguments, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+            return Turn([assistant], tools=[call], text=thought or "")
+        latest = ""
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                content = message.get("content")
+                latest = content if isinstance(content, str) else json.dumps(
+                    content, ensure_ascii=False
+                )
+                break
+        text = f"Mock member received: {latest}"
+        emit(text)
+        return Turn([{"role": "assistant", "content": text}], text=text)
 
     def _default(self, context: dict) -> MemberAction:
         step = context.get("step", 1)

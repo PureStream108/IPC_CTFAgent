@@ -26,18 +26,10 @@ from __future__ import annotations
 
 from typing import Any
 
-# Actions that end the Member's work on this intent. Once one of these is hit
-# in a batch, the remaining calls in that batch must not run: the surrounding
-# loop's dangling-call repair depends on no further side effects landing after
-# a terminal decision.
 TERMINAL_TOOLS = frozenset({"submit_flag", "conclude", "give_up"})
 
-# Read-only tools, safe to execute concurrently within one turn.
 PARALLEL_SAFE_TOOLS = frozenset({"memory_search", "tool_search", "job_status", "job_logs"})
 
-# Tool name -> the MemberAction kind it maps onto. The legacy kinds stay
-# authoritative: the dispatcher, the loop detector and the graph bookkeeping
-# are all keyed on them, so the split is a surface change only.
 TOOL_ACTIONS: dict[str, str] = {
     "bash": "bash",
     "install": "install",
@@ -229,13 +221,36 @@ def action_payload(name: str, arguments: dict[str, Any] | None) -> dict[str, Any
     return raw
 
 
+ACTION_TOOLS: dict[str, str] = {action: name for name, action in TOOL_ACTIONS.items()}
+
+
+def tool_call_for_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Map a legacy action dict onto a ``(tool_name, arguments)`` pair.
+
+    This is the exact inverse of :func:`action_payload`: the arguments it
+    returns are what the native executor will feed back through
+    ``action_payload`` and ``MemberAction.from_obj``, so a converted script
+    exercises the same side-effect path as the legacy driver did. ``thought``
+    rides along because every tool schema accepts it.
+    """
+    if not isinstance(action, dict):
+        raise ValueError(f"action must be a dict, got {type(action).__name__}")
+    kind = action.get("action") or action.get("kind")
+    if kind not in ACTION_TOOLS:
+        raise ValueError(f"no native tool maps to action kind: {kind!r}")
+    arguments = {k: v for k, v in action.items() if k not in ("action", "kind")}
+    return ACTION_TOOLS[kind], arguments
+
+
 __all__ = [
     "MEMBER_TOOLS",
     "MEMBER_TOOL_NAMES",
     "PARALLEL_SAFE_TOOLS",
     "TERMINAL_TOOLS",
     "TOOL_ACTIONS",
+    "ACTION_TOOLS",
     "action_payload",
+    "tool_call_for_action",
     "is_parallel_safe",
     "is_terminal",
 ]

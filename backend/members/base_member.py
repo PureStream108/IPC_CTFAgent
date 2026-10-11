@@ -24,6 +24,8 @@ from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
 from backend.agent.jobs import INLINE_LIMIT
+from backend.agent.runtime import AgentRuntime, AgentSessionWriter
+from backend.agent.session import AgentSessionStore, SessionConflict, SessionNeedsRebuild
 from backend.members.adapters import (
     ACTION_KINDS,
     BaseAdapter,
@@ -73,6 +75,8 @@ _INSTALL_TIMEOUT = 600
 _PACKAGE_NAME_RE = re.compile(r"^@?[A-Za-z0-9][A-Za-z0-9._+/@:=<>~^-]{0,127}$")
 _MAX_INSTALL_PACKAGES = 12
 
+MEMBER_LEGACY_DRIVER = False
+
 
 @dataclass
 class MemberDeps:
@@ -87,36 +91,25 @@ class MemberDeps:
     max_steps: int = 60
     max_actions_per_task: int = 4
     continuous: bool = False
-    on_report: Callable[[str, Any], None] | None = None   # (project_id, Report)
-    on_flag: Callable[[str], None] | None = None           # (project_id)
+    on_report: Callable[[str, Any], None] | None = None
+    on_flag: Callable[[str], None] | None = None
     expected_flag: str | None = None
     lease_owner: str | None = None
     lease_token: str | None = None
-    # Set only for competition assignments.  The legacy graph dispatcher can
-    # then share the durable competition session/event protocol without
-    # changing standalone project behavior.
     competition_store: Any | None = None
     competition_assignment: dict[str, Any] | None = None
-    # Real competition assignments may opt into the provider-native streamed
-    # loop.  Standalone projects and mock adapters continue using the legacy
-    # graph dispatcher unless this explicit bridge is enabled.
     competition_native: bool = False
     competition_conversation_factory: Callable[[Any], Any] | None = None
     competition_recon_endpoint: str | None = None
     competition_recon_replay: Callable[..., list[dict[str, Any]]] | None = None
     competition_recon_advance: Callable[[str, int], int] | None = None
-    # RuntimeConfig, when available: supplies the agent runtime's token and
-    # output budgets. Absent in unit fixtures, where the defaults apply.
     runtime: Any | None = None
-    # AgentJobStore, when available: backs the detached job tools. Absent in
-    # fixtures without a database, where job_* reports itself unavailable
-    # rather than pretending to start work.
     job_store: Any | None = None
 
 
 @dataclass
 class SolveResult:
-    status: str          # concluded | flag | done | stalled | failed | stopped
+    status: str
     steps: int
     fact_id: str | None = None
     flag: str | None = None
@@ -131,9 +124,6 @@ class DispatchResult:
     graph_action: str | None = None
     invalid_action: bool = False
     invalid_knowledge: list[str] | None = None
-    # Latest observation produced by the action. The provider-native tool
-    # loop returns it as the tool result so the model actually sees command
-    # output instead of only a status envelope.
     observation: str | None = None
 
 
@@ -354,7 +344,8 @@ class BaseMember:
             initial=is_initial,
             restored_observations=len(self.observations),
         )
-        if self._native_competition_enabled():
+        streaming, stream_reason = self._streaming_enabled()
+        if streaming:
             return await self._solve_with_native_session(
                 project_id,
                 intent_id,
@@ -362,6 +353,14 @@ class BaseMember:
                 is_initial,
                 mcp_session,
             )
+        d.logger.project(
+            "member_driver",
+            project_id,
+            member=self.name,
+            intent=intent_id,
+            driver="legacy_fallback",
+            reason=stream_reason,
+        )
         session_runner = self._competition_session()
         if session_runner is not None:
             try:
@@ -469,10 +468,6 @@ class BaseMember:
                     retryable=True,
                     error_kind="member_runtime",
                 )
-            # ``decide`` may be a blocking network call.  An operator can stop
-            # the project while it is in flight; honour that interrupt before
-            # dispatching the returned shell/MCP action, otherwise the action
-            # could recreate a task container that ``stop_project`` removed.
             if self._stop.is_set():
                 self._release(project_id, intent_id)
                 d.logger.project(
@@ -485,9 +480,6 @@ class BaseMember:
                 return SolveResult(status="stopped", steps=step)
             d.logger.llm("decide", project_id, member=self.name, step=step,
                          thought=action.thought, action=action.kind)
-            # A model call may outlive the intent lease.  Fence the result
-            # before dispatching it so a stale worker cannot execute shell/MCP
-            # actions or write graph state after another worker takes over.
             if not self._heartbeat(project_id, intent_id):
                 self._release(project_id, intent_id)
                 d.logger.project(
@@ -524,10 +516,6 @@ class BaseMember:
                 d.logger.project("member_loop_detected", project_id, member=self.name, intent=intent_id, steps=step)
                 return SolveResult(status="stalled", steps=step)
 
-            # Persist the model action before dispatching its side effect.  A
-            # restarted worker can then distinguish a completed tool call from
-            # one that was claimed but never returned, instead of blindly
-            # issuing the same shell/MCP operation twice.
             session_call: ToolCall | None = None
             if session_runner is not None:
                 signature = hashlib.sha256(
@@ -543,9 +531,6 @@ class BaseMember:
                     self._observe("[replayed competition action result restored from durable session]")
                     continue
                 if prior == "pending":
-                    # The previous process may have executed the side effect
-                    # immediately before crashing.  Surface uncertainty to the
-                    # model and require an explicit, new action/evidence path.
                     unknown = {"status": "unknown", "reason": "worker restarted during tool execution"}
                     session_runner.record_tool_result(
                         session_call,
@@ -598,10 +583,6 @@ class BaseMember:
                     error_kind="flag_conflict",
                 )
             except ValueError as exc:
-                # Dispatch-time validation failures are terminal for this
-                # attempt.  Retrying the same action only replays the invalid
-                # graph transition (for example, a missing completion edge or
-                # an already-solved project) and can create a retry storm.
                 self._release(project_id, intent_id)
                 d.logger.project(
                     "member_validation_error",
@@ -666,9 +647,6 @@ class BaseMember:
             else:
                 invalid_actions = 0
             if dispatched.result is not None:
-                # Terminal graph actions (flag/conclude) may be dispatched by
-                # a custom provider bridge, so release the intent here even
-                # when the dispatcher itself did not perform the cleanup.
                 self._release(project_id, intent_id)
                 return dispatched.result
         if self._stop.is_set():
@@ -700,6 +678,28 @@ class BaseMember:
             and config is not None
             and getattr(config, "api_format", "mock") != "mock"
         )
+
+    def _streaming_enabled(self) -> tuple[bool, str]:
+        """Choose the driving loop: provider-native streaming or legacy fallback.
+
+        The streaming loop is the default everywhere it can run: competition
+        seats (unchanged P3 gate), standalone projects with a real provider,
+        and mock adapters that expose the streaming ``turn`` surface. The
+        legacy ``decide()`` loop remains only for adapters without that surface
+        or when :data:`MEMBER_LEGACY_DRIVER` pins the rollback path; the reason
+        is returned so the caller can log which path was taken and why.
+        """
+        if self._native_competition_enabled():
+            return True, "competition_native"
+        if MEMBER_LEGACY_DRIVER:
+            return False, "feature_flag"
+        config = getattr(self.adapter, "config", None)
+        api_format = getattr(config, "api_format", "mock") if config is not None else "mock"
+        if api_format == "mock":
+            if callable(getattr(self.adapter, "turn", None)):
+                return True, "mock_stream"
+            return False, "adapter_without_turn_surface"
+        return True, "provider_native"
 
     @staticmethod
     def _native_action_tool() -> dict[str, Any]:
@@ -754,28 +754,24 @@ class BaseMember:
 
         return compress
 
-    def _make_native_runner(self, tools: list[dict[str, Any]]) -> SessionRunner:
-        factory = self.deps.competition_conversation_factory
+    def _make_native_runner(
+        self, tools: list[dict[str, Any]], project_id: str, intent_id: str
+    ):
         runtime_config = getattr(self.deps, "runtime", None)
-        if factory is None:
+        factory = self.deps.competition_conversation_factory
+        if factory is not None:
+            adapter = factory(self.adapter.config)
+        elif callable(getattr(self.adapter, "turn", None)) and callable(
+            getattr(self.adapter, "tool_result", None)
+        ):
+            adapter = self.adapter
+        else:
             adapter = ConversationAdapter(
                 self.adapter.config,
                 max_output_tokens=getattr(runtime_config, "max_output_tokens", 32768),
                 read_timeout=getattr(runtime_config, "provider_read_timeout", 300),
             )
-        else:
-            adapter = factory(self.adapter.config)
-        runner = SessionRunner(
-            self.deps.competition_store,
-            adapter,
-            None,  # installed by _solve_with_native_session below
-            assignment=self.deps.competition_assignment,
-            compressor=self._semantic_compressor(),
-            context_token_limit=getattr(runtime_config, "context_token_limit", 0),
-            compaction_trigger_ratio=getattr(
-                runtime_config, "compaction_trigger_ratio", 0.75
-            ),
-            max_turns=getattr(runtime_config, "max_turns", 0),
+        kwargs = dict(
             system=(
                 f"You are Member {self.name}, a persistent {self.role_blurb}. "
                 "Each action is its own tool; call the one that matches what "
@@ -790,10 +786,53 @@ class BaseMember:
                 member=self.name, text=text[:2000],
             ),
             before_turn=self._drain_competition_recon,
+            compressor=self._semantic_compressor(),
+            context_token_limit=getattr(runtime_config, "context_token_limit", 0),
+            compaction_trigger_ratio=getattr(
+                runtime_config, "compaction_trigger_ratio", 0.75
+            ),
+            max_turns=getattr(runtime_config, "max_turns", 0),
             parallel_safe=is_parallel_safe,
             is_terminal=is_terminal,
         )
-        return runner
+        assignment = self.deps.competition_assignment
+        if assignment is not None and self.deps.competition_store is not None:
+            return SessionRunner(
+                self.deps.competition_store,
+                adapter,
+                None,
+                assignment=assignment,
+                **kwargs,
+            )
+        return AgentRuntime(
+            self._make_standalone_writer(project_id, intent_id),
+            adapter,
+            None,
+            **kwargs,
+        )
+
+    def _make_standalone_writer(self, project_id: str, intent_id: str) -> AgentSessionWriter:
+        """Durable writer for a standalone project member (no assignment row).
+
+        One persistent agent session per (project, member, intent) replaces the
+        competition assignment's session. The member's own intent lease owner
+        doubles as the writer owner, so the intent lease and the writer lease
+        stay the two fences of a single seat; a takeover bumps the epoch, which
+        is what fences a straggler from the previous generation.
+        """
+        store = AgentSessionStore(self.deps.db)
+        task_key = f"member:{project_id}:{self.name}:{intent_id}"
+        session = store.active_session_for_task(task_key)
+        if session is None:
+            try:
+                session = store.create_session(kind="project", task_key=task_key)
+            except SessionConflict:
+                session = store.active_session_for_task(task_key)
+        if session is None:
+            raise SessionConflict(f"could not establish a session for {task_key}")
+        owner = self.deps.lease_owner or self.name
+        row = store.claim_writer(session["id"], "member", owner, takeover=True)
+        return AgentSessionWriter(store, session["id"], row["owner"], row["epoch"])
 
     async def _solve_with_native_session(
         self,
@@ -821,12 +860,21 @@ class BaseMember:
             "steps": 0,
             "graph_actions": [],
             "branch_intents": 0,
+            "invalid_actions": 0,
+            "budget_exhausted": False,
             "result": None,
             "error": None,
         }
         tool = self._native_action_tool()
+        task_budget = max(
+            1,
+            min(
+                getattr(self.deps, "max_steps", 60),
+                getattr(self.deps, "max_actions_per_task", 4),
+            ),
+        )
         try:
-            runner = self._make_native_runner(list(MEMBER_TOOLS))
+            runner = self._make_native_runner(list(MEMBER_TOOLS), project_id, intent_id)
         except Exception as exc:
             self._release(project_id, intent_id)
             return SolveResult(
@@ -839,10 +887,6 @@ class BaseMember:
             async def execute(_self, name, arguments, *, idempotency_key):
                 del idempotency_key
                 try:
-                    # One tool per action now, so the provider has already
-                    # validated the arguments against a real schema; this only
-                    # maps the tool name back onto the legacy action kind that
-                    # the dispatcher and graph bookkeeping are keyed on.
                     raw = (
                         action_payload(name, arguments)
                         if name != tool["name"] else dict(arguments or {})
@@ -869,9 +913,6 @@ class BaseMember:
                     state["error"] = "intent lease lost"
                     runner.cancel.set()
                     return {"status": "lease_lost"}
-                # Prove this worker is alive at tool granularity, not just once
-                # per provider response. A single tool can run for minutes, and
-                # the watchdog must be able to tell that from a stopped worker.
                 member._renew_session_writer(runner)
                 loop_status = member._record_action_signature(action)
                 if loop_status == "warn":
@@ -879,7 +920,19 @@ class BaseMember:
                         "[stuckness] repeated native action; switch exploit class or evidence source"
                     )
                 if loop_status == "break":
-                    state["error"] = "repeated provider action signature"
+                    member._submit_stall_report(
+                        project_id,
+                        intent_id,
+                        category,
+                        step,
+                        difficulty_hint="medium",
+                        extra_knowledge=["action_signature_repeat"],
+                    )
+                    member.deps.logger.project(
+                        "member_loop_detected", project_id, member=member.name,
+                        intent=intent_id, steps=step,
+                    )
+                    state["result"] = SolveResult(status="stalled", steps=step)
                     runner.cancel.set()
                     return {"status": "loop_detected"}
                 member.deps.logger.llm(
@@ -902,6 +955,10 @@ class BaseMember:
                         status="stalled", steps=step, error=str(exc),
                         retryable=False, error_kind="flag_conflict",
                     )
+                    member.deps.logger.project(
+                        "member_flag_conflict", project_id, member=member.name,
+                        intent=intent_id, error=str(exc),
+                    )
                     runner.cancel.set()
                     return {"status": "flag_conflict", "error": str(exc)}
                 except ValueError as exc:
@@ -910,13 +967,45 @@ class BaseMember:
                         status="stalled", steps=step, error=str(exc),
                         retryable=False, error_kind="terminal_validation",
                     )
+                    member.deps.logger.project(
+                        "member_validation_error", project_id, member=member.name,
+                        intent=intent_id, error=str(exc), retryable=False,
+                        error_kind="terminal_validation",
+                    )
                     runner.cancel.set()
                     return {"status": "validation_error", "error": str(exc)}
                 if dispatched.graph_action is not None:
                     state["graph_actions"].append(dispatched.graph_action)
                     if dispatched.graph_action == "intent":
                         state["branch_intents"] += 1
+                if dispatched.invalid_action:
+                    state["invalid_actions"] += 1
+                    if state["invalid_actions"] >= 2:
+                        invalid_knowledge = dispatched.invalid_knowledge or []
+                        member._submit_stall_report(
+                            project_id,
+                            intent_id,
+                            category,
+                            step,
+                            difficulty_hint="medium",
+                            extra_knowledge=["invalid_action_contract", *invalid_knowledge],
+                        )
+                        member.deps.logger.project(
+                            "member_invalid_action_limit", project_id,
+                            member=member.name, intent=intent_id, steps=step,
+                        )
+                        state["result"] = SolveResult(status="stalled", steps=step)
+                        runner.cancel.set()
+                else:
+                    state["invalid_actions"] = 0
                 result = dispatched.result
+                if (
+                    result is None
+                    and not getattr(member.deps, "continuous", False)
+                    and state["steps"] >= task_budget
+                ):
+                    state["budget_exhausted"] = True
+                    runner.cancel.set()
                 if result is not None:
                     state["result"] = result
                     runner.cancel.set()
@@ -949,13 +1038,6 @@ class BaseMember:
                     "different concrete analysis or exploit action now.\n"
                     + json.dumps(context, ensure_ascii=False)
                 )
-                # A restored session ends with the previous attempt's
-                # conclusion, and the runner does not re-add the bootstrap
-                # prompt when history exists.  Record a durable continuation
-                # directive so the model does not just replay that final
-                # answer.  The payload is intentionally stable per intent: a
-                # retry must reuse the stored copy instead of failing with an
-                # event-key conflict.
                 try:
                     runner.record_user_message(
                         (
@@ -966,9 +1048,7 @@ class BaseMember:
                         ),
                         event_key=f"session:user:{intent_id}",
                     )
-                except CompetitionConflict:
-                    # The directive is already durable for this intent; the
-                    # model sees the stored copy on the restored history.
+                except (CompetitionConflict, SessionConflict):
                     pass
             native_result = await runner.run_async(initial)
         except ProviderError as exc:
@@ -982,6 +1062,16 @@ class BaseMember:
                 status="failed", steps=state["steps"], error=str(exc),
                 retryable=exc.retryable, error_kind="provider",
             )
+        except SessionNeedsRebuild as exc:
+            self._release(project_id, intent_id)
+            self.deps.logger.project(
+                "member_session_rebuild_required", project_id, member=self.name,
+                intent=intent_id, error=str(exc), reason=exc.reason,
+            )
+            return SolveResult(
+                status="stalled", steps=state["steps"], error=str(exc),
+                retryable=True, error_kind="session_rebuild",
+            )
         except Exception as exc:
             self._release(project_id, intent_id)
             self.deps.logger.project(
@@ -994,9 +1084,6 @@ class BaseMember:
                 retryable=True, error_kind="native_runtime",
             )
         if state["result"] is not None:
-            # The provider stream cancels immediately after a terminal
-            # MemberAction.  Release the durable intent before returning the
-            # result so a replacement/helper can be scheduled safely.
             self._release(project_id, intent_id)
             return state["result"]
         if state["error"]:
@@ -1004,6 +1091,19 @@ class BaseMember:
             return SolveResult(
                 status="stalled", steps=state["steps"], error=state["error"],
             )
+        if state["budget_exhausted"]:
+            if not state["graph_actions"]:
+                self._submit_stall_report(
+                    project_id, intent_id, category, state["steps"]
+                )
+            self._release(project_id, intent_id)
+            status = "done" if state["graph_actions"] else "stalled"
+            self.deps.logger.project(
+                "member_task_finished", project_id, member=self.name,
+                intent=intent_id, status=status, steps=state["steps"],
+                runtime="provider-native",
+            )
+            return SolveResult(status=status, steps=state["steps"])
         if self._stop.is_set():
             self._release(project_id, intent_id)
             return SolveResult(status="stopped", steps=state["steps"])
@@ -1011,9 +1111,6 @@ class BaseMember:
         if state["error"]:
             status = "stalled"
         if status == "done" and not state["graph_actions"]:
-            # No graph change and no further actions.  Close the assigned
-            # intent so the coordinator can plan a new direction instead of
-            # redispatching the same finished intent forever.
             self._conclude_with_description(
                 project_id,
                 intent_id,
@@ -1189,10 +1286,6 @@ class BaseMember:
         return DispatchResult()
 
     def _claim(self, project_id, intent_id) -> bool:
-        # Standalone Members do not receive an orchestrator assignment.  The
-        # claim API uses the worker name as the default lease owner; retain that
-        # owner locally so subsequent heartbeat/conclude/release calls carry a
-        # complete fencing tuple.
         if self.deps.lease_owner is None:
             self.deps.lease_owner = self.name
         with self.deps.db.connect() as conn:
@@ -1257,7 +1350,6 @@ class BaseMember:
                     lease_token=self.deps.lease_token,
                     worker=self.name,
                 )
-        # Never carry a stale fencing tuple into a later task.
         self.deps.lease_token = None
 
     def _restore_progress(self, project_id: str, intent_id: str) -> None:
@@ -1300,6 +1392,16 @@ class BaseMember:
                 json.dumps(self.observations[-8:], ensure_ascii=False),
             )
         except Exception as exc:
+            if self._container_gone(exc):
+                self._progress_save_error_reported = True
+                self.deps.logger.project(
+                    "member_progress_save_skipped",
+                    self._progress_project_id or "system",
+                    member=self.name,
+                    level="debug",
+                    reason="container_not_running",
+                )
+                return
             if self._progress_save_error_reported:
                 return
             self._progress_save_error_reported = True
@@ -1309,6 +1411,27 @@ class BaseMember:
                 member=self.name,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+    @staticmethod
+    def _container_gone(exc: Exception) -> bool:
+        """True when an exception means the task container no longer exists.
+
+        Matches both the sandbox's own ``RuntimeError("task container is not
+        running")`` and a docker 409/404 (``status_code`` attribute or the
+        phrase in the message), without importing docker so a mocked sandbox in
+        tests still classifies correctly.
+        """
+        code = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "response", None), "status_code", None
+        )
+        if code in (404, 409):
+            return True
+        text = str(exc).lower()
+        return (
+            "is not running" in text
+            or "not running" in text
+            or "no such container" in text
+        )
 
     def _seed_tool_inventory(self, project_id: str) -> None:
         try:
@@ -1525,8 +1648,6 @@ class BaseMember:
         else:
             job_id = self._string_arg(action.args.get("job_id", "")).strip()
             if kind == "job_status" and not job_id:
-                # Listing is the useful default: a model that lost track of its
-                # job ids can still find its own work.
                 result = service.jobs()
             elif not job_id:
                 text = f"[invalid {kind} omitted: missing `job_id`]"
@@ -1552,9 +1673,6 @@ class BaseMember:
 
         text = f"[{kind}] " + json.dumps(result, ensure_ascii=False, default=str)
         self._observe(text)
-        # A job poll is the one place a worker is demonstrably alive while
-        # doing nothing the transcript would otherwise show, so it is also a
-        # liveness point (P5b).
         self._renew_session_writer()
         self.deps.logger.tool(
             kind,
@@ -1686,7 +1804,6 @@ class BaseMember:
             level = max_difficulty(level, "high" if prior_repeats else "medium")
             evidence.append("action_signature_repeat")
 
-        # Calibrate from observed evidence, not speculative next-step phrasing.
         texts = [progress, *steps, *knowledge]
         for report in scoped[-5:]:
             texts.extend([report.progress, *report.steps, *report.knowledge])
@@ -1854,7 +1971,7 @@ class BaseMember:
     def _record_action_signature(self, action: MemberAction) -> str | None:
         if action.kind not in {"bash", "tool", "tool_search", "memory", "install"}:
             return None
-        sig = action.kind + ":" + json.dumps(action.args, sort_keys=True, ensure_ascii=False)
+        sig = self._normalized_action_signature(action)
         self._recent_action_sigs.append(sig)
         count = sum(1 for item in self._recent_action_sigs if item == sig)
         if count >= 5:
@@ -1862,6 +1979,68 @@ class BaseMember:
         if count >= 3:
             return "warn"
         return None
+
+    @staticmethod
+    def _normalized_action_signature(action: MemberAction) -> str:
+        """A signature that collapses *near*-duplicate actions, not just exact.
+
+        The exact ``kind + json.dumps(args)`` signature was trivially defeated:
+        a heredoc that renamed one variable, or a ``tool_search`` that swapped
+        one synonym, produced a brand-new signature and slipped past the
+        3-warn/5-break thresholds (observed: 28 near-duplicate heredocs and 116
+        non-reused tool_search queries in one run).  Normalizing the salient
+        part of each action so cosmetically different retries hash together is
+        what makes the existing loop detector actually fire -- the thresholds
+        and warn/break semantics are unchanged.
+        """
+        import re
+
+        args = action.args if isinstance(action.args, dict) else {}
+        if action.kind == "bash":
+            command = str(args.get("command", ""))
+            return "bash:" + BaseMember._normalize_command(command, re)
+        if action.kind == "tool_search":
+            query = str(args.get("query") or args.get("q") or "")
+            tokens = sorted(set(re.findall(r"[a-z0-9]+", query.lower())))
+            return "tool_search:" + " ".join(tokens)
+        if action.kind == "tool":
+            server = str(args.get("server", ""))
+            tool = str(args.get("tool", ""))
+            inner = args.get("args")
+            inner_text = json.dumps(inner, sort_keys=True, ensure_ascii=False) if inner else ""
+            return f"tool:{server}:{tool}:" + BaseMember._normalize_command(inner_text, re)
+        if action.kind == "memory":
+            query = str(args.get("query", ""))
+            tokens = sorted(set(re.findall(r"[a-z0-9]+", query.lower())))
+            return "memory:" + " ".join(tokens)
+        if action.kind == "install":
+            manager = str(args.get("manager", ""))
+            packages = args.get("packages") or []
+            if isinstance(packages, list):
+                packages = sorted(str(p).strip().lower() for p in packages)
+            return f"install:{manager}:" + ",".join(packages)
+        return action.kind + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False)
+
+    @staticmethod
+    def _normalize_command(command: str, re) -> str:
+        """Fold cosmetic variation out of a shell command / payload.
+
+        Collapses whitespace, folds every integer and quoted string to a
+        placeholder, and strips temp-file paths (``/tmp/xxxx``) so that two
+        commands that differ only in a renamed scratch file, a changed numeric
+        literal, or a reworded string literal share one signature.  This is a
+        structural fingerprint, not a semantic one -- it is deliberately lossy.
+        """
+        text = command.strip().lower()
+        text = re.sub(r"/tmp/[^\s'\"]+", "/tmp/<f>", text)
+        text = re.sub(r"\b\w*scratch\w*/\S+", "<scratch>", text)
+        text = re.sub(r"'[^']*'", "<s>", text)
+        text = re.sub(r'"[^"]*"', "<s>", text)
+        text = re.sub(r"\b0x[0-9a-f]+\b", "<n>", text)
+        text = re.sub(r"\b\d+\b", "<n>", text)
+        text = re.sub(r"\b([a-z_]{2,})[_]?\d+\b", r"\1", text)
+        text = re.sub(r"\s+", " ", text)
+        return text[:400]
 
     def _reset_action_signatures(self) -> None:
         self._recent_action_sigs.clear()
@@ -1904,9 +2083,6 @@ class BaseMember:
                     lease_token=self.deps.lease_token,
                 )
                 if not concluded:
-                    # Returning here would commit ``fact`` because the
-                    # connection context sees a normal exit. Raise so the
-                    # transaction rolls back both the fact and its counter.
                     raise _IntentLeaseLost
                 node_store.insert_fact(conn, project_id, fact.id, fact.description)
                 graph_store.add_link(conn, project_id, self.name, f"fact:{fact.id}", "explore")
@@ -1925,12 +2101,8 @@ class BaseMember:
                 row = edge_store.get_intent(conn, project_id, intent_id)
                 if row is None:
                     return SolveResult(status="stalled", steps=step, error="intent not found")
-                # A concluded intent has no live fencing token.  Treat a
-                # replayed flag action as stale instead of letting it reuse a
-                # historical fact and write a second completion/flag edge.
                 if row["to_fact_id"] is not None:
                     raise _IntentLeaseLost
-                # ensure the assigned intent is concluded into a fact first
                 if row["to_fact_id"] is None:
                     fact = node_store.reserve_fact(conn, project_id, desc)
                     concluded = edge_store.conclude_intent(
@@ -1949,14 +2121,9 @@ class BaseMember:
                     from_fact = fact.id
                 else:
                     from_fact = row["to_fact_id"]
-                # completion edge -> goal; project-row locking makes this idempotent
-                # when multiple Members report the same Flag concurrently.
                 edge_store.complete_goal_intent(
                     conn, project_id, [from_fact], desc, self.name, self.name
                 )
-                # Platform-linked projects only queue the candidate here; the
-                # orchestrator's verdict worker accepts it once the platform
-                # judge confirms.  Local projects are accepted immediately.
                 candidate = submit_flag_candidate(
                     conn,
                     project_id,
@@ -1973,7 +2140,6 @@ class BaseMember:
             d.on_flag(project_id)
         return SolveResult(status="flag", steps=step, flag=flag, fact_id=from_fact)
 
-    # ---- context ----
 
     def _available_mcp_names(self) -> list[str]:
         return list(
@@ -2044,9 +2210,6 @@ class BaseMember:
                 "external_id is this challenge's platform id — use it with ret2shell MCP tools."
             ),
         ]
-        # Platform verdicts flow back through the experience memory: surface
-        # any flags the platform already rejected for THIS challenge so the
-        # member never resubmits them and re-derives a complete flag instead.
         try:
             rejected_flags: list[str] = []
             for m in d.memory.list(None):

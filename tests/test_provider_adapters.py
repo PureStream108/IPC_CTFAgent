@@ -236,8 +236,6 @@ def test_truncated_json_recovers_only_complete_values():
         _extract_json('{"action":"bash","command":"echo flag')
 
 
-# ---------------------------------------------------------------------------
-# Streaming usage capture and provider session affinity (unified runtime).
 
 
 class _StreamResponse:
@@ -337,7 +335,6 @@ def test_stream_options_are_dropped_when_the_provider_rejects_them():
     assert "stream_options" not in attempts[1]
     assert turn.text == "ok"
     assert turn.usage is None
-    # The degradation sticks, so the next turn does not repeat the failure.
     assert adapter._stream_usage_supported is False
     _run(adapter, request)
     assert "stream_options" not in attempts[2]
@@ -377,7 +374,6 @@ def test_anthropic_usage_is_merged_across_start_and_delta_events():
 
     turn = _run(_conversation(api_format="anthropic"), request)
 
-    # Cached prompt tokens still occupy the context window, so they count.
     assert turn.usage["prompt_tokens"] == 1000
     assert turn.usage["output_tokens"] == 42
     assert turn.text == "hello"
@@ -424,7 +420,6 @@ def test_provider_session_id_is_stable_across_rebuilt_adapters():
     first = _conversation(provider_session_id=durable)
     second = _conversation(provider_session_id=durable)
     assert first.provider_session_id == second.provider_session_id == durable
-    # Without an explicit id each adapter still gets its own.
     assert _conversation().provider_session_id != _conversation().provider_session_id
 
 
@@ -457,6 +452,98 @@ def test_output_budget_and_read_timeout_come_from_configuration():
     _run(adapter, request)
 
     assert captured["json"]["max_tokens"] == 32768
-    # The read timeout is a chunk gap, so a long silent reasoning phase before
-    # the first token must not kill the turn.
     assert captured["timeout"] == (15, 300)
+
+
+def _run_with_reasoning(adapter, request):
+    """Run one turn capturing the answer and reasoning channels separately."""
+    import threading
+
+    adapter.request = request
+    text: list[str] = []
+    reasoning: list[str] = []
+    turn = adapter.turn(
+        [{"role": "user", "content": "go"}], "system", [], text.append,
+        threading.Event(), reasoning.append,
+    )
+    return turn, "".join(text), "".join(reasoning)
+
+
+def test_anthropic_thinking_is_streamed_without_entering_the_answer():
+    """Thinking must reach the reasoning channel, not the assistant text."""
+
+    def request(url, **kwargs):
+        return _StreamResponse([
+            '{"type":"content_block_start","index":0,'
+            '"content_block":{"type":"thinking"}}',
+            '{"type":"content_block_delta","index":0,'
+            '"delta":{"type":"thinking_delta","thinking":"let me check"}}',
+            '{"type":"content_block_start","index":1,'
+            '"content_block":{"type":"text","text":""}}',
+            '{"type":"content_block_delta","index":1,'
+            '"delta":{"type":"text_delta","text":"the answer"}}',
+            '{"type":"message_stop"}',
+        ], done=False)
+
+    turn, text, reasoning = _run_with_reasoning(
+        _conversation(api_format="anthropic"), request
+    )
+
+    assert reasoning == "let me check"
+    assert text == "the answer"
+    assert turn.text == "the answer"
+
+
+def test_chat_completions_reasoning_content_is_streamed():
+    """DeepSeek-style ``reasoning_content`` increments are parsed."""
+
+    def request(url, **kwargs):
+        return _StreamResponse([
+            '{"choices":[{"index":0,"delta":{"reasoning_content":"step one"},'
+            '"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{"reasoning":" step two"},'
+            '"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{"content":"done"},'
+            '"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        ])
+
+    turn, text, reasoning = _run_with_reasoning(_conversation(), request)
+
+    assert reasoning == "step one step two"
+    assert text == "done"
+    assert turn.text == "done"
+
+
+def test_responses_reasoning_summary_is_streamed():
+    def request(url, **kwargs):
+        return _StreamResponse([
+            '{"type":"response.reasoning_summary_text.delta","delta":"planning"}',
+            '{"type":"response.output_text.delta","delta":"result"}',
+            '{"type":"response.completed","response":{"output":['
+            '{"type":"message","content":[{"type":"output_text","text":"result"}]}]}}',
+        ])
+
+    _, text, reasoning = _run_with_reasoning(
+        _conversation(surface="responses"), request
+    )
+
+    assert reasoning == "planning"
+    assert text == "result"
+
+
+def test_a_turn_without_a_reasoning_callback_still_streams_text():
+    """``emit_reasoning`` is optional: competition Members do not pass one."""
+
+    def request(url, **kwargs):
+        return _StreamResponse([
+            '{"choices":[{"index":0,"delta":{"reasoning_content":"ignored"},'
+            '"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{"content":"plain"},'
+            '"finish_reason":null}]}',
+            '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        ])
+
+    turn = _run(_conversation(), request)
+
+    assert turn.text == "plain"

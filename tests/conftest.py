@@ -17,6 +17,7 @@ POSTGRES_TEST_MODULES = {
     "test_goal_intent_postgres.py",
     "test_lifecycle.py",
     "test_members.py",
+    "test_member_driver.py",
     "test_memory.py",
     "test_ops_agent.py",
     "test_optional_startup.py",
@@ -67,8 +68,6 @@ TRUNCATE_TABLES = (
     "projects",
     "settings",
     "competition_run_observations",
-    # The unified agent tables cascade from agent_sessions, but competition
-    # rows reference them, so truncate the whole group explicitly.
     "agent_compactions",
     "agent_jobs",
     "agent_turns",
@@ -85,8 +84,6 @@ def pytest_collection_modifyitems(config, items) -> None:
     )
     has_database = bool(os.environ.get("IPC_TEST_DATABASE_URL", "").strip())
     for item in items:
-        # Modules in POSTGRES_TEST_MODULES are entirely DB-backed; individual
-        # tests elsewhere may opt in with an explicit @pytest.mark.postgres.
         if (
             Path(str(item.fspath)).name not in POSTGRES_TEST_MODULES
             and item.get_closest_marker("postgres") is None

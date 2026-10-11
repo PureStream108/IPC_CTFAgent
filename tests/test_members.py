@@ -121,7 +121,13 @@ def test_initial_member_solves_to_flag(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="aventurine", api_format="mock")
-    member = create_member(cfg, d)
+    script = [
+        {"action": "bash", "command": "echo recon on web challenge"},
+        {"action": "memory", "query": "web explore web app"},
+        {"action": "flag", "flag": "flag{test}",
+         "description": "Captured flag via 'explore web app'."},
+    ]
+    member = create_member(cfg, d, script=script)
     result = member.solve(pid, iid, "web", is_initial=True)
     assert result.status == "flag"
     assert result.flag == "flag{test}"
@@ -134,7 +140,6 @@ def test_initial_member_solves_to_flag(deps):
     assert intent["lease_owner"] is None
     assert intent["lease_token"] is None
     assert intent["lease_expires_at"] is None
-    # a goal edge exists
     assert any(i.to == "goal" for i in detail.intents)
 
 
@@ -220,7 +225,13 @@ def test_followup_member_concludes(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="pearl", api_format="mock")
-    member = create_member(cfg, d)
+    script = [
+        {"action": "bash", "command": "echo recon on web challenge"},
+        {"action": "memory", "query": "web explore web app"},
+        {"action": "conclude",
+         "description": "Confirmed result while exploring 'explore web app' (web)."},
+    ]
+    member = create_member(cfg, d, script=script)
     result = member.solve(pid, iid, "web", is_initial=False)
     assert result.status == "concluded"
     assert result.fact_id is not None
@@ -242,7 +253,6 @@ def _stale_member_and_intent(db, deps):
             conn, pid, iid, "jade", lease_owner=old_owner, timeout=30
         )
         assert old_token
-        # Make the old lease claimable, then let a replacement worker fence it.
         conn.execute(
             "UPDATE intents SET lease_expires_at = '2000-01-01T00:00:00Z' "
             "WHERE id = %s AND project_id = %s",
@@ -343,11 +353,18 @@ def test_member_reports_difficulty_on_eval_step(deps):
     db, d, reports, flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="aventurine", api_format="mock")
-    # use default (non-script) behaviour but force eval interval small
-    d.eval_interval = 3
-    member = create_member(cfg, d)
+    script = [
+        {"action": "bash", "command": "echo recon on web challenge"},
+        {"action": "memory", "query": "web explore web app"},
+        {"action": "report", "progress": "explored 'explore web app', 3 steps in",
+         "difficulty": "medium",
+         "steps": ["recon on web target", "analysed 'explore web app'"],
+         "directions": ["investigate alternate web vector", "check component CVEs"],
+         "knowledge": ["web", "recon"]},
+        {"action": "done", "reason": "reported"},
+    ]
+    member = create_member(cfg, d, script=script)
     member.solve(pid, iid, "web", is_initial=False)
-    # default arc concludes at step 3 which is also eval step -> report fires first
     assert len(reports) >= 1
     assert reports[0].difficulty in ("medium", "high")
 
@@ -819,3 +836,96 @@ def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
     created = next(i for i in detail.intents if i.creator == "jade")
     assert created.from_ == [fact.id]
     assert any(link.src == "jade" and link.dst == f"intent:{created.id}" for link in detail.agent_links)
+
+
+
+def _sig(kind, **args):
+    from backend.members.adapters import MemberAction
+    from backend.members.base_member import BaseMember
+
+    return BaseMember._normalized_action_signature(
+        MemberAction.from_obj({"action": kind, **args})
+    )
+
+
+def test_near_duplicate_bash_commands_share_a_signature():
+    a = _sig("bash", command="python3 /tmp/aaaa.py --offset 108 --target 0xdeadbeef")
+    b = _sig("bash", command="python3 /tmp/zzzz.py --offset 108 --target 0xcafebabe")
+    c = _sig("bash", command="python3 /tmp/qqqq.py --offset 44 --target 0x11112222")
+    assert a == b == c
+
+
+def test_reworded_heredoc_payload_collapses():
+    a = _sig("bash", command="python3 -c 'print(\"flag probe one\")'")
+    b = _sig("bash", command="python3 -c 'print(\"a different message\")'")
+    assert a == b
+
+
+def test_distinct_commands_keep_distinct_signatures():
+    assert _sig("bash", command="nmap -sV target") != _sig(
+        "bash", command="python3 solve.py"
+    )
+    assert _sig("bash", command="curl http://host/a") != _sig(
+        "bash", command="sqlmap -u http://host/a"
+    )
+
+
+def test_tool_search_is_order_and_synonym_token_insensitive():
+    a = _sig("tool_search", query="pyjail sandbox escape")
+    b = _sig("tool_search", query="sandbox escape pyjail")
+    assert a == b
+    assert a != _sig("tool_search", query="rsa factoring attack")
+
+
+def test_loop_break_triggers_on_near_duplicate_sequence(deps):
+    """Five cosmetically different bash commands now cross the break threshold.
+
+    Before normalization each got a fresh signature and never tripped the
+    detector; the warn/break thresholds themselves are unchanged.
+    """
+    _db, d, _reports, _flags = deps
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=[{"action": "done", "reason": "noop"}])
+    from backend.members.adapters import MemberAction
+
+    statuses = []
+    for i in range(5):
+        action = MemberAction.from_obj(
+            {"action": "bash", "command": f"python3 /tmp/scratch_{i}.py --seed {i * 7}"}
+        )
+        statuses.append(member._record_action_signature(action))
+    assert "warn" in statuses
+    assert statuses[-1] == "break"
+
+
+
+def test_container_gone_classifies_terminal_sandbox_errors():
+    from backend.members.base_member import BaseMember
+
+    class _Coded(Exception):
+        status_code = 409
+
+    assert BaseMember._container_gone(_Coded()) is True
+    assert BaseMember._container_gone(RuntimeError("task container is not running")) is True
+    assert BaseMember._container_gone(Exception("No such container: abc")) is True
+    assert BaseMember._container_gone(ValueError("disk full")) is False
+
+
+def test_persist_progress_skips_quietly_when_container_is_gone(deps):
+    _db, d, _reports, _flags = deps
+    cfg = MemberConfig(name="jade", api_format="mock")
+    member = create_member(cfg, d, script=[{"action": "done", "reason": "noop"}])
+    member._progress_path = ".ipc/progress/x.json"
+    member._progress_project_id = "proj_x"
+    member.observations = [{"step": 1}]
+
+    class _GoneSandbox:
+        def write_file(self, *_a, **_k):
+            raise RuntimeError("409 Client Error: container is not running")
+
+    member.deps.sandbox = _GoneSandbox()
+    member._persist_progress()
+
+    entries = d.logger.read_log("project", "proj_x", None)
+    assert any(e["event"] == "member_progress_save_skipped" for e in entries)
+    assert not any(e["event"] == "member_progress_save_failed" for e in entries)
