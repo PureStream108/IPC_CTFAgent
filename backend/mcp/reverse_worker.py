@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 def _remaining(deadline: float) -> int:
     return max(1, int(deadline - time.monotonic()))
@@ -71,6 +74,7 @@ def _run(
                         program, selected, _remaining(deadline)
                     )
                 except Exception as exc:
+                    _recovery_logger.debug('Error handled in _run', exc_info=True)
                     results.append(
                         {
                             "name": str(selected.getName()),
@@ -175,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             project_dir=args.project_dir,
         )
     except Exception as exc:
+        _recovery_logger.debug('Error handled in main', exc_info=True)
         result = {
             "available": False,
             "error": f"{type(exc).__name__}: {exc}",

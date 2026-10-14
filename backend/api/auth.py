@@ -59,8 +59,12 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_AUTH_MANAGER_DEPENDENCY = Depends(get_auth_manager)
+
 @router.get("/status")
-def auth_status(request: Request, manager: AuthManager = Depends(get_auth_manager)) -> dict:
+def auth_status(request: Request, manager: AuthManager = _GET_AUTH_MANAGER_DEPENDENCY) -> dict:
     return {
         "setup_required": False,
         "authenticated": True,
@@ -73,7 +77,7 @@ def setup(
     payload: SetupRequest,
     request: Request,
     response: Response,
-    manager: AuthManager = Depends(get_auth_manager),
+    manager: AuthManager = _GET_AUTH_MANAGER_DEPENDENCY,
 ) -> dict:
     if manager.configuration_error:
         raise HTTPException(
@@ -95,7 +99,7 @@ def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
-    manager: AuthManager = Depends(get_auth_manager),
+    manager: AuthManager = _GET_AUTH_MANAGER_DEPENDENCY,
 ) -> dict:
     if manager.configuration_error:
         raise HTTPException(
@@ -138,7 +142,7 @@ def login(
 def logout(
     request: Request,
     response: Response,
-    manager: AuthManager = Depends(get_auth_manager),
+    manager: AuthManager = _GET_AUTH_MANAGER_DEPENDENCY,
 ) -> None:
     manager.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
     response.delete_cookie(

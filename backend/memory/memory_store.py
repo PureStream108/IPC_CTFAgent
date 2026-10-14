@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from backend.persistence.database import Database, PostgresDatabase
 
-
 CATEGORIES = ("knowledge", "tool_usage", "exploit", "lessons")
 
 

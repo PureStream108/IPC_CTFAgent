@@ -13,7 +13,6 @@ fast and deterministically against an isolated IPC_TEST_DATABASE_URL.
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -154,8 +153,6 @@ def test_undelivered_recon_degrades_to_blackboard_and_emits_event(harness):
 
     with harness.db.connect() as connection:
         hints = graph_store.list_hints(connection, project_id)
-        facts = graph_store.list_facts(connection, project_id) \
-            if hasattr(graph_store, "list_facts") else None
     hint_text = "\n".join(h.content for h in hints)
     assert "no canary" in hint_text
     assert "root shell" in hint_text
@@ -221,7 +218,7 @@ def test_recon_for_released_seat_is_not_flagged(harness):
 
 def test_cursor_advance_reports_message_consumed(harness):
     run = _running_run(harness.store)
-    challenge, project_id, session_id = _live_receiver_seat(harness, run)
+    challenge, _project_id, session_id = _live_receiver_seat(harness, run)
     sequence = _insert_recon(
         harness, run, challenge, session_id,
         report={"member": "topaz", "knowledge": ["eventually consumed"]},

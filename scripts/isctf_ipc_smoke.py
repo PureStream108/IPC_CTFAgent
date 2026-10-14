@@ -26,15 +26,14 @@ from psycopg.types.json import Jsonb
 from backend.blackboard import graph_store
 from backend.competition.fixture import FixturePlatform
 from backend.competition.service import CompetitionService
-from backend.ops.models import PlatformWorkflowSpec
 from backend.mcp.mcp_client import MCPClient
 from backend.ops.ipc_mcp import build_ipc_mcp
+from backend.ops.models import PlatformWorkflowSpec
 from backend.ops.questions import QuestionStore
 from backend.ops.store import OpsStore
 from backend.platform.gzctf import GZCTFAdapter, GZCTFClient
 from backend.platform.mapping import FieldMapping
 from backend.server.app import create_app
-
 
 BASE_URL = "https://gz.imxbt.cn"
 GAME_ID = 32

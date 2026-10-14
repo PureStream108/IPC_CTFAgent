@@ -19,6 +19,7 @@ class FieldMapping(BaseModel):
     attachments_field: str = "files"
     remote_field: str = ""
     solved_field: str = ""
+    score_field: str = "score"
     hints_field: str = ""
     level: int = 1
     track_id: str = ""
@@ -68,7 +69,7 @@ class FieldMapping(BaseModel):
             raise ValueError("max_challenges must be between 0 and 1000")
         return value
 
-    @field_validator("level_field", "track_id_field", "pagination_path")
+    @field_validator("level_field", "track_id_field", "pagination_path", "score_field")
     @classmethod
     def validate_optional_paths(cls, value: str) -> str:
         value = value.strip()

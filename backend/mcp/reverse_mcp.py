@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.mcp.shared import _tool_unavailable
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _JVM_STARTED = False
 _DEFAULT_GHIDRA_INSTALL_DIR = Path("/opt/ghidra")
@@ -115,6 +120,7 @@ def _r2_cmd_sync(binary: str, cmd: str) -> dict[str, Any]:
             handle.quit()
         return {"available": True, "binary": str(path), "command": cmd, "output": output}
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _r2_cmd_sync', exc_info=True)
         return _tool_unavailable("reverse.r2_cmd", str(exc), binary=binary, command=cmd)
 
 
@@ -172,6 +178,7 @@ def _r2_decompile_sync(binary: str, function: str) -> dict[str, Any]:
             "output": output,
         }
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _r2_decompile_sync', exc_info=True)
         return _tool_unavailable(
             "reverse.decompile.r2",
             str(exc),
@@ -247,6 +254,7 @@ def _decompile_sync(binary: str, function: str, timeout: int) -> dict[str, Any]:
             function=function,
         )
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _decompile_sync', exc_info=True)
         fallback = _r2_decompile_sync(str(path), function)
         if fallback.get("available"):
             return {
@@ -276,6 +284,7 @@ def _decompile_all_sync(binary: str, limit: int, timeout: int) -> dict[str, Any]
             limit=limit,
         )
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _decompile_all_sync', exc_info=True)
         return _tool_unavailable("reverse.decompile_all", str(exc), binary=binary)
 
 
@@ -284,6 +293,7 @@ def _list_functions_sync(binary: str, timeout: int = 90) -> dict[str, Any]:
         path = _ensure_binary(binary)
         return _run_ghidra_worker("list_functions", str(path), timeout)
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _list_functions_sync', exc_info=True)
         return _tool_unavailable("reverse.list_functions", str(exc), binary=binary)
 
 
@@ -294,6 +304,7 @@ def _strings_sync(binary: str, min_len: int, timeout: int = 90) -> dict[str, Any
             "strings", str(path), timeout, min_len=min_len
         )
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _strings_sync', exc_info=True)
         return _tool_unavailable("reverse.strings", str(exc), binary=binary)
 
 
@@ -310,12 +321,13 @@ def _disassemble_sync(
             count=count,
         )
     except Exception as exc:
+        _recovery_logger.debug('Error handled in _disassemble_sync', exc_info=True)
         return _tool_unavailable("reverse.disassemble", str(exc), binary=binary, address=addr)
 
 
 def _run_command(command: list[str], timeout: int = 60) -> tuple[bool, str]:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()

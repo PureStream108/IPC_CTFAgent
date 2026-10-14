@@ -1,16 +1,25 @@
 """Integration invariants; run only with an isolated IPC_TEST_DATABASE_URL."""
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 import zmq
+from psycopg.errors import RaiseException
 
 from backend.blackboard import graph_store
-from backend.competition.store import CompetitionConflict, CompetitionStore
+from backend.competition.store import (
+    CompetitionConflict,
+    CompetitionStore,
+    _redact_snapshot,
+)
 from backend.competition.transport import Envelope, ReconPublisher, ReconSubscriber
 from backend.competition.workspace import SharedWorkspace
 from backend.core.orchestrator import Orchestrator
 from backend.persistence.database import Database
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.postgres
 
@@ -45,6 +54,147 @@ def test_idempotent_start_and_only_one_active_run(store):
     assert store.create_run("workflow", "platform/game/team", "start", {})["id"] == first["id"]
     with pytest.raises(CompetitionConflict):
         store.create_run("workflow", "different/team", "other-start", {})
+
+
+def test_run_limit_updates_validate_types_bounds_and_revision(store):
+    run = running(store, "limits")
+    updated = store.update_limits(
+        run["id"], {"max_concurrent_tasks": "3", "remote_concurrency": 2},
+        revision=run["revision"],
+    )
+    assert updated["limits"]["max_concurrent_tasks"] == 3
+    assert updated["limits"]["remote_concurrency"] == 2
+    with pytest.raises(ValueError, match="object"):
+        store.update_limits(run["id"], [], revision=updated["revision"])
+    with pytest.raises(ValueError, match="unknown run"):
+        store.update_limits(run["id"], {"unknown": 1}, revision=updated["revision"])
+    with pytest.raises(ValueError, match="integer"):
+        store.update_limits(run["id"], {"total_cpu": "bad"}, revision=updated["revision"])
+    with pytest.raises(ValueError, match="between"):
+        store.update_limits(run["id"], {"total_cpu": 1001}, revision=updated["revision"])
+    with pytest.raises(CompetitionConflict, match="stale"):
+        store.update_limits(run["id"], {"total_cpu": 1}, revision=run["revision"])
+
+
+def test_submission_queue_and_verdict_branches_fence_evidence_and_cooldowns(store):
+    run = running(store, "submission-branches")
+    challenge = ready(store, run, "submit-branches")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "submitter")
+    with pytest.raises(ValueError, match="candidate"):
+        store.queue_candidate(assignment, "", "evidence", challenge["instance_generation"])
+    with pytest.raises(ValueError, match="candidate"):
+        store.queue_candidate(assignment, "flag{x}", "", challenge["instance_generation"])
+    with pytest.raises(CompetitionConflict, match="stale instance"):
+        store.queue_candidate(assignment, "flag{x}", "evidence", challenge["instance_generation"] + 1)
+
+    queued = store.queue_candidate(
+        assignment, "flag{x}", "evidence", challenge["instance_generation"]
+    )
+    submitting = store.claim_submission(run["id"])
+    assert submitting["id"] == queued["id"]
+    wrong = store.finish_submission(queued["id"], {"verdict": "wrong"})
+    assert wrong["status"] == "wrong"
+
+    queued_again = store.queue_candidate(
+        assignment, "flag{rate}", "second evidence", challenge["instance_generation"]
+    )
+    with store.db.connect() as connection:
+        connection.execute(
+            "UPDATE competition_challenges SET next_submission_at=now() WHERE id=%s",
+            (challenge["id"],),
+        )
+    store.claim_submission(run["id"])
+    rate = store.finish_submission(queued_again["id"], {"verdict": "rate_limited", "retry_after": 2})
+    assert rate["status"] == "rate_limited"
+    with pytest.raises(ValueError, match="unknown verdict"):
+        store.finish_submission(queued_again["id"], {"verdict": "wat"})
+
+    with pytest.raises(ValueError, match="grace"):
+        store.reconcile_inflight_submissions(run["id"], grace_seconds=-1)
+
+
+def test_recovered_candidate_and_inflight_reconciliation_guards(store):
+    run = running(store, "recovered-candidate")
+    challenge = ready(store, run, "recovered")
+    with pytest.raises(ValueError, match="candidate and evidence"):
+        store.queue_recovered_candidate(run["id"], challenge["id"], "", "")
+    with pytest.raises(CompetitionConflict, match="accepting candidates"):
+        store.queue_recovered_candidate(run["id"], challenge["id"], "flag{x}", "evidence")
+    no_seat = ready(store, run, "no-seat")
+    with store.db.connect() as connection:
+        connection.execute(
+            "UPDATE competition_challenges SET state='solving' WHERE id=%s",
+            (no_seat["id"],),
+        )
+    with pytest.raises(CompetitionConflict, match="solver session"):
+        store.queue_recovered_candidate(run["id"], no_seat["id"], "flag{x}", "evidence")
+    assignment = store.assign(run["id"], challenge["id"], "amber", "recover")
+    recovered = store.queue_recovered_candidate(
+        run["id"], challenge["id"], "flag{x}", "legacy evidence"
+    )
+    assert recovered["status"] == "queued"
+    claimed = store.claim_submission(run["id"])
+    with store.db.connect() as connection:
+        connection.execute(
+            "UPDATE competition_submissions SET submitted_at=now()-interval '2 minutes' WHERE id=%s",
+            (claimed["id"],),
+        )
+    assert store.reconcile_inflight_submissions(run["id"], grace_seconds=30) == 1
+    assert store.submission(claimed["id"])["status"] == "unknown"
+    assert assignment["member"] == "amber"
+
+
+def test_external_solved_marking_is_idempotent_and_reports_missing_challenges(store):
+    run = running(store, "external-solved")
+    challenge = ready(store, run, "external-solved")
+    solved = store.mark_external_solved(challenge["id"])
+    assert solved["state"] == "solved"
+    assert store.mark_external_solved(challenge["id"])["state"] == "solved"
+    with pytest.raises(KeyError):
+        store.mark_external_solved("missing-challenge")
+
+
+def test_run_transition_rejects_stale_and_invalid_terminal_transitions(store):
+    run = running(store, "transition-guards")
+    with pytest.raises(CompetitionConflict, match="stale revision"):
+        store.transition_run(run["id"], "paused", revision=run["revision"] - 1)
+    with pytest.raises(CompetitionConflict, match="invalid run transition"):
+        store.transition_run(run["id"], "importing", revision=run["revision"])
+
+
+def test_challenge_state_guards_reject_unknown_and_missing_rows(store):
+    run = running(store, "state-guards")
+    challenge = ready(store, run, "state-guards")
+    with pytest.raises(ValueError, match="invalid challenge state"):
+        store.set_challenge_state(challenge["id"], "running")
+    changed = store.set_challenge_state(challenge["id"], "blocked")
+    assert changed["state"] == "blocked"
+    with pytest.raises(KeyError):
+        store.set_challenge_state("missing-challenge", "ready")
+
+
+def test_store_argument_and_missing_row_guards(store):
+    with pytest.raises(ValueError, match="identity"):
+        store.create_run("workflow", "", "", {})
+    run = running(store, "argument-guards")
+    challenge = ready(store, run, "argument-guards")
+    with pytest.raises(ValueError, match="Member assignment"):
+        store.assign(run["id"], challenge["id"], "unknown", "owner")
+    with pytest.raises(ValueError, match="Member assignment"):
+        store.assign(run["id"], challenge["id"], "amber", "")
+    with pytest.raises(KeyError):
+        store.get_run("missing-run")
+
+
+def test_competition_snapshot_redaction_keeps_only_secret_presence():
+    assert _redact_snapshot({
+        "api_key": "secret", "nested": {"token": "t", "host": "x"},
+        "items": [{"password": "p"}],
+    }) == {
+        "api_key_set": True,
+        "nested": {"token_set": True, "host": "x"},
+        "items": [{"password_set": True}],
+    }
 
 
 def test_engine_lease_fences_legacy_and_competition_schedulers(store):
@@ -200,9 +350,8 @@ def test_release_reassignment_preserves_deadline_and_session(store):
     assert second["session_id"] == first["session_id"]
     with store.db.connect() as c:
         assert c.execute("SELECT deadline_at FROM competition_challenges WHERE id=%s", (challenge["id"],)).fetchone() == original
-    with pytest.raises(Exception, match="immutable"):
-        with store.db.connect() as c:
-            c.execute("UPDATE competition_challenges SET first_assigned_at=now(),deadline_at=now()+interval '5 hours' WHERE id=%s", (challenge["id"],))
+    with pytest.raises(RaiseException, match="immutable"), store.db.connect() as c:
+        c.execute("UPDATE competition_challenges SET first_assigned_at=now(),deadline_at=now()+interval '5 hours' WHERE id=%s", (challenge["id"],))
 
 
 def test_restart_recovers_expired_assignment_without_resetting_deadline(store):
@@ -244,7 +393,7 @@ def test_session_events_are_idempotent_and_stale_writer_is_fenced(store):
     run = running(store)
     challenge = ready(store, run)
     assignment = store.assign(run["id"], challenge["id"], "amber", "worker")
-    args = dict(assignment_id=assignment["id"], owner="worker", epoch=assignment["epoch"])
+    args = {"assignment_id": assignment["id"], "owner": "worker", "epoch": assignment["epoch"]}
     event = store.append_event(assignment["session_id"], "call-1", "tool_call", {"command": "pwd"}, **args)
     assert store.append_event(assignment["session_id"], "call-1", "tool_call", {"command": "pwd"}, **args) == event
     with pytest.raises(CompetitionConflict):
@@ -455,16 +604,26 @@ def test_submission_dedupe_wrong_cooldown_and_redaction(store):
     assert store.challenges(run["id"])[0]["wrong_count"] == 1
 
 
-def test_correct_submission_creates_original_author_wp_job(store):
+def test_correct_closeout_creates_original_author_wp_job(store):
     run = running(store)
     challenge = ready(store, run)
     assignment = store.assign(run["id"], challenge["id"], "agate", "worker")
     queued = store.queue_candidate(assignment, "flag{correct}", "verified exploit", 0)
     claimed = store.claim_submission(run["id"])
+    assert claimed["id"] == queued["id"]
+    with pytest.raises(CompetitionConflict, match="requires a correct"), store.db.connect() as connection:
+        store.finalize_correct_challenge(connection, run["id"], challenge["id"])
     store.finish_submission(
         claimed["id"], {"verdict": "correct", "submission_id": "remote-1"}
     )
 
+    assert store.challenges(run["id"])[0]["state"] == "solving"
+    with store.db.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM competition_wp_jobs WHERE challenge_id=%s", (challenge["id"],),
+        ).fetchone() is None
+        store.finalize_correct_challenge(connection, run["id"], challenge["id"])
+        store.finalize_correct_challenge(connection, run["id"], challenge["id"])
     solved = store.challenges(run["id"])[0]
     assert solved["state"] == "solved"
     with store.db.connect() as connection:
@@ -557,6 +716,7 @@ def test_recon_persists_concurrently_without_a_global_lock(store):
                 holding.set()
                 release.wait(10)
         except BaseException as exc:
+            _recovery_logger.debug('Error handled in hold_the_run_shard', exc_info=True)
             failure.append(exc)
             holding.set()
 
@@ -606,6 +766,7 @@ def test_concurrent_recon_of_one_request_id_stays_idempotent(store):
             with lock:
                 results.append(record)
         except BaseException as exc:
+            _recovery_logger.debug('Error handled in persist', exc_info=True)
             with lock:
                 failures.append(exc)
 
@@ -642,6 +803,7 @@ def test_two_runs_do_not_contend_on_the_same_lock_shard(store):
                 holding.set()
                 release.wait(10)
         except BaseException as exc:
+            _recovery_logger.debug('Error handled in hold_first_run_shard', exc_info=True)
             failure.append(exc)
             holding.set()
 
@@ -736,7 +898,7 @@ def test_orchestrator_report_bridge_uses_durable_recon_store(store):
     """The production report bridge persists one record per helper seat."""
     run = running(store, "recon-bridge")
     challenge = ready(store, run, "bridge")
-    sender = store.assign(run["id"], challenge["id"], "amber", "bridge-a")
+    store.assign(run["id"], challenge["id"], "amber", "bridge-a")
     receiver = store.assign(
         run["id"], challenge["id"], "agate", "bridge-b", role="helper"
     )

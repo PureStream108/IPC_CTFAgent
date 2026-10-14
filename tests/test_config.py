@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import stat
+from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from backend.core.config import AppConfig, MEMBER_NAMES, LLMConfig, MemberConfig, RuntimeConfig, load_config, save_config
+from backend.core.config import (
+    MEMBER_NAMES,
+    AppConfig,
+    LLMConfig,
+    MemberConfig,
+    RuntimeConfig,
+    load_config,
+    save_config,
+)
 from tests.helpers import write_mock_config
 
 
@@ -75,15 +84,15 @@ def test_browser_runtime_limits_and_origins_are_validated():
         browser_allowed_origins=["HTTPS://Example.Test:443/", "http://[::1]:8080"],
     )
     assert runtime.browser_allowed_origins == ["https://example.test", "http://[::1]:8080"]
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RuntimeConfig(browser_event_limit=1001)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RuntimeConfig(browser_response_preview_bytes=16385)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RuntimeConfig(browser_artifact_max_bytes=50 * 1024 * 1024 + 1)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RuntimeConfig(browser_allowed_origins=["file:///tmp/page.html"])
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RuntimeConfig(browser_allowed_origins=["https://example.test/path"])
 
 
@@ -91,9 +100,9 @@ def test_llm_surface_and_reasoning_settings_are_validated():
     cfg = LLMConfig(api_surface="responses", reasoning_effort="low")
     assert cfg.api_surface == "responses"
     assert cfg.reasoning_effort == "low"
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         LLMConfig(api_surface="legacy-completions")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         LLMConfig(reasoning_effort="ultra")
 
 
@@ -129,7 +138,7 @@ def test_available_members_filters_unconfigured():
 
 
 def test_duplicate_member_names_rejected():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         AppConfig(
             diamond=LLMConfig(api_format="mock"),
             members=[

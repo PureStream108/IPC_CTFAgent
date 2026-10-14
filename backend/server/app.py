@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,8 +11,8 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api import agent as agent_router
 from backend.api import auth as auth_router
-from backend.api import config as config_router
 from backend.api import competition as competition_router
+from backend.api import config as config_router
 from backend.api import flags as flags_router
 from backend.api import graph as graph_router
 from backend.api import logs as logs_router
@@ -19,9 +20,9 @@ from backend.api import memory as memory_router
 from backend.api import ops_agent as ops_agent_router
 from backend.api import platform as platform_router
 from backend.api import project as project_router
-from backend.api import solve as solve_router
-from backend.api import skills as skills_router
 from backend.api import questions as questions_router
+from backend.api import skills as skills_router
+from backend.api import solve as solve_router
 from backend.api import wp as wp_router
 from backend.auth import AuthManager
 from backend.auth.middleware import AuthenticationMiddleware
@@ -29,6 +30,8 @@ from backend.core.state import AppState
 from backend.ops.ipc_mcp import build_ipc_mcp
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 def _resolve_frontend_dir(app_root: Path) -> Path:
     """Locate the top-level ``frontend/`` web UI directory.
@@ -70,6 +73,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             state.orchestrator = Orchestrator(state)
             state.orchestrator.start()
         except Exception as exc:
+            _recovery_logger.debug('Error handled in lifespan', exc_info=True)
             app.state.orchestrator_error = str(exc)
         try:
             from backend.competition.service import CompetitionService
@@ -77,6 +81,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             state.competition = CompetitionService(state)
             state.competition.start_worker()
         except Exception as exc:
+            _recovery_logger.debug('Error handled in lifespan', exc_info=True)
             app.state.competition_error = str(exc)
         try:
             async with ipc_mcp_app.router.lifespan_context(ipc_mcp_app):

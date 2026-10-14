@@ -1,0 +1,12 @@
+{
+  "agent-core": {
+    "covered_lines": 3124,
+    "statements": 3841,
+    "line_percent": 81.33
+  },
+  "competition": {
+    "covered_lines": 2559,
+    "statements": 3162,
+    "line_percent": 80.93
+  }
+}

@@ -48,14 +48,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,docker]"
 
-      - name: Run tests
-        run: python -m pytest -q
+      - name: Run tests with branch coverage
+        run: python -m pytest -q --require-postgres --cov=backend --cov-branch --cov-report=term-missing --cov-report=json --junitxml=data/exports/pytest-ci.xml
 
-      - name: Static and deployment checks
+      - name: Enforce architectural coverage floors
+        run: python scripts/check_coverage.py
+
+      - name: Verify temporary PostgreSQL isolation
         run: |
+          native_postgres_ctl="$(pg_config --bindir)/pg_ctl"
+          test -x "$native_postgres_ctl"
+          env -u IPC_TEST_DATABASE_URL -u IPC_DATABASE_URL IPC_TEST_POSTGRES_EXECUTABLE="$native_postgres_ctl" \
+            python -m pytest -q --require-postgres tests/test_postgres_isolation.py tests/test_goal_intent_postgres.py tests/test_ops_stream.py tests/test_competition_monitor.py tests/test_competition_migration_smoke.py
+
+      - name: Full lint and deployment checks
+        run: |
+          python -m ruff check backend scripts tests
           python -m compileall -q backend scripts tests
           python -m alembic upgrade head --sql > /tmp/ipc-migration.sql
           docker compose config --quiet
+
+      - name: Upload test and coverage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipc-tests-coverage
+          path: |
+            coverage.json
+            data/exports/pytest-ci.xml
 
   task-image:
     runs-on: ubuntu-latest
@@ -82,3 +102,33 @@ jobs:
 
       - name: Run AI CPU smoke
         run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci python3 /acceptance/ai_smoke.py
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IPC_INSTALL_WSRX: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Start deterministic E2E stack
+        run: |
+          docker compose build ipc-app
+          docker compose -f docker-compose.e2e.yml up -d e2e-postgres e2e-platform e2e-app
+
+      - name: Run Playwright competition acceptance
+        run: docker compose -f docker-compose.e2e.yml run --rm e2e-runner
+
+      - name: Upload E2E diagnostics
+        # All three CI jobs must be required by the repository's branch rules;
+        # declaring a job here alone does not configure branch protection.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipc-e2e-diagnostics
+          path: data/exports/e2e
+
+      - name: Stop E2E stack
+        if: always()
+        run: docker compose -f docker-compose.e2e.yml down -v

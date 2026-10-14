@@ -1,6 +1,8 @@
 services:
   ipc-postgres:
     image: postgres:16-alpine
+    ports:
+      - "15432:5432"
     environment:
       - POSTGRES_DB=${IPC_POSTGRES_DB:-ipc}
       - POSTGRES_USER=${IPC_POSTGRES_USER:-ipc}
@@ -30,6 +32,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        INSTALL_WSRX: ${IPC_INSTALL_WSRX:-1}
     image: ipc-ctfagent:latest
     container_name: ipc-app
     ports:

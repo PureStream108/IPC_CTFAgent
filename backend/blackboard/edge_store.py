@@ -8,7 +8,6 @@ from typing import Any
 from backend.blackboard.ids import next_intent_id, utcnow
 from backend.blackboard.models import Intent
 
-
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^a-z0-9_./:-]+")
 

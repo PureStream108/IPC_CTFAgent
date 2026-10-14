@@ -77,15 +77,15 @@ class FakeSession:
 
 
 def make_client(router, authed=True, **kwargs):
-    defaults = dict(
-        base_url=BASE,
-        game_id=37,
-        username="user",
-        password="pass",
-        poll_attempts=3,
-        poll_interval=0.0,
-        sleep=lambda seconds: None,
-    )
+    defaults = {
+        "base_url": BASE,
+        "game_id": 37,
+        "username": "user",
+        "password": "pass",
+        "poll_attempts": 3,
+        "poll_interval": 0.0,
+        "sleep": lambda seconds: None,
+    }
     if authed:
         defaults["token"] = "seed-token"
     defaults.update(kwargs)
@@ -433,7 +433,6 @@ class StubPlatformClient:
 
     def find_instance(self, challenge_id, game_id=None):
         self.calls.append(("find", challenge_id))
-        return None
 
     def start_instance(self, challenge_id, game_id=None):
         self.calls.append(("start", challenge_id))

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
@@ -17,6 +18,9 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -28,9 +32,9 @@ from isctf_real_ipc_run import (
     _write_config,
 )
 
+from backend.competition.service import CompetitionService, _timestamp
 from backend.core.orchestrator import Orchestrator
 from backend.core.state import AppState
-from backend.competition.service import CompetitionService, _timestamp
 from backend.ops.service import OpsAgentService
 
 RUN_ID = sys.argv[1] if len(sys.argv) > 1 else None
@@ -107,6 +111,7 @@ async def _run() -> dict[str, object]:
                 competition.control(run_id, "pause", int(current["revision"]))
                 print(json.dumps({"run_id": run_id, "paused": True}, ensure_ascii=False), flush=True)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _run', exc_info=True)
             print(json.dumps({"pause_on_exit_error": str(exc)}, ensure_ascii=False), flush=True)
         finally:
             competition.shutdown()

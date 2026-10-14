@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from backend.persistence.database import Database, PostgresDatabase
 
-
 PROJECT_STATES = (
     "created",
     "running",
@@ -14,4 +13,4 @@ PROJECT_STATES = (
     "stopped",
 )
 
-__all__ = ["Database", "PostgresDatabase", "PROJECT_STATES"]
+__all__ = ["PROJECT_STATES", "Database", "PostgresDatabase"]

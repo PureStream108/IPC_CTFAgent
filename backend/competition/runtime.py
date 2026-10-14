@@ -8,7 +8,8 @@ constructs the runtime directly.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from backend.agent.runtime import (
     AgentRuntime,
@@ -36,7 +37,7 @@ class SessionRunner(AgentRuntime):
         cancel: threading.Event | None = None,
         emit: Callable[[str], None] | None = None,
         compressor: Callable[[list[dict[str, Any]]], tuple[str, list[dict[str, Any]]]] | None = None,
-        before_turn: Callable[["SessionRunner"], list[dict[str, Any]]] | None = None,
+        before_turn: Callable[[SessionRunner], list[dict[str, Any]]] | None = None,
         context_bytes: int = 1_000_000,
         repeated_batch_limit: int = 8,
         truncation_retry_limit: int = 3,

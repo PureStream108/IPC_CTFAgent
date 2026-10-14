@@ -8,17 +8,11 @@
 
 
 <div align="center">
-
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL 16](https://img.shields.io/badge/Runtime-PostgreSQL_16-4169E1.svg?logo=postgresql&logoColor=white)](#durable-runtime-state)
 [![Docker Compose](https://img.shields.io/badge/Deploy-Docker_Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
-
-</div>
-
-<div align="center">
-[🚀 快速开始](#quick-start) • [✨ 核心设计](#core-innovations) • [🖥️ 控制台](#agent-workbench) • [🏗️ 系统架构](#system-architecture) • [🧰 工具运行时](#tool-runtime) • [🧪 开发](#development)
 
 </div>
 
@@ -151,7 +145,6 @@ Docker Compose 将数据库放入命名卷，将需要人工访问或跨容器�
 | `data/artifacts/logs/` | 项目、LLM、工具与 Memory JSONL |
 | `data/artifacts/exports/` | Writeup、日志和 Obsidian/Markdown Memory 导出快照 |
 | `data/ops-agent/` | IPC 模型配置和工作流密钥等文件型机密 |
-| `ipc_claude_home` Docker 卷 | `claudecode` 运行器的原生 JSONL 会话 |
 
 导出采用无损编号命名；同名文件存在时会创建 `名称01`、`名称02` 等新文件，不覆盖历史导出。
 
@@ -165,7 +158,7 @@ Docker Compose 将数据库放入命名卷，将需要人工访问或跨容器�
 | Docker Compose v2 | 必需 | 标准部署与服务编排 |
 | Docker Socket | 必需 | App 需要创建题目容器；IPC Runner 同样依赖 Socket |
 | Linux Docker 主机 | 推荐/已验证 | Compose 会挂载 Docker Socket 与 Compose 插件 |
-| LLM 端点 | 开始解题时需要 | Diamond 与已启用 Member 使用 OpenAI、Anthropic、Claude Code、DeepSeek、Pi 或 Mock 适配器 |
+| LLM 端点 | 开始解题时需要 | Diamond 与已启用 Member 使用 OpenAI、Anthropic、DeepSeek、Pi 或 Mock 适配器 |
 | 浏览器 | 可选 | 只保留 Playwright Python 包；浏览器二进制不在任务镜像内，由部署环境显式提供路径 |
 
 > [!WARNING]
@@ -199,7 +192,7 @@ docker compose logs -f ipc-app
 docker compose down
 ```
 
-此命令不会删除 `./data`、`ipc_postgres_data` 或 `ipc_claude_home`。只有主动删除它们或执行 `docker compose down -v` 才会清理命名卷。
+此命令不会删除 `./data` 或 `ipc_postgres_data`。只有主动删除它们或执行 `docker compose down -v` 才会清理命名卷。
 
 ### 2. Configure the LLM runtime
 
@@ -258,7 +251,7 @@ UI 运行在操作者可信的 Docker 网络边界内，默认不增加浏览器
 
 IPC 是面向操作者的持续对话代理，可诊断运行环境、辅助题目沙箱、操作项目生命周期，并生成声明式平台工作流。工作流必须经人工确认才能执行。其对话、运行事件和工作流元数据存入 PostgreSQL，文件型密钥保存在 `data/ops-agent/`。
 
-`claudecode` 运行器会持久化原生会话，以便在容器替换后通过 `--resume` 延续上下文。无论使用哪种 Runner，内部 MCP 请求都应通过 `IPC_RUNNER_TOKEN` 鉴权。
+IPC 与比赛 Member 共用 `backend/agent/` 中的统一运行时：会话记录在 `agent_sessions` / `agent_events`，因此容器替换后可以从持久事件重建上下文，无需外部 Runner。
 
 ---
 
@@ -275,7 +268,7 @@ flowchart TB
 
     subgraph OPS["IPC 行动代理层"]
         IPC["IPC 对话代理"]
-        RUNNER["Claude Code Runner\n或 OpenAI-compatible API"]
+        RUNNER["统一 Agent 运行时\nagent_sessions / agent_events"]
         IMCP["内部 IPC MCP\n项目生命周期与诊断工具"]
         IPC <--> RUNNER
         RUNNER --> IMCP

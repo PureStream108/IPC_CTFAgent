@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
+from backend.core.validation import InputValidationError
 from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
@@ -108,7 +109,7 @@ class HttpJsonAdapter(PlatformAdapter):
                 raise ValueError("challenge list endpoint did not return JSON") from exc
             items = _json_path(payload, self.mapping.list_path)
             if not isinstance(items, list):
-                raise ValueError(f"list_path '{self.mapping.list_path}' did not resolve to a list")
+                raise InputValidationError(f"list_path '{self.mapping.list_path}' did not resolve to a list")
             pages.extend(self._normalize(item) for item in items)
             if not self.mapping.pagination_path:
                 break
@@ -116,7 +117,7 @@ class HttpJsonAdapter(PlatformAdapter):
             if next_url in (None, ""):
                 break
             if not isinstance(next_url, str):
-                raise ValueError("pagination_path must resolve to a URL or null")
+                raise InputValidationError("pagination_path must resolve to a URL or null")
             next_url = urljoin(url, next_url)
             parsed = urlparse(next_url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -129,7 +130,7 @@ class HttpJsonAdapter(PlatformAdapter):
 
     def _normalize(self, item: Any) -> PlatformChallenge:
         if not isinstance(item, dict):
-            raise ValueError("challenge list entries must be JSON objects")
+            raise InputValidationError("challenge list entries must be JSON objects")
         external_id = _field(item, self.mapping.id_field)
         title = _field(item, self.mapping.title_field)
         if external_id is None or title is None:
@@ -141,7 +142,7 @@ class HttpJsonAdapter(PlatformAdapter):
         if isinstance(raw_attachments, str):
             raw_attachments = [raw_attachments]
         if not isinstance(raw_attachments, list):
-            raise ValueError("configured attachments field must contain a URL or list of URLs")
+            raise InputValidationError("configured attachments field must contain a URL or list of URLs")
         base_url = self.mapping.attachment_base_url or self.mapping.list_url
         attachment_urls = [urljoin(base_url, str(url)) for url in raw_attachments]
         return PlatformChallenge(
@@ -152,6 +153,7 @@ class HttpJsonAdapter(PlatformAdapter):
             attachment_urls=attachment_urls,
             remote=bool(self.mapping.remote_field and _field(item, self.mapping.remote_field, False) is True),
             solved=bool(self.mapping.solved_field and _field(item, self.mapping.solved_field, False) is True),
+            platform_data={"score": _field(item, self.mapping.score_field)} if self.mapping.score_field else {},
             hints=([str(h) for h in _field(item, self.mapping.hints_field, [])]
                    if self.mapping.hints_field and isinstance(_field(item, self.mapping.hints_field, []), list) else []),
         )

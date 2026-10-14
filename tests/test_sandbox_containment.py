@@ -50,8 +50,8 @@ def test_container_commands_are_allowed(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "p='D:/Desktop/Codex/IPC_CTFAgent/.qa-artifacts/isctf-real-20260927-150115"
-        "/artifacts/projects/proj_104/sandbox/shared/work_i001/ISCTF2025-WriteUp.pdf'",
+        ("p='D:/Desktop/Codex/IPC_CTFAgent/.qa-artifacts/isctf-real-20260927-150115"
+        "/artifacts/projects/proj_104/sandbox/shared/work_i001/ISCTF2025-WriteUp.pdf'"),
         "cd /workspace/shared && /d/Language/Python314/python - << 'EOF'",
         r"cat C:\Users\Administrator\AppData\Local\Temp\amber\grid.py",
         "chroot /host /bin/bash -lc id",

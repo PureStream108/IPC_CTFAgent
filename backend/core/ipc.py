@@ -100,7 +100,7 @@ def accept_verified_flag(
     ).fetchone()
     if has_goal_edge is None:
         raise ValueError("cannot verify flag without a completion edge")
-    key = hashlib.sha256(f"{project_id}\0{normalized}".encode("utf-8")).hexdigest()
+    key = hashlib.sha256(f"{project_id}\0{normalized}".encode()).hexdigest()
     now = utcnow()
     connection.execute(
         """
@@ -156,7 +156,7 @@ def record_pending_flag(
 
     normalized = flag.strip()
     project = assert_flag_compatible(connection, project_id, normalized)
-    key = hashlib.sha256(f"{project_id}\0{normalized}".encode("utf-8")).hexdigest()
+    key = hashlib.sha256(f"{project_id}\0{normalized}".encode()).hexdigest()
     now = utcnow()
     row = connection.execute(
         """

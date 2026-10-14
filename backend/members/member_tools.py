@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.core.validation import InputValidationError
+
 TERMINAL_TOOLS = frozenset({"submit_flag", "conclude", "give_up"})
 
 PARALLEL_SAFE_TOOLS = frozenset({"memory_search", "tool_search", "job_status", "job_logs"})
@@ -234,7 +236,7 @@ def tool_call_for_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     rides along because every tool schema accepts it.
     """
     if not isinstance(action, dict):
-        raise ValueError(f"action must be a dict, got {type(action).__name__}")
+        raise InputValidationError(f"action must be a dict, got {type(action).__name__}")
     kind = action.get("action") or action.get("kind")
     if kind not in ACTION_TOOLS:
         raise ValueError(f"no native tool maps to action kind: {kind!r}")
@@ -243,14 +245,14 @@ def tool_call_for_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 __all__ = [
+    "ACTION_TOOLS",
     "MEMBER_TOOLS",
     "MEMBER_TOOL_NAMES",
     "PARALLEL_SAFE_TOOLS",
     "TERMINAL_TOOLS",
     "TOOL_ACTIONS",
-    "ACTION_TOOLS",
     "action_payload",
-    "tool_call_for_action",
     "is_parallel_safe",
     "is_terminal",
+    "tool_call_for_action",
 ]

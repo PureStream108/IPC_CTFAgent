@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-from collections import deque
-from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 import re
 import time
 import uuid
+from collections import deque
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(?:^|[-_])(?:authorization|cookie|password|passwd|proxy-authorization|set-cookie|"
@@ -450,6 +453,7 @@ class _BrowserSession:
         try:
             return self.page_id(request.frame.page)
         except Exception:
+            _recovery_logger.debug('Error handled in _request_page_id', exc_info=True)
             return self._active_page_id or "main"
 
     def _network_request_allowed(self, request: Any) -> bool:
@@ -484,6 +488,7 @@ class _BrowserSession:
         try:
             headers = await response.all_headers()
         except Exception:
+            _recovery_logger.debug('Error handled in _record_response', exc_info=True)
             headers = {}
         content_type = str(headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         preview = None
@@ -499,6 +504,7 @@ class _BrowserSession:
                     self._network_preview_limit,
                 )
             except Exception:
+                _recovery_logger.debug('Error handled in _record_response', exc_info=True)
                 preview = None
         started = self._request_started.pop(id(request), None)
         redirected_from = getattr(request, "redirected_from", None)
@@ -721,7 +727,7 @@ def _close_browser_at_exit(browser: _BrowserSession) -> None:
     try:
         asyncio.run(browser.close())
     except Exception:
-        pass
+        _recovery_logger.debug('Error handled in _close_browser_at_exit', exc_info=True)
 
 
 def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
@@ -780,6 +786,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **snapshot,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in navigate', exc_info=True)
             return _tool_unavailable("browser.navigate", str(exc), url=_redact_url(url), page_id=page_id)
 
     @server.tool(name="click", description="Click an element and return the resulting page state.")
@@ -790,7 +797,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
-                pass
+                _recovery_logger.debug('Error handled in click', exc_info=True)
             return {
                 "available": True,
                 "page_id": _browser_page_id(browser, page),
@@ -798,6 +805,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **await _page_snapshot(page),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in click', exc_info=True)
             return _tool_unavailable("browser.click", str(exc), selector=selector)
 
     @server.tool(name="fill", description="Fill an input or textarea without submitting it.")
@@ -813,6 +821,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 "url": page.url,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in fill', exc_info=True)
             return _tool_unavailable("browser.fill", str(exc), selector=selector)
 
     @server.tool(name="press", description="Press a keyboard key on the current page.")
@@ -827,6 +836,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **await _page_snapshot(page),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in press', exc_info=True)
             return _tool_unavailable("browser.press", str(exc), key=key)
 
     @server.tool(name="eval_js", description="Evaluate JavaScript in the current page context.")
@@ -840,6 +850,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 "url": page.url,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in eval_js', exc_info=True)
             return _tool_unavailable("browser.eval_js", str(exc))
 
     @server.tool(name="get_content", description="Return rendered HTML and visible text for the current page.")
@@ -854,6 +865,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 "text": await page.locator("body").inner_text(),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in get_content', exc_info=True)
             return _tool_unavailable("browser.get_content", str(exc))
 
     @server.tool(
@@ -896,6 +908,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 )
             return result
         except Exception as exc:
+            _recovery_logger.debug('Error handled in screenshot', exc_info=True)
             return _tool_unavailable("browser.screenshot", str(exc), path=str(out))
 
     @server.tool(
@@ -927,6 +940,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 "cookies": items,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in cookies', exc_info=True)
             return _tool_unavailable("browser.cookies", str(exc))
 
     @server.tool(name="set_cookie", description="Add or replace a cookie in the persistent browser context.")
@@ -968,6 +982,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 "cookie": public_cookie,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in set_cookie', exc_info=True)
             return _tool_unavailable("browser.set_cookie", str(exc), name=name)
 
     @server.tool(
@@ -1008,6 +1023,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **await _page_snapshot(page, max_chars=6000),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in wait_for', exc_info=True)
             return _tool_unavailable("browser.wait_for", str(exc), page_id=page_id)
 
     @server.tool(name="network_log_start", description="Start bounded browser network recording.")
@@ -1028,6 +1044,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
             )
             return {"available": True, **result}
         except Exception as exc:
+            _recovery_logger.debug('Error handled in network_log_start', exc_info=True)
             return _tool_unavailable("browser.network_log_start", str(exc), page_id=page_id)
 
     @server.tool(name="network_log_list", description="List bounded, redacted network events incrementally.")
@@ -1050,6 +1067,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 ),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in network_log_list', exc_info=True)
             return _tool_unavailable("browser.network_log_list", str(exc))
 
     @server.tool(name="network_log_stop", description="Stop browser network recording.")
@@ -1057,6 +1075,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
         try:
             return {"available": True, **await browser.network_log_stop()}
         except Exception as exc:
+            _recovery_logger.debug('Error handled in network_log_stop', exc_info=True)
             return _tool_unavailable("browser.network_log_stop", str(exc))
 
     @server.tool(name="console_logs", description="List bounded, redacted browser console events.")
@@ -1073,6 +1092,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **browser.console_logs(after_id=after_id, limit=limit, levels=levels),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in console_logs', exc_info=True)
             return _tool_unavailable("browser.console_logs", str(exc))
 
     @server.tool(name="page_errors", description="List bounded, redacted uncaught page errors.")
@@ -1088,6 +1108,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **browser.page_errors(after_id=after_id, limit=limit),
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in page_errors', exc_info=True)
             return _tool_unavailable("browser.page_errors", str(exc))
 
     @server.tool(
@@ -1113,6 +1134,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 ],
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in upload_file', exc_info=True)
             return _tool_unavailable("browser.upload_file", str(exc), selector=selector)
 
     @server.tool(
@@ -1142,7 +1164,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                     try:
                         await page.goto(url, wait_until="commit", timeout=timeout_ms)
                     except Exception:
-                        pass
+                        _recovery_logger.debug('Error handled in download', exc_info=True)
             item = await download_info.value
             suggested_name = Path(str(getattr(item, "suggested_filename", "download"))).name
             suffix = Path(suggested_name).suffix
@@ -1166,6 +1188,7 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
                 **artifact,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in download', exc_info=True)
             return _tool_unavailable("browser.download", str(exc), page_id=page_id)
 
     return server

@@ -7,7 +7,6 @@ import secrets
 from pathlib import Path
 from typing import BinaryIO
 
-
 UPLOAD_ID_RE = re.compile(r"^upload_[a-f0-9]{24}$")
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_CONTEXT_BYTES = 120_000

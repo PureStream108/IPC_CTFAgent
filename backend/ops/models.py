@@ -94,6 +94,7 @@ class ChallengeMappingSpec(BaseModel):
     attachments_field: str = "files"
     remote_field: str = ""
     solved_field: str = ""
+    score_field: str = "score"
     hints_field: str = ""
     level: int = Field(default=1, ge=1, le=1000)
     track_id: str = ""
@@ -133,6 +134,7 @@ class ChallengeMappingSpec(BaseModel):
         "attachments_field",
         "remote_field",
         "solved_field",
+        "score_field",
         "hints_field",
         "level_field",
         "track_id_field",
@@ -165,6 +167,7 @@ class ChallengeMappingSpec(BaseModel):
             attachments_field=self.attachments_field,
             remote_field=self.remote_field,
             solved_field=self.solved_field,
+            score_field=self.score_field,
             hints_field=self.hints_field,
             level=self.level,
             track_id=self.track_id,
@@ -243,6 +246,9 @@ class PlatformWorkflowSpec(BaseModel):
     competition_id: str = Field(default="", max_length=256)
     team_id: str = Field(default="", max_length=256)
     ends_at: str = ""
+    # Maximum number of container challenges this run may execute in parallel.
+    # ``remote_instance_limit`` remains accepted for older workflow drafts.
+    remote_concurrency: int = Field(default=0, ge=0, le=100)
     remote_instance_limit: int = Field(default=0, ge=0, le=100)
     challenges: ChallengeMappingSpec
     submit: FlagSubmitSpec | None = None
@@ -252,7 +258,12 @@ class PlatformWorkflowSpec(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
-        return value.strip()
+        value = value.strip()
+        if not value:
+            raise ValueError("workflow name must be the actual competition name")
+        if value.casefold() in {"proposed", "probe", "workflow", "new workflow"}:
+            raise ValueError("workflow name must be the actual competition name, not a placeholder")
+        return value
 
     @field_validator("ends_at")
     @classmethod

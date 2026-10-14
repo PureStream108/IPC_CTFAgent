@@ -5,8 +5,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from backend.api.deps import get_state
-from backend.core.state import AppState
 from backend.core.redaction import redact_object
+from backend.core.state import AppState
 from backend.memory.exporter.obsidian import export_obsidian
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import CATEGORIES, Memory
@@ -21,8 +21,12 @@ class AddMemoryRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("/memory", response_model=list[Memory])
-def list_memory(category: str | None = None, state: AppState = Depends(get_state)):
+def list_memory(category: str | None = None, state: AppState = _GET_STATE_DEPENDENCY):
     memories = state.memory.list(category)
     with state.db.connect() as conn:
         flags = {
@@ -36,7 +40,7 @@ def list_memory(category: str | None = None, state: AppState = Depends(get_state
 
 
 @router.post("/memory", response_model=Memory, status_code=201)
-def add_memory(body: AddMemoryRequest, state: AppState = Depends(get_state)):
+def add_memory(body: AddMemoryRequest, state: AppState = _GET_STATE_DEPENDENCY):
     if body.category not in CATEGORIES:
         raise HTTPException(400, f"category must be one of {CATEGORIES}")
     mem = state.memory.add(body.category, body.title, body.content, body.tags, source="human")
@@ -45,13 +49,13 @@ def add_memory(body: AddMemoryRequest, state: AppState = Depends(get_state)):
 
 
 @router.delete("/memory/{memory_id}", status_code=204)
-def delete_memory(memory_id: str, state: AppState = Depends(get_state)):
+def delete_memory(memory_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     if not state.memory.delete(memory_id):
         raise HTTPException(404, "Memory not found")
 
 
 @router.get("/memory/search")
-def search_memory(q: str, category: str | None = None, limit: int = 5, state: AppState = Depends(get_state)):
+def search_memory(q: str, category: str | None = None, limit: int = 5, state: AppState = _GET_STATE_DEPENDENCY):
     results = mem_search(state.memory, q, category=category, limit=limit)
     with state.db.connect() as conn:
         flags = {
@@ -65,12 +69,12 @@ def search_memory(q: str, category: str | None = None, limit: int = 5, state: Ap
 
 
 @router.get("/memory/catalog")
-def memory_catalog(state: AppState = Depends(get_state)):
+def memory_catalog(state: AppState = _GET_STATE_DEPENDENCY):
     return {"children": state.catalog.tree()}
 
 
 @router.get("/memory/catalog/{entry_id}")
-def memory_catalog_entry(entry_id: str, state: AppState = Depends(get_state)):
+def memory_catalog_entry(entry_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     entry = state.catalog.get(entry_id)
     if entry is None:
         raise HTTPException(404, "Catalog document not found")
@@ -84,7 +88,7 @@ def memory_catalog_entry(entry_id: str, state: AppState = Depends(get_state)):
 @router.get("/memory/catalog/{entry_id}/document")
 def memory_catalog_document(
     entry_id: str,
-    state: AppState = Depends(get_state),
+    state: AppState = _GET_STATE_DEPENDENCY,
 ):
     entry = state.catalog.get(entry_id)
     if entry is None:
@@ -99,6 +103,6 @@ def memory_catalog_document(
 
 
 @router.post("/memory/derive")
-def derive_memory(state: AppState = Depends(get_state)):
+def derive_memory(state: AppState = _GET_STATE_DEPENDENCY):
     vault = export_obsidian(state.memory, state.memory_export_dir / "vault")
     return {"vault": str(vault)}

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -24,6 +25,9 @@ from typing import Any
 import yaml
 from alembic import command
 from alembic.config import Config
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -1070,6 +1074,7 @@ def main() -> int:
     try:
         result = run(args)
     except Exception as exc:
+        _recovery_logger.debug('Error handled in main', exc_info=True)
         print(
             json.dumps(
                 {"status": "failed", "error": f"{type(exc).__name__}: {exc}"},

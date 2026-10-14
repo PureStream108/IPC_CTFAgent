@@ -8,8 +8,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import connect
-from psycopg.sql import Identifier, SQL
-
+from psycopg.sql import SQL, Identifier
 
 pytestmark = pytest.mark.postgres
 

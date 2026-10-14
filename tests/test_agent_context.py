@@ -226,7 +226,7 @@ def test_semantic_summarize_falls_back_on_an_empty_or_unparseable_reply():
 
     for reply in ("", "I could not summarize that.", "{}"):
         summary, retained = summarize(
-            messages, request=lambda *_args, **_kwargs: reply, keep_recent=4
+            messages, request=lambda *_args, reply=reply, **_kwargs: reply, keep_recent=4
         )
         assert summary["open_questions"], reply
         assert retained
@@ -249,7 +249,7 @@ def test_deterministic_compaction_never_orphans_a_tool_result():
     _summary, retained = deterministic_summary(messages, keep_recent=5)
     tail = retained[1:]
     assert tail
-    assert not (tail[0].get("role") == "tool")
+    assert tail[0].get("role") != "tool"
 
 
 def test_deterministic_compaction_handles_anthropic_tool_result_blocks():

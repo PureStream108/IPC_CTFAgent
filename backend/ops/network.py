@@ -90,7 +90,7 @@ class WorkflowHttpClient:
                     raise NetworkPolicyError(
                         f"workflow hostname resolves to a non-public address: {parsed.hostname}"
                     )
-        return sorted(addresses)[0]
+        return min(addresses)
 
     def _resolve_addresses(self, hostname: str, port: int | None, scheme: str) -> set[str]:
         effective_port = port or (443 if scheme == "https" else 80)
@@ -164,5 +164,6 @@ def _pinned_request(
     response.reason = raw.reason
     response.encoding = requests.utils.get_encoding_from_headers(response.headers)
     if not stream:
-        response.content
+        # Materialize the body before the connection is returned to the pool.
+        _ = response.content
     return response

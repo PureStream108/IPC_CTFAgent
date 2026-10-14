@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from backend.blackboard import edge_store, graph_store, node_store
@@ -8,6 +9,9 @@ from backend.core.difficulty import extra_members_for_difficulty, normalize_diff
 from backend.core.logging_util import IPCLogger
 from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, generate_wp_content, write_wp
 from backend.members.adapters import make_adapter
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 BOOTSTRAP_DESC = "Bootstrap: Starting"
 
@@ -68,6 +72,7 @@ class Diamond:
                     (project_id,),
                 ).fetchall()
         except Exception:
+            _recovery_logger.debug('Error handled in _members_seated_elsewhere', exc_info=True)
             return set()
         return {row["member"] for row in rows}
 

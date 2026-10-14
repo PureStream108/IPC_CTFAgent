@@ -12,11 +12,14 @@ reported instead of smoothed over.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from backend.agent.jobs import INLINE_LIMIT, AgentJobStore, JobConflict, new_job_id
 from backend.sandbox.command_policy import host_path_violation
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 class JobService:
     """Bind a job store to one session's sandbox."""
@@ -49,6 +52,7 @@ class JobService:
         try:
             pid = self.sandbox.exec_detached(job_id, command)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in start', exc_info=True)
             self.store.finish(job_id, "lost")
             return {
                 "ok": False,
@@ -85,6 +89,7 @@ class JobService:
         try:
             observed = self.sandbox.job_state(row["id"])
         except Exception:
+            _recovery_logger.debug('Error handled in _reconcile', exc_info=True)
             return row
         state = observed.get("state")
         if state == "running":
@@ -133,6 +138,7 @@ class JobService:
                 job_id, stream, offset=start, limit=capped
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in logs', exc_info=True)
             return {
                 "ok": False,
                 "job_id": job_id,
@@ -166,6 +172,7 @@ class JobService:
         try:
             self.sandbox.job_cancel(job_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in cancel', exc_info=True)
             return {
                 "ok": False,
                 "job_id": job_id,
@@ -194,4 +201,4 @@ class JobService:
         return view
 
 
-__all__ = ["JobService", "JobConflict", "AgentJobStore"]
+__all__ = ["AgentJobStore", "JobConflict", "JobService"]

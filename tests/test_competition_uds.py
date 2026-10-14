@@ -7,7 +7,6 @@ import pytest
 
 from backend.competition.transport import Envelope, PairCoordinator, call
 
-
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="gRPC UDS requires Linux")
 
 

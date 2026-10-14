@@ -5,20 +5,29 @@ import threading
 from typing import Any, Literal
 
 import requests
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.api.deps import get_state
 from backend.core.config import ApiFormat, ApiSurface, SelectedReasoningEffort
 from backend.core.state import AppState
-from backend.ops.network import NetworkPolicyError
 from backend.ops.attachments import MAX_UPLOAD_BYTES, OpsAttachmentStore
+from backend.ops.network import NetworkPolicyError
 from backend.ops.service import (
     OpsAgentNotConfigured,
     OpsAgentService,
     OpsAgentUpstreamError,
     WorkflowConfirmationError,
+    WorkflowSessionError,
 )
 from backend.ops.store import WorkflowInUse
 
@@ -98,7 +107,11 @@ class WorkflowExecuteRequest(BaseModel):
         return value
 
 
-def get_ops_service(state: AppState = Depends(get_state)) -> OpsAgentService:
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
+def get_ops_service(state: AppState = _GET_STATE_DEPENDENCY) -> OpsAgentService:
     service = getattr(state, "ops_agent_service", None)
     if service is not None:
         return service
@@ -110,38 +123,42 @@ def get_ops_service(state: AppState = Depends(get_state)) -> OpsAgentService:
     return service
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_OPS_SERVICE_DEPENDENCY = Depends(get_ops_service)
+
 @router.get("/config")
-def get_config(service: OpsAgentService = Depends(get_ops_service)):
+def get_config(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return service.config_view()
 
 
 @router.put("/config")
-def update_config(body: OpsConfigUpdate, service: OpsAgentService = Depends(get_ops_service)):
+def update_config(body: OpsConfigUpdate, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.update_config, **body.model_dump(exclude_unset=True))
 
 
 @router.post("/config/health")
-def health(service: OpsAgentService = Depends(get_ops_service)):
+def health(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.health)
 
 
 @router.get("/tools")
-def tools(service: OpsAgentService = Depends(get_ops_service)):
+def tools(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return {"tools": service.tool_catalog()}
 
 
 @router.get("/sessions")
-def list_sessions(service: OpsAgentService = Depends(get_ops_service)):
+def list_sessions(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return {"sessions": service.list_sessions()}
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def get_session(session_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.session_view, session_id)
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_session(session_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def delete_session(session_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     try:
         deleted = service.delete_session(session_id)
     except ValueError as exc:
@@ -152,7 +169,7 @@ def delete_session(session_id: str, service: OpsAgentService = Depends(get_ops_s
 
 
 @router.post("/chat")
-def chat(body: ChatRequest, service: OpsAgentService = Depends(get_ops_service)):
+def chat(body: ChatRequest, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(
         service.chat,
         message=body.message,
@@ -164,7 +181,7 @@ def chat(body: ChatRequest, service: OpsAgentService = Depends(get_ops_service))
 
 
 @router.post("/chat/stream")
-def chat_stream(body: ChatRequest, service: OpsAgentService = Depends(get_ops_service)):
+def chat_stream(body: ChatRequest, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     def events():
         for event in service.chat_stream(
             message=body.message,
@@ -182,10 +199,14 @@ def chat_stream(body: ChatRequest, service: OpsAgentService = Depends(get_ops_se
     )
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_REQUIRED_UPLOAD_FILE = File(...)
+
 @router.post("/uploads")
 async def upload_attachment(
-    file: UploadFile = File(...),
-    service: OpsAgentService = Depends(get_ops_service),
+    file: UploadFile = _REQUIRED_UPLOAD_FILE,
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
 ):
     """Upload platform API documentation for the next IPC message."""
 
@@ -205,17 +226,17 @@ async def upload_attachment(
 
 
 @router.post("/chat/interrupt")
-def interrupt_chat(body: ChatInterruptRequest, service: OpsAgentService = Depends(get_ops_service)):
+def interrupt_chat(body: ChatInterruptRequest, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.interrupt_chat, session_id=body.session_id, run_id=body.run_id)
 
 
 @router.get("/workflows")
-def list_workflows(service: OpsAgentService = Depends(get_ops_service)):
+def list_workflows(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return {"workflows": service.list_workflows()}
 
 
 @router.post("/workflows", status_code=status.HTTP_201_CREATED)
-def create_workflow(body: WorkflowDraftRequest, service: OpsAgentService = Depends(get_ops_service)):
+def create_workflow(body: WorkflowDraftRequest, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(
         service.create_workflow,
         body.workflow,
@@ -224,7 +245,7 @@ def create_workflow(body: WorkflowDraftRequest, service: OpsAgentService = Depen
 
 
 @router.get("/workflows/{workflow_id}")
-def get_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def get_workflow(workflow_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.get_workflow, workflow_id)
 
 
@@ -232,7 +253,7 @@ def get_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops_se
 def update_workflow(
     workflow_id: str,
     body: WorkflowDraftRequest,
-    service: OpsAgentService = Depends(get_ops_service),
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
 ):
     return _call(
         service.update_workflow,
@@ -243,7 +264,7 @@ def update_workflow(
 
 
 @router.delete("/workflows/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def delete_workflow(workflow_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     try:
         deleted = service.delete_workflow(workflow_id)
     except WorkflowInUse as exc:
@@ -257,13 +278,13 @@ def delete_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops
 def update_workflow_secrets(
     workflow_id: str,
     body: WorkflowSecretsUpdate,
-    service: OpsAgentService = Depends(get_ops_service),
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
 ):
     return _call(service.set_workflow_secrets, workflow_id, body.secrets)
 
 
 @router.get("/workflows/{workflow_id}/confirmation")
-def confirmation_preview(workflow_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def confirmation_preview(workflow_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.confirmation_preview, workflow_id)
 
 
@@ -271,13 +292,13 @@ def confirmation_preview(workflow_id: str, service: OpsAgentService = Depends(ge
 def confirm_workflow(
     workflow_id: str,
     body: WorkflowConfirmRequest,
-    service: OpsAgentService = Depends(get_ops_service),
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
 ):
     return _call(service.confirm_workflow, workflow_id, body.confirmation_phrase)
 
 
 @router.post("/workflows/{workflow_id}/revoke")
-def revoke_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops_service)):
+def revoke_workflow(workflow_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.revoke_workflow, workflow_id)
 
 
@@ -285,7 +306,7 @@ def revoke_workflow(workflow_id: str, service: OpsAgentService = Depends(get_ops
 def execute_workflow(
     workflow_id: str,
     body: WorkflowExecuteRequest,
-    service: OpsAgentService = Depends(get_ops_service),
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
 ):
     return _call(
         service.execute,
@@ -311,6 +332,8 @@ def _call(function, *args: Any, **kwargs: Any):
     except OpsAgentUpstreamError as exc:
         raise HTTPException(502, str(exc)) from exc
     except WorkflowConfirmationError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except WorkflowSessionError as exc:
         raise HTTPException(409, str(exc)) from exc
     except NetworkPolicyError as exc:
         raise HTTPException(400, str(exc)) from exc

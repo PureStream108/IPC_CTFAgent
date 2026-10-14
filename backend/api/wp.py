@@ -65,8 +65,12 @@ def _completed_writeups(state: AppState) -> list[dict]:
     return out
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("/projects/{project_id}/wp")
-def get_wp(project_id: str, state: AppState = Depends(get_state)):
+def get_wp(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
     if row is None:
@@ -81,12 +85,12 @@ def get_wp(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.get("/wp/completed")
-def completed_wp(state: AppState = Depends(get_state)):
+def completed_wp(state: AppState = _GET_STATE_DEPENDENCY):
     return {"writeups": _completed_writeups(state)}
 
 
 @router.post("/wp/derive")
-def derive_wp(state: AppState = Depends(get_state)):
+def derive_wp(state: AppState = _GET_STATE_DEPENDENCY):
     target = state.wp_export_dir
     target.mkdir(parents=True, exist_ok=True)
     writeups = _completed_writeups(state)
@@ -111,6 +115,6 @@ def derive_wp(state: AppState = Depends(get_state)):
 
 
 @router.get("/wp")
-def list_wp(state: AppState = Depends(get_state)):
+def list_wp(state: AppState = _GET_STATE_DEPENDENCY):
     files = sorted(state.wp_dir.glob("*.md"))
     return {"writeups": [f.name for f in files]}

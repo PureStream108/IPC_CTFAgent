@@ -18,6 +18,7 @@ import pytest
 
 from backend.agent.runtime import AgentRuntime
 from backend.competition.conversation import ToolCall, Turn
+from backend.members.adapters import ACTION_KINDS, MemberAction
 from backend.members.member_tools import (
     MEMBER_TOOL_NAMES,
     MEMBER_TOOLS,
@@ -26,7 +27,6 @@ from backend.members.member_tools import (
     is_parallel_safe,
     is_terminal,
 )
-from backend.members.adapters import ACTION_KINDS, MemberAction
 
 
 class Writer:

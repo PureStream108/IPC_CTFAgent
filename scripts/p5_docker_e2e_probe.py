@@ -20,9 +20,13 @@ non-zero if any fail.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tempfile
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 results: list[tuple[str, bool, str]] = []
 
@@ -37,9 +41,9 @@ PROBE_TAG = "p5probe"
 
 def _member_deps(db, tmp):
     from backend.core.logging_util import IPCLogger
-    from backend.members.base_member import MemberDeps
     from backend.mcp.mcp_client import MCPRegistry
     from backend.mcp.shared import build_browser_mcp
+    from backend.members.base_member import MemberDeps
     from backend.memory.memory_mcp import build_memory_mcp
     from backend.memory.memory_store import MemoryStore
     from backend.sandbox.sandbox import LocalSandbox
@@ -158,7 +162,10 @@ def p52_streaming_mock():
     from backend.agent.runtime import AgentRuntime
     from backend.core.config import LLMConfig
     from backend.members.member_tools import (
-        MEMBER_TOOLS, is_parallel_safe, is_terminal, tool_call_for_action,
+        MEMBER_TOOLS,
+        is_parallel_safe,
+        is_terminal,
+        tool_call_for_action,
     )
     from backend.members.mock_adapter import MockAdapter
 
@@ -273,11 +280,13 @@ def main():
             try:
                 fn()
             except Exception as exc:
+                _recovery_logger.debug('Error handled in main', exc_info=True)
                 check(f"{name} ran without crashing", False, f"{type(exc).__name__}: {exc}")
     finally:
         try:
             cleanup(db, pids)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in main', exc_info=True)
             print(f"[WARN] probe cleanup failed: {exc}")
         db.close()
     passed = sum(1 for _n, ok, _d in results if ok)

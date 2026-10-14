@@ -9,7 +9,6 @@ from psycopg.errors import UniqueViolation
 from backend.blackboard import edge_store, graph_store
 from backend.persistence.database import Database
 
-
 pytestmark = pytest.mark.postgres
 
 
@@ -54,18 +53,17 @@ def test_raw_sql_cannot_insert_a_second_goal_intent() -> None:
                 (project_id,),
             )
 
-        with pytest.raises(UniqueViolation):
-            with database.connect() as connection:
-                connection.execute(
-                    """
+        with pytest.raises(UniqueViolation), database.connect() as connection:
+            connection.execute(
+                """
                     INSERT INTO intents (
                         id, project_id, to_fact_id, description, creator,
                         created_at, concluded_at
                     )
                     VALUES ('intent_2', %s, 'goal', 'second', 'test', now(), now())
                     """,
-                    (project_id,),
-                )
+                (project_id,),
+            )
     finally:
         database.close()
 

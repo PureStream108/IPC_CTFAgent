@@ -23,15 +23,18 @@ from backend.agent.watchdog import classify
 from backend.api.deps import get_state
 from backend.core.state import AppState
 
-
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
-def get_sessions(state: AppState = Depends(get_state)) -> AgentSessionStore:
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
+def get_sessions(state: AppState = _GET_STATE_DEPENDENCY) -> AgentSessionStore:
     return AgentSessionStore(state.db)
 
 
-def get_jobs(state: AppState = Depends(get_state)) -> AgentJobStore:
+def get_jobs(state: AppState = _GET_STATE_DEPENDENCY) -> AgentJobStore:
     return AgentJobStore(state.db)
 
 
@@ -49,13 +52,17 @@ def _view(row: dict) -> dict:
     }
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_SESSIONS_DEPENDENCY = Depends(get_sessions)
+
 @router.get("/sessions")
 def list_sessions(
     kind: str | None = Query(default=None),
     task_key: str | None = Query(default=None),
     state_filter: str | None = Query(default="active", alias="state"),
     limit: int = Query(default=100, ge=1, le=500),
-    sessions: AgentSessionStore = Depends(get_sessions),
+    sessions: AgentSessionStore = _GET_SESSIONS_DEPENDENCY,
 ):
     states: tuple[str, ...] = ()
     if state_filter and state_filter != "all":
@@ -68,11 +75,15 @@ def list_sessions(
     return {"sessions": [_view(row) for row in rows]}
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_JOBS_DEPENDENCY = Depends(get_jobs)
+
 @router.get("/sessions/{session_id}")
 def get_session(
     session_id: str,
-    sessions: AgentSessionStore = Depends(get_sessions),
-    jobs: AgentJobStore = Depends(get_jobs),
+    sessions: AgentSessionStore = _GET_SESSIONS_DEPENDENCY,
+    jobs: AgentJobStore = _GET_JOBS_DEPENDENCY,
 ):
     try:
         session = sessions.session(session_id)
@@ -91,7 +102,7 @@ def get_session(
 def session_jobs(
     session_id: str,
     active_only: bool = Query(default=False),
-    jobs: AgentJobStore = Depends(get_jobs),
+    jobs: AgentJobStore = _GET_JOBS_DEPENDENCY,
 ):
     return {"jobs": jobs.jobs(session_id, active_only=active_only, limit=100)}
 
@@ -101,8 +112,8 @@ def session_events(
     session_id: str,
     after: int = Query(default=0, ge=0),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-    sessions: AgentSessionStore = Depends(get_sessions),
-    state: AppState = Depends(get_state),
+    sessions: AgentSessionStore = _GET_SESSIONS_DEPENDENCY,
+    state: AppState = _GET_STATE_DEPENDENCY,
 ):
     """Stream one session's transcript, resumable by ``event_id``.
 
@@ -157,7 +168,7 @@ def scope_events(
     task_key: str | None = Query(default=None),
     after: int = Query(default=0, ge=0),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-    sessions: AgentSessionStore = Depends(get_sessions),
+    sessions: AgentSessionStore = _GET_SESSIONS_DEPENDENCY,
 ):
     """Stream every session in a scope through one connection.
 

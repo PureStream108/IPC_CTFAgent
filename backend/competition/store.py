@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import uuid
 import hashlib
+import json
+import uuid
 from typing import Any
 
 from psycopg.types.json import Jsonb
 
 from backend.core.config import MEMBER_NAMES
+from backend.core.validation import InputValidationError
 from backend.platform.verdict import cooldown_seconds
 
 
@@ -52,6 +54,8 @@ class CompetitionStore:
     within a run only the transitions that actually race take the lock. It is
     deliberately not held during model calls, downloads, or platform requests.
     """
+
+    provider_progress_events = True
 
     def __init__(self, db):
         self.db = db
@@ -137,11 +141,14 @@ class CompetitionStore:
             ).fetchone()
             if active:
                 raise CompetitionConflict("another competition is active")
+            limits = snapshot.get("limits") if isinstance(snapshot, dict) else None
+            if not isinstance(limits, dict):
+                limits = {}
             return connection.execute(
                 """INSERT INTO competition_runs
-                   (id,workflow_id,identity_key,idempotency_key,config_snapshot)
-                   VALUES (%s,%s,%s,%s,%s) RETURNING *""",
-                (new_id(), workflow_id, identity_key, idempotency_key, Jsonb(snapshot)),
+                   (id,workflow_id,identity_key,idempotency_key,config_snapshot,limits)
+                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (new_id(), workflow_id, identity_key, idempotency_key, Jsonb(snapshot), Jsonb(limits)),
             ).fetchone()
 
     def run_by_idempotency(self, idempotency_key: str) -> dict | None:
@@ -725,14 +732,27 @@ class CompetitionStore:
                     (max(1, int(result.get("retry_after") or 60)), row["run_id"]),
                 )
                 connection.execute("UPDATE competition_submissions SET status='queued' WHERE id=%s", (submission_id,))
-            elif status == "correct" and challenge["state"] != "solved":
-                connection.execute("UPDATE competition_challenges SET state='solved' WHERE id=%s", (challenge["id"],))
-                connection.execute(
-                    """INSERT INTO competition_wp_jobs (challenge_id,run_id,member,session_id)
-                       VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                    (challenge["id"], row["run_id"], row["member"], row["session_id"]),
-                )
             return {**row, "status": status}
+
+    def finalize_correct_challenge(self, connection, run_id: str, challenge_id: str) -> None:
+        """Commit solved/WP in the caller's verified-flag closeout transaction."""
+        self._lock(connection, run_id)
+        submission = connection.execute(
+            """SELECT * FROM competition_submissions
+               WHERE run_id=%s AND challenge_id=%s AND status='correct'
+               ORDER BY created_at,id LIMIT 1 FOR UPDATE""",
+            (run_id, challenge_id),
+        ).fetchone()
+        if submission is None:
+            raise CompetitionConflict("closeout requires a correct platform verdict")
+        connection.execute(
+            "UPDATE competition_challenges SET state='solved' WHERE id=%s", (challenge_id,),
+        )
+        connection.execute(
+            """INSERT INTO competition_wp_jobs (challenge_id,run_id,member,session_id)
+               VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (challenge_id, run_id, submission["member"], submission["session_id"]),
+        )
 
     def reconcile_inflight_submissions(self, run_id: str, *, grace_seconds: int = 30) -> int:
         """Move abandoned ``submitting`` rows to queryable ``unknown``.
@@ -807,7 +827,7 @@ class CompetitionStore:
                 (run_id, max(0, after), max(1, min(limit, 1000))),
             ).fetchall()
 
-    def observe_run(self, run_id: str, owner: str) -> dict:
+    def observe_run(self, run_id: str, owner: str, *, resource_capacity: dict | None = None) -> dict:
         """Persist a compact, redacted health sample for a competition run.
 
         The sample is intentionally derived from durable rows rather than
@@ -907,6 +927,8 @@ class CompetitionStore:
                 "sync_lag_seconds": round(float(sync_lag or 0), 3),
                 "artifact_bytes": int(artifact_bytes or 0),
             }
+            if resource_capacity is not None:
+                payload["resource_capacity"] = resource_capacity
             return connection.execute(
                 """INSERT INTO competition_run_observations (run_id,owner,payload)
                    VALUES (%s,%s,%s) RETURNING *""",
@@ -977,6 +999,45 @@ class CompetitionStore:
             challenge_views.append(item)
         solving = sum(a["role"] in {"primary", "helper"} for a in assignments)
         writing = sum(a["role"] == "wp" for a in assignments)
+        remote_challenge_ids = {
+            item["id"] for item in challenges if bool((item.get("metadata") or {}).get("remote"))
+        }
+        local_used = len({a["challenge_id"] for a in assignments
+                          if a["role"] != "wp" and a["challenge_id"] not in remote_challenge_ids})
+        with self.db.connect() as connection:
+            remote_used = int(connection.execute(
+                """SELECT count(*) AS count FROM competition_instances WHERE run_id=%s
+                   AND state NOT IN ('stopped','expired')""", (run_id,),
+            ).fetchone()["count"])
+            observation = connection.execute(
+                """SELECT payload->'resource_capacity' AS capacity FROM competition_run_observations
+                   WHERE run_id=%s AND payload ? 'resource_capacity'
+                   ORDER BY observation_id DESC LIMIT 1""", (run_id,),
+            ).fetchone()
+        observed = observation["capacity"] if observation else {}
+        raw_limits = run.get("limits") or {}
+        if isinstance(raw_limits, str):
+            try:
+                raw_limits = json.loads(raw_limits)
+            except (TypeError, ValueError):
+                raw_limits = {}
+        snapshot_limits = (run.get("config_snapshot") or {}).get("limits_snapshot", {})
+        spec = (run.get("config_snapshot") or {}).get("workflow_spec", {})
+        local_limit = int(
+            (raw_limits or {}).get(
+                "max_concurrent_tasks",
+                (observed.get("local") or {}).get("limit", (snapshot_limits or {}).get("max_concurrent_tasks", 0)),
+            )
+            or 0
+        )
+        remote_limit = int(raw_limits.get("remote_concurrency", (observed.get("remote") or {}).get(
+            "limit", spec.get("remote_concurrency") or snapshot_limits.get("remote_concurrency", spec.get("remote_instance_limit", 0)),
+        )) or 0)
+        remote_source = "run" if "remote_concurrency" in raw_limits else (observed.get("remote") or {}).get(
+            "source", "workflow.remote_concurrency" if spec.get("remote_concurrency") else snapshot_limits.get(
+                "remote_source", "workflow.remote_instance_limit" if spec.get("remote_instance_limit") else "unreported",
+            ),
+        )
         return {
             "run": run,
             "challenges": challenge_views,
@@ -987,7 +1048,57 @@ class CompetitionStore:
                 "collaborating": sum(a["role"] == "helper" for a in assignments),
                 "idle": max(0, len(MEMBER_NAMES) - len(assignments)),
             },
+            "resource_capacity": {
+                "local": {"used": local_used, "limit": local_limit, "remaining": max(0, local_limit - local_used),
+                           "source": "run" if "max_concurrent_tasks" in raw_limits else (observed.get("local") or {}).get("source", "config_snapshot"),
+                           "challenge_count": len(challenges) - len(remote_challenge_ids)},
+                "remote": {"used": remote_used, "limit": remote_limit, "remaining": max(0, remote_limit - remote_used),
+                            "source": remote_source, "challenge_count": len(remote_challenge_ids)},
+            },
         }
+
+    def update_limits(self, run_id: str, limits: dict, *, revision: int) -> dict:
+        """Patch mutable run limits with optimistic revision control."""
+        if not isinstance(limits, dict):
+            raise InputValidationError("limits must be an object")
+        allowed = {"max_concurrent_tasks", "total_cpu", "remote_concurrency"}
+        unknown = set(limits) - allowed
+        if unknown:
+            raise ValueError(f"unknown run limit(s): {sorted(unknown)}")
+        cleaned: dict[str, int] = {}
+        for key, value in limits.items():
+            try:
+                number = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be an integer") from exc
+            if number < 0 or number > 1000:
+                raise ValueError(f"{key} must be between 0 and 1000")
+            cleaned[key] = number
+        with self.db.connect() as connection:
+            self._lock(connection, run_id)
+            row = connection.execute(
+                "SELECT revision,limits FROM competition_runs WHERE id=%s FOR UPDATE",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if int(row["revision"]) != int(revision):
+                raise CompetitionConflict("stale run revision")
+            current = row.get("limits") or {}
+            if isinstance(current, str):
+                try:
+                    current = json.loads(current)
+                except (TypeError, ValueError):
+                    current = {}
+            merged = {**(current if isinstance(current, dict) else {}), **cleaned}
+            updated = connection.execute(
+                """UPDATE competition_runs SET limits=%s,revision=revision+1,updated_at=now()
+                   WHERE id=%s AND revision=%s RETURNING *""",
+                (Jsonb(merged), run_id, revision),
+            ).fetchone()
+            if updated is None:
+                raise CompetitionConflict("stale run revision")
+            return updated
 
     def member_snapshot(self, run_id: str) -> list[dict]:
         active = {row["member"]: row for row in self.assignments(run_id, active_only=True)}
@@ -1062,9 +1173,9 @@ class CompetitionStore:
         with self.db.connect() as connection:
             self._lock(connection, run_id)
             connection.execute(
-                """UPDATE competition_wp_jobs w SET status='deferred',
+                """UPDATE competition_wp_jobs w SET status=CASE WHEN w.attempts >= 5 THEN 'failed' ELSE 'deferred' END,
                    last_error='WP attempt exceeded the 10 minute seat deadline',
-                   next_attempt_at=now()+interval '5 minutes'
+                   next_attempt_at=CASE WHEN w.attempts >= 5 THEN now() ELSE now()+interval '5 minutes' END
                    FROM competition_assignments a
                    WHERE a.run_id=%s AND a.role='wp' AND a.challenge_id=w.challenge_id
                    AND a.released_at IS NULL AND a.wp_deadline_at<=now()
@@ -1595,13 +1706,19 @@ class CompetitionStore:
                 (run_id, max(0, older_than_seconds)),
             ).fetchall()
 
-    def claim_wp_job(self, run_id: str, owner: str) -> dict | None:
+    def claim_wp_job(self, run_id: str, owner: str, *, require_verified: bool = False) -> dict | None:
         with self.db.connect() as connection:
             self._lock(connection, run_id)
+            verified_filter = """
+                   AND EXISTS (SELECT 1 FROM competition_challenges c
+                               JOIN projects p ON p.id=c.project_id
+                               WHERE c.id=w.challenge_id AND p.status='solved' AND p.flag IS NOT NULL)""" if require_verified else ""
             job = connection.execute(
-                """SELECT w.* FROM competition_wp_jobs w
+                f"""SELECT w.* FROM competition_wp_jobs w
                    JOIN competition_runs r ON r.id=w.run_id
                    WHERE w.run_id=%s AND w.status IN ('pending','deferred')
+                   AND w.attempts < 5
+                   {verified_filter}
                    AND w.next_attempt_at<=now()
                    AND NOT EXISTS (SELECT 1 FROM competition_assignments a
                      WHERE a.member=w.member AND a.released_at IS NULL)
@@ -1663,13 +1780,20 @@ class CompetitionStore:
                     "SELECT attempts FROM competition_wp_jobs WHERE challenge_id=%s",
                     (assignment["challenge_id"],),
                 ).fetchone()["attempts"]
-                delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
-                job = connection.execute(
-                    """UPDATE competition_wp_jobs SET status='deferred',last_error=%s,
-                       next_attempt_at=now()+(%s*interval '1 second')
-                       WHERE challenge_id=%s RETURNING *""",
-                    ((error or "WP attempt failed")[:2000], delay, assignment["challenge_id"]),
-                ).fetchone()
+                if attempts >= 5:
+                    job = connection.execute(
+                        """UPDATE competition_wp_jobs SET status='failed',last_error=%s,
+                           next_attempt_at=now() WHERE challenge_id=%s RETURNING *""",
+                        ((error or "WP attempt failed; retry limit exceeded")[:2000], assignment["challenge_id"]),
+                    ).fetchone()
+                else:
+                    delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
+                    job = connection.execute(
+                        """UPDATE competition_wp_jobs SET status='deferred',last_error=%s,
+                           next_attempt_at=now()+(%s*interval '1 second')
+                           WHERE challenge_id=%s RETURNING *""",
+                        ((error or "WP attempt failed")[:2000], delay, assignment["challenge_id"]),
+                    ).fetchone()
             connection.execute(
                 """UPDATE competition_assignments SET released_at=now(),epoch=epoch+1
                    WHERE id=%s""",

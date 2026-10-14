@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import random
 import re
 import time
@@ -12,6 +13,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from backend.core.config import LLMConfig
+from backend.core.validation import InputValidationError
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 ACTION_KINDS = (
     "tool",
@@ -40,7 +45,7 @@ class MemberAction:
     @classmethod
     def from_obj(cls, obj: dict[str, Any]) -> MemberAction:
         if not isinstance(obj, dict):
-            raise ValueError(f"model action must be a JSON object, got {type(obj).__name__}")
+            raise InputValidationError(f"model action must be a JSON object, got {type(obj).__name__}")
         raw_kind = obj.get("action") or obj.get("kind")
         kind = raw_kind.strip() if isinstance(raw_kind, str) else raw_kind
         if kind not in ACTION_KINDS:
@@ -323,6 +328,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
                 "retryable": exc.retryable,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in health', exc_info=True)
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
 
     def decide(self, context: dict) -> MemberAction:
@@ -599,7 +605,7 @@ def _openai_request_body(
 
 def _openai_response_text(payload: Any, surface: str) -> tuple[str, dict[str, Any]]:
     if not isinstance(payload, dict):
-        raise ValueError(f"LLM response must be a JSON object, got {type(payload).__name__}")
+        raise InputValidationError(f"LLM response must be a JSON object, got {type(payload).__name__}")
     if isinstance(payload.get("choices"), list):
         return _chat_response_text(payload)
     if surface == "responses" or isinstance(payload.get("output"), list):
@@ -774,6 +780,7 @@ def _response_error_text(response: Any) -> str:
         value = response.json()
         return json.dumps(value, ensure_ascii=False)[:4000].lower()
     except Exception:
+        _recovery_logger.debug('Error handled in _response_error_text', exc_info=True)
         return str(getattr(response, "text", ""))[:4000].lower()
 
 
@@ -1046,6 +1053,7 @@ class ClaudeAdapter(BaseAdapter):
                 "retryable": exc.retryable,
             }
         except Exception as exc:
+            _recovery_logger.debug('Error handled in health', exc_info=True)
             return {"ok": False, "status": 0, "error": str(exc), "format": self.config.api_format}
 
     def decide(self, context: dict) -> MemberAction:

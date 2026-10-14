@@ -22,9 +22,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from backend.agent.compaction import deterministic_summary
 from backend.agent.context import (
@@ -41,6 +44,9 @@ from backend.competition.conversation import (
     TurnTruncated,
 )
 from backend.competition.store import CompetitionConflict
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _EVENT_KEY_REUSE_MESSAGE = "event key reused with different content"
 
@@ -197,6 +203,16 @@ class AssignmentSessionWriter:
         budget = dict(session.get("token_budget") or {})
         budget["calibration_ratio"] = calibration
         self.store.save_token_budget(self.session_id, budget)
+
+    def record_provider_progress(self, turn: int, status: str, seconds: float) -> None:
+        if not getattr(self.store, "provider_progress_events", False):
+            return
+        if status == "provider.started":
+            self.store.record_turn(self.assignment, turn, "running")
+        self.append(
+            f"provider-progress:{turn}:{time.monotonic_ns()}", "status",
+            {"status": status, "turn": turn, "latency_seconds": round(seconds, 6)},
+        )
 
 
 class AgentRuntime:
@@ -421,6 +437,7 @@ class AgentRuntime:
                 if not compacted:
                     raise ValueError("context compressor returned no provider messages")
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _compact', exc_info=True)
                 summary, compacted = deterministic_summary(
                     messages, keep_recent=self.keep_recent_messages
                 )
@@ -731,6 +748,29 @@ class AgentRuntime:
             args.append(on_reasoning)
         return args
 
+    def _provider_callbacks(self, turn: int):
+        recorder = getattr(self.writer, "record_provider_progress", None)
+        if callable(recorder):
+            recorder(turn, "provider.started", 0.0)
+        started = time.monotonic()
+        responded = False
+
+        def first_response():
+            nonlocal responded
+            if not responded:
+                responded = True
+                if callable(recorder):
+                    recorder(turn, "provider.first_response", time.monotonic() - started)
+
+        def completed():
+            first_response()
+            if callable(recorder):
+                recorder(turn, "provider.completed", time.monotonic() - started)
+
+        if hasattr(self.adapter, "on_first_response"):
+            self.adapter.on_first_response = first_response
+        return first_response, completed
+
     def _record_tool_call(self, call: ToolCall) -> None:
         self._append(
             f"tool-call:{call.id}", "tool_call",
@@ -845,14 +885,20 @@ class AgentRuntime:
                 messages.extend(self.before_turn(self))
             messages = self._compact(messages, turn_number)
             deltas: list[str] = []
+            first_response, provider_completed = self._provider_callbacks(turn_number)
 
-            def on_delta(text: str) -> None:
+            def on_delta(text: str, deltas=deltas, first_response=first_response) -> None:
+                first_response()
                 deltas.append(text)
                 self.emit(text)
 
+            def on_reasoning(text: str, first_response=first_response) -> None:
+                first_response()
+                self.emit_reasoning(text)
+
             try:
                 turn = self.adapter.turn(
-                    *self._turn_args(messages, on_delta, self.emit_reasoning)
+                    *self._turn_args(messages, on_delta, on_reasoning)
                 )
             except TurnTruncated as exc:
                 truncated_attempts += 1
@@ -865,6 +911,7 @@ class AgentRuntime:
                 last_text = exc.turn.text or last_text
                 continue
             except Exception as exc:
+                _recovery_logger.debug('Error handled in run', exc_info=True)
                 messages = self._handle_turn_failure(
                     exc, messages, turn_number, repaired_turn
                 )
@@ -872,6 +919,7 @@ class AgentRuntime:
                 turn_number -= 1
                 continue
             repaired_turn = -1
+            provider_completed()
             truncated_attempts = 0
             last_text = turn.text
             self._append(
@@ -934,15 +982,21 @@ class AgentRuntime:
                 messages.extend(self.before_turn(self))
             messages = self._compact(messages, turn_number)
             deltas: list[str] = []
+            first_response, provider_completed = self._provider_callbacks(turn_number)
 
-            def on_delta(text: str) -> None:
+            def on_delta(text: str, deltas=deltas, first_response=first_response) -> None:
+                first_response()
                 deltas.append(text)
                 self.emit(text)
+
+            def on_reasoning(text: str, first_response=first_response) -> None:
+                first_response()
+                self.emit_reasoning(text)
 
             try:
                 turn = await asyncio.to_thread(
                     self.adapter.turn,
-                    *self._turn_args(messages, on_delta, self.emit_reasoning),
+                    *self._turn_args(messages, on_delta, on_reasoning),
                 )
             except TurnTruncated as exc:
                 truncated_attempts += 1
@@ -955,6 +1009,7 @@ class AgentRuntime:
                 last_text = exc.turn.text or last_text
                 continue
             except Exception as exc:
+                _recovery_logger.debug('Error handled in run_async', exc_info=True)
                 messages = self._handle_turn_failure(
                     exc, messages, turn_number, repaired_turn
                 )
@@ -962,6 +1017,7 @@ class AgentRuntime:
                 turn_number -= 1
                 continue
             repaired_turn = -1
+            provider_completed()
             truncated_attempts = 0
             last_text = turn.text
             self._append(

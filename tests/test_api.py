@@ -50,6 +50,7 @@ def test_list_projects(client):
 def test_get_project_retries_once_on_a_deadlock(client, monkeypatch):
     """T12: a single DeadlockDetected on a read is retried transparently."""
     import psycopg.errors
+
     from backend.api import project as project_api
 
     pid = client.post(
@@ -74,6 +75,7 @@ def test_get_project_retries_once_on_a_deadlock(client, monkeypatch):
 def test_get_project_degrades_to_last_snapshot_instead_of_500(client, monkeypatch):
     """T12: a persistent deadlock degrades to the last good snapshot, not 500."""
     import psycopg.errors
+
     from backend.api import project as project_api
 
     pid = client.post(
@@ -101,7 +103,6 @@ def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
     def slow_start(_project_id):
         entered.set()
         release.wait(5)
-        return None
 
     orchestrator = client.app.state.ipc.orchestrator
     monkeypatch.setattr(orchestrator.projects, "start_challenge_env", slow_start)

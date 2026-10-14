@@ -1,20 +1,24 @@
 from __future__ import annotations
 
-import os
 import base64
 import hashlib
+import logging
+import os
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit, unquote
+from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
+from typing_extensions import Self
 
 from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 class GZCTFError(RuntimeError):
     pass
@@ -454,11 +458,11 @@ class GZCTFClient:
             timeout=self.timeout,
         )
         if response.status_code == 404:
-            return None
+            return
         if response.status_code == 400 and "未创建容器" in response.text:
-            return None
+            return
         response.raise_for_status()
-        return None
+        return
 
     def get_container(self, game_id: int, challenge_id: int) -> dict[str, Any]:
         """Read the live container state from the challenge detail.
@@ -681,7 +685,7 @@ class GZCTFClient:
     def close(self) -> None:
         self.session.close()
 
-    def __enter__(self) -> GZCTFClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -824,6 +828,7 @@ def _gz_container_error(exc: requests.HTTPError, external_id: str) -> Exception:
     try:
         detail = (response.text or "").strip()[:300] if response is not None else ""
     except Exception:
+        _recovery_logger.debug('Error handled in _gz_container_error', exc_info=True)
         detail = ""
     suffix = f": {detail}" if detail else ""
     return GZCTFError(
@@ -1332,12 +1337,12 @@ class GZCTFAdapter(PlatformAdapter):
 
     def stop_instance(self, external_id: str) -> None:
         if not self.supports_instances:
-            return None
+            return
         try:
             self.client.delete_container(self.game_id, int(external_id))
         except requests.HTTPError as exc:
             raise _gz_container_error(exc, external_id) from exc
-        return None
+        return
 
     def renew_instance(self, external_id: str) -> dict[str, Any]:
         if not self.supports_instances:

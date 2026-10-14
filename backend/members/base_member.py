@@ -3,15 +3,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import shlex
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from collections.abc import Callable
 
+from backend.agent.jobs import INLINE_LIMIT
+from backend.agent.runtime import AgentRuntime, AgentSessionWriter
+from backend.agent.session import (
+    AgentSessionStore,
+    SessionConflict,
+    SessionNeedsRebuild,
+)
 from backend.blackboard import edge_store, graph_store, node_store
+from backend.competition.conversation import ConversationAdapter, ToolCall
+from backend.competition.runtime import SessionRunner
+from backend.competition.store import CompetitionConflict
+from backend.competition.transport import ReconSubscriber
 from backend.core.difficulty import (
     DIFFICULTY_RANK,
     detect_attack_surfaces,
@@ -19,13 +31,11 @@ from backend.core.difficulty import (
     max_difficulty,
     normalize_difficulty,
 )
-from backend.core.logging_util import IPCLogger
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
+from backend.core.logging_util import IPCLogger
 from backend.core.postprocess_store import enqueue_postprocess
+from backend.core.validation import InputValidationError
 from backend.mcp.mcp_client import MCPRegistry, MCPRegistrySession, MCPRegistryTarget
-from backend.agent.jobs import INLINE_LIMIT
-from backend.agent.runtime import AgentRuntime, AgentSessionWriter
-from backend.agent.session import AgentSessionStore, SessionConflict, SessionNeedsRebuild
 from backend.members.adapters import (
     ACTION_KINDS,
     BaseAdapter,
@@ -33,10 +43,6 @@ from backend.members.adapters import (
     MemberAction,
     ProviderError,
 )
-from backend.competition.runtime import SessionRunner
-from backend.competition.store import CompetitionConflict
-from backend.competition.conversation import ConversationAdapter, ToolCall
-from backend.competition.transport import ReconSubscriber
 from backend.members.member_tools import (
     MEMBER_TOOLS,
     action_payload,
@@ -47,9 +53,15 @@ from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
 from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.sandbox import Sandbox
+from backend.tools.tool_inventory import (
+    member_tool_inventory,
+    member_tool_inventory_path,
+)
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
-from backend.tools.tool_inventory import member_tool_inventory, member_tool_inventory_path
 from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _LOCAL_WEBUI_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})\b")
 _PORT_FLAG_RE = re.compile(r"(?:^|\s)(?:--port|-p)\s+(\d{2,5})(?:\s|$)")
@@ -210,6 +222,7 @@ class BaseMember:
         try:
             return bool(renew())
         except Exception:
+            _recovery_logger.debug('Error handled in _renew_session_writer', exc_info=True)
             return False
 
     def _record_competition_event(self, callback) -> bool:
@@ -220,6 +233,7 @@ class BaseMember:
             callback(runner)
             return True
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _record_competition_event', exc_info=True)
             self._session_recording_failed = True
             self._stop.set()
             self.deps.logger.project(
@@ -371,6 +385,7 @@ class BaseMember:
                         f"Begin the persistent {category} challenge session for intent {intent_id}."
                     )
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _solve_with_mcp', exc_info=True)
                 self._session_recording_failed = True
                 d.logger.project(
                     "competition_session_restore_failed",
@@ -451,6 +466,7 @@ class BaseMember:
                     error_kind="provider",
                 )
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _solve_with_mcp', exc_info=True)
                 error = f"{type(exc).__name__}: {exc}"
                 d.logger.project(
                     "member_error",
@@ -539,7 +555,7 @@ class BaseMember:
                     self._observe("[previous competition tool call is unknown; do not replay it]")
                     continue
                 if not self._record_competition_event(
-                    lambda runner: runner.record_provider_message(
+                    lambda runner, action=action, call_id=call_id: runner.record_provider_message(
                         {"role": "assistant", "content": json.dumps(
                             {"action": action.kind, "arguments": action.args},
                             ensure_ascii=False,
@@ -551,7 +567,7 @@ class BaseMember:
                     self._release(project_id, intent_id)
                     return SolveResult(status="stalled", steps=step, error="session lease lost")
                 if not self._record_competition_event(
-                    lambda runner: runner.record_tool_call(session_call)
+                    lambda runner, session_call=session_call: runner.record_tool_call(session_call)
                 ):
                     self._release(project_id, intent_id)
                     return SolveResult(status="stalled", steps=step, error="session lease lost")
@@ -608,7 +624,7 @@ class BaseMember:
                     "terminal": dispatched.result.status if dispatched.result else None,
                 }
                 if not self._record_competition_event(
-                    lambda runner: runner.record_tool_result(
+                    lambda runner, result_payload=result_payload, session_call=session_call: runner.record_tool_result(
                         session_call,
                         {
                             "role": "tool",
@@ -771,30 +787,30 @@ class BaseMember:
                 max_output_tokens=getattr(runtime_config, "max_output_tokens", 32768),
                 read_timeout=getattr(runtime_config, "provider_read_timeout", 300),
             )
-        kwargs = dict(
-            system=(
+        kwargs = {
+            "system": (
                 f"You are Member {self.name}, a persistent {self.role_blurb}. "
                 "Each action is its own tool; call the one that matches what "
                 "you want to do. Read-only tools may be called together in one "
                 "turn. Continue until the challenge is solved, a real flag is "
                 "verified, or evidence is genuinely exhausted."
             ),
-            tools=tools,
-            cancel=self._stop,
-            emit=lambda text: self.deps.logger.llm(
+            "tools": tools,
+            "cancel": self._stop,
+            "emit": lambda text: self.deps.logger.llm(
                 "stream", self._progress_project_id or "unknown",
                 member=self.name, text=text[:2000],
             ),
-            before_turn=self._drain_competition_recon,
-            compressor=self._semantic_compressor(),
-            context_token_limit=getattr(runtime_config, "context_token_limit", 0),
-            compaction_trigger_ratio=getattr(
+            "before_turn": self._drain_competition_recon,
+            "compressor": self._semantic_compressor(),
+            "context_token_limit": getattr(runtime_config, "context_token_limit", 0),
+            "compaction_trigger_ratio": getattr(
                 runtime_config, "compaction_trigger_ratio", 0.75
             ),
-            max_turns=getattr(runtime_config, "max_turns", 0),
-            parallel_safe=is_parallel_safe,
-            is_terminal=is_terminal,
-        )
+            "max_turns": getattr(runtime_config, "max_turns", 0),
+            "parallel_safe": is_parallel_safe,
+            "is_terminal": is_terminal,
+        }
         assignment = self.deps.competition_assignment
         if assignment is not None and self.deps.competition_store is not None:
             return SessionRunner(
@@ -876,6 +892,7 @@ class BaseMember:
         try:
             runner = self._make_native_runner(list(MEMBER_TOOLS), project_id, intent_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _solve_with_native_session', exc_info=True)
             self._release(project_id, intent_id)
             return SolveResult(
                 status="failed", steps=0, error=str(exc),
@@ -1073,6 +1090,7 @@ class BaseMember:
                 retryable=True, error_kind="session_rebuild",
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _solve_with_native_session', exc_info=True)
             self._release(project_id, intent_id)
             self.deps.logger.project(
                 "member_error", project_id, member=self.name, intent=intent_id,
@@ -1213,6 +1231,7 @@ class BaseMember:
             try:
                 out = await mcp_session.call_tool(server, tool, args)
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _dispatch', exc_info=True)
                 out = {"error": str(exc)}
             text = f"[mcp:{server}.{tool}] {out}"[:5000]
             self._observe(text)
@@ -1329,6 +1348,7 @@ class BaseMember:
                 self.deps.lease_token = token
                 return True
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _heartbeat', exc_info=True)
             self.deps.logger.project(
                 "intent_heartbeat_failed",
                 project_id,
@@ -1362,9 +1382,10 @@ class BaseMember:
             raw = self.deps.sandbox.read_file(self._progress_path)
             parsed = json.loads(raw) if raw else []
             if not isinstance(parsed, list):
-                raise ValueError("progress checkpoint must contain a JSON array")
+                raise InputValidationError("progress checkpoint must contain a JSON array")
             self.observations = [str(item)[:5000] for item in parsed if str(item).strip()][-8:]
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _restore_progress', exc_info=True)
             self.deps.logger.project(
                 "member_progress_restore_failed",
                 project_id,
@@ -1392,6 +1413,7 @@ class BaseMember:
                 json.dumps(self.observations[-8:], ensure_ascii=False),
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _persist_progress', exc_info=True)
             if self._container_gone(exc):
                 self._progress_save_error_reported = True
                 self.deps.logger.project(
@@ -1440,6 +1462,7 @@ class BaseMember:
                 member_tool_inventory().rstrip() + "\n\n" + self._runtime_tool_inventory_note(),
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _seed_tool_inventory', exc_info=True)
             self.deps.logger.project(
                 "member_tool_inventory_seed_failed",
                 project_id,
@@ -1463,6 +1486,7 @@ class BaseMember:
                 query, available_mcps=self._available_mcp_names()
             )[:5]
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _prime_tool_context', exc_info=True)
             self.deps.logger.project(
                 "member_tool_context_prime_failed",
                 project_id,
@@ -1506,6 +1530,7 @@ class BaseMember:
                     availability = {str(k): bool(v) for k, v in parsed.items()}
                     break
         except Exception:
+            _recovery_logger.debug('Error handled in _probe_cli_tools', exc_info=True)
             availability = {}
         self._tool_availability = availability
         return availability
@@ -2197,11 +2222,11 @@ class BaseMember:
                 attachment["path"] = attachment_path(attachment["filename"], attachment["path"])
         runtime_notes = [
             "All work happens inside this challenge's Linux task container. Only container paths exist.",
-            "Never touch host paths: no Windows drive paths, no /host, no host interpreter, and no path "
+            ("Never touch host paths: no Windows drive paths, no /host, no host interpreter, and no path "
             "inside the IPC deployment itself (source tree, data/, artifacts/, exports/, writeups, .qa-artifacts). "
-            "Reading a solution or writeup file instead of solving the challenge invalidates the run.",
-            "If a CLI tool or Python library is missing, use the install action to add it to this container "
-            "(manager: apt|pip|gem|npm|go), then retry. Do not substitute a host tool.",
+            "Reading a solution or writeup file instead of solving the challenge invalidates the run."),
+            ("If a CLI tool or Python library is missing, use the install action to add it to this container "
+            "(manager: apt|pip|gem|npm|go), then retry. Do not substitute a host tool."),
             "Flag search priority for this round: try /flag first, then environment variables, then other methods.",
             "If attachment_true is true, inspect the listed attachments before blind target probing.",
             (
@@ -2225,7 +2250,7 @@ class BaseMember:
                     "fragments) and only report a flag that reads as a coherent whole."
                 )
         except Exception:
-            pass
+            _recovery_logger.debug('Error handled in _build_context', exc_info=True)
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
@@ -2234,7 +2259,9 @@ class BaseMember:
             "max_steps": None if d.continuous else min(d.max_steps, d.max_actions_per_task),
             "short_task": not d.continuous,
             "task_contract": (
-                "Continue this challenge session until there is a verified result, an operator cancellation, "
+                "A flag is not submitted by writing it in conclude text. Whenever you have a flag, you MUST call "
+                "submit_flag with the exact candidate and evidence before concluding; conclude text alone is never "
+                "a submission. Continue this challenge session until there is a verified result, an operator cancellation, "
                 "a lost lease, or concrete evidence that a different direction or helper is required. "
                 "There is no artificial step budget. Do not repeat previous attempts."
                 if d.continuous else
@@ -2306,6 +2333,7 @@ class BaseMember:
             try:
                 url = expose(project_id, self.name, port)
             except Exception:
+                _recovery_logger.debug('Error handled in _observe_webui_links', exc_info=True)
                 continue
             self._observe(
                 f"[webui:{port}] Shared browser URL: {url}/ "

@@ -11,7 +11,6 @@ from alembic import op
 
 from backend.agent.schema import AGENT_SCHEMA
 
-
 revision = "20260929_0009"
 down_revision = "20260925_0008"
 branch_labels = None

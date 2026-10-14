@@ -11,16 +11,20 @@ from backend.blackboard.models import (
     Report,
     ReportRequest,
 )
-from backend.core.state import AppState
-from backend.core.redaction import redact_flag
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
+from backend.core.redaction import redact_flag
+from backend.core.state import AppState
 
 router = APIRouter(tags=["solve"])
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.post("/projects/{project_id}/start")
-def start_solving(project_id: str, state: AppState = Depends(get_state)):
+def start_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -39,7 +43,7 @@ def start_solving(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.post("/projects/{project_id}/reopen")
-def reopen_project(project_id: str, state: AppState = Depends(get_state)):
+def reopen_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -50,7 +54,7 @@ def reopen_project(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.post("/projects/{project_id}/stop")
-def stop_solving(project_id: str, state: AppState = Depends(get_state)):
+def stop_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -72,7 +76,7 @@ def stop_solving(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.post("/projects/stop-all")
-def stop_all(state: AppState = Depends(get_state)):
+def stop_all(state: AppState = _GET_STATE_DEPENDENCY):
     stopped = []
     with state.db.connect() as conn:
         rows = conn.execute(
@@ -89,7 +93,7 @@ def stop_all(state: AppState = Depends(get_state)):
 
 
 @router.post("/projects/{project_id}/resume")
-def resume_solving(project_id: str, state: AppState = Depends(get_state)):
+def resume_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -110,7 +114,7 @@ def resume_solving(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.post("/projects/{project_id}/reports", response_model=Report, status_code=201)
-def submit_report(project_id: str, body: ReportRequest, state: AppState = Depends(get_state)):
+def submit_report(project_id: str, body: ReportRequest, state: AppState = _GET_STATE_DEPENDENCY):
     """A Member submits a difficulty report to Diamond (Seed.md 角色联动)."""
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
@@ -130,7 +134,7 @@ def submit_report(project_id: str, body: ReportRequest, state: AppState = Depend
 
 
 @router.post("/projects/{project_id}/complete", response_model=Intent)
-def complete_project(project_id: str, body: CompleteRequest, state: AppState = Depends(get_state)):
+def complete_project(project_id: str, body: CompleteRequest, state: AppState = _GET_STATE_DEPENDENCY):
     """Mark a flag found (IPC verification entry). Creates the goal edge."""
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
@@ -170,7 +174,7 @@ def complete_project(project_id: str, body: CompleteRequest, state: AppState = D
 
 
 @router.get("/broadcasts", response_model=list[Broadcast])
-def list_broadcasts(state: AppState = Depends(get_state)):
+def list_broadcasts(state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         rows = graph_store.list_broadcasts(conn)
     return [item.model_copy(update={"flag": redact_flag(item.flag) or ""}) for item in rows]

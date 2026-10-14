@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from backend.api.deps import get_state
 from backend.blackboard import graph_store
 from backend.core.archive import list_archived_projects, project_archive_id
-from backend.core.state import AppState
 from backend.core.redaction import redact_object
+from backend.core.state import AppState
 from backend.filename_util import numbered_filename
 
 router = APIRouter(tags=["logs"])
@@ -23,13 +23,17 @@ class LogToggle(BaseModel):
     enabled: bool
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("/logs/status")
-def log_status(state: AppState = Depends(get_state)):
+def log_status(state: AppState = _GET_STATE_DEPENDENCY):
     return {"enabled": state.logger.enabled}
 
 
 @router.put("/logs/status")
-def set_log_status(body: LogToggle, state: AppState = Depends(get_state)):
+def set_log_status(body: LogToggle, state: AppState = _GET_STATE_DEPENDENCY):
     state.logger.set_enabled(body.enabled)
     state.config.log_enabled = body.enabled
     state.save_config()
@@ -37,7 +41,7 @@ def set_log_status(body: LogToggle, state: AppState = Depends(get_state)):
 
 
 @router.get("/logs/projects")
-def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
+def read_project_logs(limit: int = 500, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         projects = graph_store.project_summaries(conn)
     logs = []
@@ -86,7 +90,7 @@ def read_project_logs(limit: int = 500, state: AppState = Depends(get_state)):
 
 
 @router.post("/logs/derive")
-def derive_project_logs(state: AppState = Depends(get_state)):
+def derive_project_logs(state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         projects = graph_store.project_summaries(conn)
     target = state.log_export_dir
@@ -143,7 +147,7 @@ def derive_project_logs(state: AppState = Depends(get_state)):
 
 
 @router.get("/logs/{project_id}")
-def read_logs(project_id: str, kind: str = "project", limit: int = 500, state: AppState = Depends(get_state)):
+def read_logs(project_id: str, kind: str = "project", limit: int = 500, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
     secret = row["flag"] if row else None

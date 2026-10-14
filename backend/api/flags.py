@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.api.deps import get_state
-from backend.core.state import AppState
 from backend.core.redaction import redact_flag
+from backend.core.state import AppState
 
 router = APIRouter(prefix="/api/flags", tags=["flags"])
 
@@ -38,10 +38,14 @@ def _record(row, *, reveal: bool = False) -> FlagRecord:
     )
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("", response_model=list[FlagRecord])
 def list_flags(
     reveal: bool = Query(default=False),
-    state: AppState = Depends(get_state),
+    state: AppState = _GET_STATE_DEPENDENCY,
 ):
     with state.db.connect() as conn:
         rows = conn.execute(
@@ -59,7 +63,7 @@ def list_flags(
 def get_flag(
     project_id: str,
     reveal: bool = Query(default=False),
-    state: AppState = Depends(get_state),
+    state: AppState = _GET_STATE_DEPENDENCY,
 ):
     with state.db.connect() as conn:
         row = conn.execute(

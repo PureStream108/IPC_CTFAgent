@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import logging
 import re
 import secrets
 import shutil
@@ -13,17 +13,10 @@ from urllib.parse import quote
 
 import requests
 
+from backend.agent.session import AgentSessionStore
 from backend.blackboard import graph_store
 from backend.core.state import AppState
-from backend.members.adapters import health_check, make_adapter
-from backend.ops.models import (
-    PlatformWorkflowSpec,
-    SecretHeader,
-    render_template,
-    validate_secret_name,
-)
-from backend.ops.network import WorkflowHttpClient
-from backend.agent.session import AgentSessionStore
+from backend.members.adapters import health_check
 from backend.ops.agent_bridge import (
     PROPOSE_WORKFLOW_TOOL,
     OpsToolBridge,
@@ -32,10 +25,20 @@ from backend.ops.agent_bridge import (
     redact,
 )
 from backend.ops.attachments import OpsAttachmentStore
-from backend.ops.store import OpsStore
+from backend.ops.models import (
+    PlatformWorkflowSpec,
+    SecretHeader,
+    render_template,
+    validate_secret_name,
+)
+from backend.ops.network import WorkflowHttpClient
+from backend.ops.store import OpsStore, WorkflowSessionConflict
 from backend.ops.tools import OpsToolError, OpsToolExecutor
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.factory import build_adapter
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
 
@@ -81,6 +84,10 @@ class OpsAgentUpstreamError(OpsAgentError):
 
 
 class WorkflowConfirmationError(OpsAgentError):
+    pass
+
+
+class WorkflowSessionError(OpsAgentError):
     pass
 
 
@@ -139,7 +146,7 @@ class _IncrementStream:
                 or time.monotonic() >= self._deadline
             )
             if ready:
-                keep = self._hold if self._hold < len(self._buffer) else len(self._buffer)
+                keep = min(len(self._buffer), self._hold)
                 chunk = self._buffer[: len(self._buffer) - keep]
                 if chunk:
                     pending.append((kind, chunk))
@@ -167,6 +174,9 @@ class OpsAgentService:
         self._run_condition = threading.Condition()
         self._run_threads: dict[str, threading.Thread] = {}
         self._run_threads_lock = threading.Lock()
+        # Remove only unreferenced historical drafts; session-bound and
+        # run-referenced workflows remain available for audit/replay.
+        self.store.cleanup_duplicate_workflows()
         self._recover_stale_runs()
 
     def _recover_stale_runs(self) -> None:
@@ -299,6 +309,8 @@ class OpsAgentService:
         except KeyError:
             return ""
         spec = workflow.get("spec") or {}
+        if hasattr(spec, "model_dump"):
+            spec = spec.model_dump(mode="json")
         challenges = spec.get("challenges") or {} if isinstance(spec, dict) else {}
         submit = spec.get("submit") or {} if isinstance(spec, dict) else {}
         lines = [
@@ -342,6 +354,11 @@ class OpsAgentService:
             session_id = self.store.create_session(_session_title(safe_message))["id"]
         else:
             self.store.get_session(session_id)
+        if workflow_id:
+            try:
+                self.store.bind_agent_workflow(session_id, workflow_id)
+            except WorkflowSessionConflict as exc:
+                raise WorkflowSessionError(str(exc)) from exc
 
         if normalized_secrets:
             self.store.save_session_secrets(session_id, normalized_secrets)
@@ -400,7 +417,10 @@ class OpsAgentService:
         self, spec_data: dict[str, Any], session_id: str
     ) -> dict[str, Any]:
         spec = PlatformWorkflowSpec.model_validate(spec_data)
-        workflow = self.store.create_workflow(spec, session_id=session_id, source="agent")
+        try:
+            workflow = self.store.update_session_workflow(session_id, spec)
+        except WorkflowSessionConflict as exc:
+            raise WorkflowSessionError(str(exc)) from exc
         return self.workflow_view(workflow)
 
     def _chat_with_api(
@@ -609,6 +629,11 @@ class OpsAgentService:
             session_id = self.store.create_session(_session_title(safe_message))["id"]
         else:
             self.store.get_session(session_id)
+        if workflow_id:
+            try:
+                self.store.bind_agent_workflow(session_id, workflow_id)
+            except WorkflowSessionConflict as exc:
+                raise WorkflowSessionError(str(exc)) from exc
 
         run_id = f"run_{secrets.token_hex(16)}"
         self.store.create_run(session_id, run_id)
@@ -693,6 +718,7 @@ class OpsAgentService:
             response = self._finish_interrupted_api_chat(session_id=session_id)
             self.store.finish_run(run_id, status="interrupted", response=response)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _run_api_background', exc_info=True)
             safe_error = _replace_secret_values(str(exc), redaction_values).strip()
             if not safe_error:
                 safe_error = "IPC API run failed"
@@ -961,6 +987,7 @@ class OpsAgentService:
                 "competition_id": spec.competition_id,
                 "team_id": spec.team_id,
                 "ends_at": spec.ends_at,
+                "remote_concurrency": spec.remote_concurrency,
                 "remote_instance_limit": spec.remote_instance_limit,
                 "challenges": challenge_view,
                 "submit": submit_view,
@@ -1036,6 +1063,7 @@ class OpsAgentService:
                 raise ValueError(f"unknown external_id values: {missing}")
             selected = [by_id[external_id] for external_id in select]
         from tempfile import TemporaryDirectory
+
         from backend.platform.downloads import stage_challenges
 
         imported: list[dict[str, Any]] = []

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -11,8 +11,8 @@ from backend.core.diamond import Diamond
 from backend.core.lifecycle import Lifecycle, LifecycleError
 from backend.core.postprocess_store import (
     claim_next_job,
-    complete_job,
     complete_existing_job,
+    complete_job,
     enqueue_postprocess,
     fail_job,
     recover_expired_jobs,
@@ -39,6 +39,204 @@ def _make_project(state, category="web"):
     with state.db.connect() as conn:
         pid = graph_store.create_project(conn, "Demo", "http://target", "capture the flag", category)
     return pid
+
+
+@pytest.mark.parametrize("other_project", [False, True])
+def test_postprocess_claim_skips_a_project_locked_by_completion(state, other_project):
+    project_id = _make_project(state)
+    other_id = _make_project(state) if other_project else None
+    with state.db.connect() as connection:
+        enqueue_postprocess(connection, project_id)
+        if other_id:
+            enqueue_postprocess(connection, other_id)
+
+    def claim():
+        with state.db.connect() as connection:
+            return claim_next_job(connection, "concurrent-worker")
+
+    with ThreadPoolExecutor(max_workers=1) as executor, state.db.connect() as completion:
+        completion.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+        claimed = executor.submit(claim).result(timeout=5)
+        assert (claimed.project_id if claimed else None) == other_id
+        # Repeating completion must not wait on a job row held by a worker
+        # that is itself waiting for this transaction's project row.
+        completion.execute("SET LOCAL lock_timeout='2s'")
+        enqueue_postprocess(completion, project_id)
+    with state.db.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM postprocess_jobs WHERE project_id=%s", (project_id,),
+        ).fetchone()["n"] == 3
+
+
+def test_expired_postprocess_recovery_skips_an_active_completion_transaction(state):
+    project_id = _make_project(state)
+    with state.db.connect() as connection:
+        enqueue_postprocess(connection, project_id)
+        stale = claim_next_job(connection, "stale-worker")
+        connection.execute(
+            "UPDATE postprocess_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s", (stale.id,),
+        )
+
+    def recover():
+        with state.db.connect() as connection:
+            return recover_expired_jobs(connection)
+
+    with ThreadPoolExecutor(max_workers=1) as executor, state.db.connect() as completion:
+        completion.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+        assert executor.submit(recover).result(timeout=5) == 0
+        completion.execute("SET LOCAL lock_timeout='2s'")
+        enqueue_postprocess(completion, project_id)
+    with state.db.connect() as connection:
+        assert recover_expired_jobs(connection) == 1
+        assert claim_next_job(connection, "replacement-worker").id == stale.id
+
+
+def test_real_orchestrator_starts_local_and_remote_tasks_with_independent_capacity(state):
+    import hashlib
+    import json
+
+    from psycopg.types.json import Jsonb
+
+    from backend.competition.fixture import FixturePlatform
+    from backend.competition.service import CompetitionService
+    from backend.core.orchestrator import Orchestrator
+    from backend.platform.mapping import PlatformChallenge
+    from tests.test_competition_service_fixture import _FixtureOps, _spec
+
+    state.config.limits.max_concurrent_tasks = 1
+    state.limiter.update_limits(max_concurrent_tasks=1)
+    orch = Orchestrator(state, scripts={name: [
+        {"action": "bash", "command": 'python -c "import time; time.sleep(2)"'},
+        {"action": "done", "reason": "capacity fixture complete"},
+    ] for name in (m.name for m in state.config.available_members())})
+    state.orchestrator = orch
+    spec = _spec()
+    digest = hashlib.sha256(json.dumps(spec.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
+    with state.db.connect() as connection:
+        connection.execute(
+            """INSERT INTO workflows (id,source,name,spec_json,spec_digest,status,confirmed_digest,created_at,updated_at)
+               VALUES ('capacity-workflow','fixture',%s,%s,%s,'confirmed',%s,now(),now())""",
+            (spec.name, Jsonb(spec.model_dump(mode="json")), digest, digest),
+        )
+    workflow = {"id": "capacity-workflow", "status": "confirmed", "spec_digest": digest,
+                "confirmed_digest": digest, "spec": spec}
+    platform = FixturePlatform([
+        PlatformChallenge(external_id="local", title="Local", category="misc", description="capacity"),
+        PlatformChallenge(external_id="remote", title="Remote", category="web", description="capacity", remote=True),
+    ], remote_limit=1)
+    service = CompetitionService(state, platform_factory=lambda *_args: platform,
+                                 ops_service=_FixtureOps(state.db, workflow))
+    state.competition = service
+    try:
+        run_id = service.start(workflow["id"], "capacity-start")["run"]["id"]
+        service.tick()
+        projects = {row["project_id"] for row in service.store.challenges(run_id)}
+        until = time.monotonic() + 10
+        while time.monotonic() < until:
+            if projects.issubset(set(orch.active_member_owners().values())):
+                break
+            time.sleep(0.02)
+        assert projects.issubset(set(orch.active_member_owners().values()))
+        assert projects.issubset(set(state.limiter.active_tasks()))
+        until = time.monotonic() + 5
+        remote = next(row for row in service.store.challenges(run_id) if row["external_id"] == "remote")
+        seat = next(row for row in service.store.assignments(run_id, active_only=True) if row["challenge_id"] == remote["id"])
+        while time.monotonic() < until:
+            events = service.store.events(seat["session_id"], limit=500)
+            tools = [row for row in events if row["kind"] == "tool_call"]
+            if tools:
+                break
+            time.sleep(0.02)
+        target = next(row for row in events if row["event_key"].startswith("recon:") and "target_instance" in str(row["payload"]))
+        assert tools and target["sequence"] < tools[0]["sequence"]
+        run = service.store.get_run(run_id)
+        service.control(run_id, "stop", run["revision"])
+        assert not projects.intersection(state.limiter.active_tasks())
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("mode", ["recovered", "capacity", "sandbox_failure"])
+def test_running_project_recovery_preserves_state_and_releases_failed_capacity(state, monkeypatch, mode):
+    from backend.core.orchestrator import Orchestrator
+    from backend.sandbox.errors import SandboxStartupError
+
+    pid = _make_project(state)
+    with state.db.connect() as connection:
+        graph_store.set_status(connection, pid, "running")
+    orch = Orchestrator(state, max_workers=1)
+    state.orchestrator = orch
+    dispatched = []
+    monkeypatch.setattr(orch, "_dispatch_project", dispatched.append)
+    if mode == "capacity":
+        monkeypatch.setattr(orch.resources, "acquire_task", lambda _pid: False)
+    elif mode == "sandbox_failure":
+        def fail_preflight(_pid):
+            raise SandboxStartupError("daemon unavailable", operation="recovery preflight")
+        monkeypatch.setattr(orch.resources, "preflight_project", fail_preflight)
+
+    orch._startup_project_ids.add(pid)
+    orch._recover_running_project(pid)
+
+    assert not orch.startup_in_progress(pid)
+    status = orch.runtime_status(pid)
+    if mode == "recovered":
+        assert dispatched == [pid]
+        assert status["status"] == "running" and status["phase"] == "ready"
+    elif mode == "capacity":
+        assert dispatched == []
+        assert status["phase"] == "queued_capacity"
+        assert pid in orch._pending_project_ids
+        assert pid not in orch._project_leases
+    else:
+        assert dispatched == []
+        assert status["status"] == "infra_error"
+        assert pid not in state.limiter.active_tasks()
+        assert pid not in orch._project_leases
+
+
+@pytest.mark.parametrize("status", ["running", "flag_found", "solved"])
+def test_startup_failure_fences_workers_but_preserves_flag_state(state, status):
+    from backend.core.orchestrator import Orchestrator
+    from backend.sandbox.errors import SandboxStartupError
+
+    pid = _make_project(state)
+    with state.db.connect() as connection:
+        graph_store.set_status(connection, pid, status)
+    orch = Orchestrator(state, max_workers=1)
+    state.orchestrator = orch
+    assert orch._ensure_project_lease(pid)
+    orch.resources.acquire_task(pid)
+    orch._mark_project_startup_failure(
+        pid, SandboxStartupError("cannot start", operation="preflight"), event="startup.failed",
+    )
+    assert orch.runtime_status(pid)["status"] == ("infra_error" if status == "running" else status)
+    assert pid not in state.limiter.active_tasks()
+    assert pid not in orch._project_leases
+
+
+@pytest.mark.parametrize("description,expected", [
+    ("Found flag{followup} in the response", 1),
+    ("Found flag{first} and ctf{second}", 0),
+    ("No candidate in this observation", 0),
+])
+def test_concluded_flag_evidence_requires_one_idempotent_submission_followup(state, description, expected):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state)
+    orch = Orchestrator(state, max_workers=1)
+    state.orchestrator = orch
+    with state.db.connect() as connection:
+        fact = node_store.reserve_fact(connection, pid, description)
+        node_store.insert_fact(connection, pid, fact.id, fact.description)
+    orch._flag_followup_from_fact(pid, fact.id)
+    orch._flag_followup_from_fact(pid, fact.id)
+    with state.db.connect() as connection:
+        intents = edge_store.list_intents(connection, pid)
+        submissions = connection.execute("SELECT 1 FROM flag_submissions WHERE project_id=%s", (pid,)).fetchall()
+    followups = [intent for intent in intents if "submit_flag tool" in intent.description]
+    assert len(followups) == expected
+    assert submissions == []
 
 
 def test_app_state_clean_start_wipes_files_but_preserves_postgres(tmp_path, monkeypatch):

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from contextlib import suppress
 import io
+import logging
 import os
 import shlex
 import tarfile
 import threading
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
 from backend.sandbox.docker_manager import _load_docker_sdk
@@ -17,6 +18,9 @@ from backend.sandbox.errors import (
 )
 from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.webui_proxy import webui_proxy_manager
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 WORKSPACE = "/workspace"
 ATTACHMENTS_DIR = f"{WORKSPACE}/attachments"
@@ -70,8 +74,8 @@ def job_launch_script(directory: str, command: str, workdir: str) -> str:
         f"nohup bash -c {shlex.quote(supervisor)} >/dev/null 2>&1 < /dev/null &",
         "child=$!",
         f"printf '%s' \"$child\" > {quoted}/pid",
-        f"(sed 's/.*) //' /proc/$child/stat 2>/dev/null | awk '{{print $20}}' "
-        f"|| true) > {quoted}/starttime",
+        (f"(sed 's/.*) //' /proc/$child/stat 2>/dev/null | awk '{{print $20}}' "
+        f"|| true) > {quoted}/starttime"),
         f"cat {quoted}/pid",
     ))
 
@@ -221,6 +225,7 @@ class TaskSandbox:
         try:
             current = self._docker().containers.get(hostname)
         except Exception:
+            _recovery_logger.debug('Error handled in _shared_network_name', exc_info=True)
             return None
         networks = current.attrs.get("NetworkSettings", {}).get("Networks", {})
         if not networks:

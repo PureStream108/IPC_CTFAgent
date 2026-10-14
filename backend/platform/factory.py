@@ -39,9 +39,11 @@ def build_adapter(
         source_url = resolved_base_url or mapping.list_url
         if source_url:
             parsed = urlsplit(source_url)
-            if parsed.scheme and parsed.netloc:
-                if not resolved_base_url or parsed.path.lower().startswith("/api/"):
-                    resolved_base_url = f"{parsed.scheme}://{parsed.netloc}"
+            if (
+                parsed.scheme and parsed.netloc
+                and (not resolved_base_url or parsed.path.lower().startswith("/api/"))
+            ):
+                resolved_base_url = f"{parsed.scheme}://{parsed.netloc}"
         return GZCTFAdapter(
             GZCTFClient(
                 base_url=resolved_base_url,

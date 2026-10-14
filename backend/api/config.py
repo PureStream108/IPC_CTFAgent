@@ -5,13 +5,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from backend.api.deps import get_state
 from backend.core.config import (
-    AppConfig,
-    LLMConfig,
+    CATEGORIES,
     ApiFormat,
     ApiSurface,
-    CATEGORIES,
-    SelectedReasoningEffort,
+    AppConfig,
+    LLMConfig,
     RuntimeConfig,
+    SelectedReasoningEffort,
 )
 from backend.core.state import AppState
 
@@ -38,6 +38,12 @@ class RuntimeUpdate(BaseModel):
     browser_artifact_max_bytes: int | None = None
 
 
+class LimitsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_concurrent_tasks: int | None = None
+    total_cpu: int | None = None
+
+
 class ConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -48,6 +54,7 @@ class ConfigUpdate(BaseModel):
     members: dict[str, LLMUpdate] | None = None
     remove_members: list[str] | None = None
     runtime: RuntimeUpdate | None = None
+    limits: LimitsUpdate | None = None
 
 
 def _redact(value: str) -> str:
@@ -101,18 +108,23 @@ def _config_view(state: AppState) -> dict:
             "browser_allowed_origins": cfg.runtime.browser_allowed_origins,
             "browser_artifact_max_bytes": cfg.runtime.browser_artifact_max_bytes,
         },
+        "limits": cfg.limits.model_dump(),
         "startup_errors": cfg.startup_errors(),
         "startup_warnings": cfg.startup_warnings(),
     }
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("/config")
-def get_config(state: AppState = Depends(get_state)):
+def get_config(state: AppState = _GET_STATE_DEPENDENCY):
     return _config_view(state)
 
 
 @router.get("/config/runtime")
-def get_runtime_config(state: AppState = Depends(get_state)):
+def get_runtime_config(state: AppState = _GET_STATE_DEPENDENCY):
     orchestrator = state.orchestrator
     active_members: dict[str, list[str]] = {}
     running_tasks: list[dict[str, str]] = []
@@ -161,7 +173,7 @@ def _apply(llm, upd: LLMUpdate) -> None:
 
 
 @router.put("/config")
-def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
+def update_config(body: ConfigUpdate, state: AppState = _GET_STATE_DEPENDENCY):
     cfg = state.config.model_copy(deep=True)
     if body.remove_members:
         raise HTTPException(400, "The ten Member identities are fixed.")
@@ -197,13 +209,26 @@ def update_config(body: ConfigUpdate, state: AppState = Depends(get_state)):
                 for error in exc.errors(include_input=False, include_context=False, include_url=False)
             )
             raise HTTPException(400, detail) from exc
+    if body.limits is not None:
+        limit_values = {
+            **cfg.limits.model_dump(),
+            **body.limits.model_dump(exclude_none=True),
+        }
+        try:
+            cfg.limits = type(cfg.limits).model_validate(limit_values)
+        except ValidationError as exc:
+            detail = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_context=False, include_url=False)
+            )
+            raise HTTPException(400, detail) from exc
     state.config = AppConfig.model_validate(cfg.model_dump())
     state.save_config()
     return _config_view(state)
 
 
 @router.post("/config/health")
-def health_check(state: AppState = Depends(get_state)):
+def health_check(state: AppState = _GET_STATE_DEPENDENCY):
     """Validate each configured LLM endpoint (Seed.md 启动时需要校验每个 LLM 的 health)."""
     from backend.members.adapters import health_check as adapter_health
 

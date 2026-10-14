@@ -154,9 +154,8 @@ class PostgresDatabase:
     @contextmanager
     def connect(self) -> Generator[DatabaseConnection, None, None]:
         self.open()
-        with self._pool.connection() as raw:
-            with raw.transaction():
-                yield DatabaseConnection(raw)
+        with self._pool.connection() as raw, raw.transaction():
+            yield DatabaseConnection(raw)
 
     def close(self) -> None:
         if self._opened:

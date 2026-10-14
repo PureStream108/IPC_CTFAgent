@@ -13,7 +13,11 @@ needs no model at all.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 SUMMARY_SCHEMA_HINT = {
     "verified_facts": [{"claim": "...", "evidence": "file:offset | command | artifact_id"}],
@@ -96,8 +100,8 @@ def deterministic_summary(
     summary = empty_summary()
     if dropped:
         summary["open_questions"] = [
-            "The earlier transcript was compacted without a semantic summary; "
-            "re-derive any detail you need instead of assuming it."
+            ("The earlier transcript was compacted without a semantic summary; "
+            "re-derive any detail you need instead of assuming it.")
         ]
     if signatures:
         seen: list[str] = []
@@ -176,6 +180,7 @@ def summarize(
         raw = request(_PROMPT, dropped)
         summary = normalize_summary(_parse_json(raw))
     except Exception:
+        _recovery_logger.debug('Error handled in summarize', exc_info=True)
         return fallback_summary, retained
     if is_empty(summary):
         return fallback_summary, retained

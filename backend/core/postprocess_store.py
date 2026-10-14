@@ -4,7 +4,6 @@ import secrets
 from dataclasses import dataclass
 from typing import Any
 
-
 POSTPROCESS_KINDS = ("writeup", "memory", "archive")
 
 
@@ -17,7 +16,16 @@ class PostprocessJob:
     lease_token: str
 
 
+def _lock_project(connection: Any, project_id: str) -> None:
+    # API completion already owns this row. Every job writer must take it
+    # before job rows, otherwise enqueue and worker status refresh can deadlock.
+    connection.execute(
+        "SELECT id FROM projects WHERE id=%s FOR NO KEY UPDATE", (project_id,),
+    ).fetchone()
+
+
 def enqueue_postprocess(connection: Any, project_id: str) -> None:
+    _lock_project(connection, project_id)
     for kind in POSTPROCESS_KINDS:
         connection.execute(
             """
@@ -39,21 +47,22 @@ def claim_next_job(
 ) -> PostprocessJob | None:
     row = connection.execute(
         """
-        SELECT id
-        FROM postprocess_jobs
-        WHERE status IN ('pending', 'retry')
-          AND next_attempt_at <= now()
-          AND (lease_expires_at IS NULL OR lease_expires_at < now())
+        SELECT job.id, job.project_id
+        FROM postprocess_jobs job
+        JOIN projects project ON project.id = job.project_id
+        WHERE job.status IN ('pending', 'retry')
+          AND job.next_attempt_at <= now()
+          AND (job.lease_expires_at IS NULL OR job.lease_expires_at < now())
           AND (
-              kind <> 'archive'
+              job.kind <> 'archive'
               OR EXISTS (
                   SELECT 1 FROM postprocess_jobs writeup
-                  WHERE writeup.project_id = postprocess_jobs.project_id
+                  WHERE writeup.project_id = job.project_id
                     AND writeup.kind = 'writeup' AND writeup.status = 'completed'
               )
           )
-        ORDER BY created_at, id
-        FOR UPDATE SKIP LOCKED
+        ORDER BY job.created_at, job.id
+        FOR NO KEY UPDATE OF project SKIP LOCKED
         LIMIT 1
         """
     ).fetchone()
@@ -67,11 +76,13 @@ def claim_next_job(
             lease_token = %s,
             lease_expires_at = now() + make_interval(secs => %s),
             updated_at = now()
-        WHERE id = %s
+        WHERE id = %s AND status IN ('pending', 'retry')
         RETURNING id, project_id, kind, attempts, lease_token
         """,
         (worker_id, token, lease_seconds, row["id"]),
     ).fetchone()
+    if claimed is None:
+        return None
     refresh_project_status(connection, claimed["project_id"])
     return PostprocessJob(**claimed)
 
@@ -109,6 +120,7 @@ def lock_job(
     database commit phase concurrently.
     """
 
+    _lock_project(connection, job.project_id)
     row = connection.execute(
         """
         SELECT id
@@ -139,6 +151,7 @@ def complete_job(
     *,
     lease_locked: bool = False,
 ) -> bool:
+    _lock_project(connection, job.project_id)
     live_clause = "" if lease_locked else (
         " AND lease_expires_at IS NOT NULL AND lease_expires_at > now()"
     )
@@ -172,6 +185,7 @@ def complete_existing_job(
     overwrite another worker's result.
     """
 
+    _lock_project(connection, project_id)
     if lease_token is None:
         changed = connection.execute(
             """
@@ -215,6 +229,7 @@ def fail_job(
     *,
     max_attempts: int = 4,
 ) -> bool:
+    _lock_project(connection, job.project_id)
     delay = min(900, 15 * (2 ** max(0, job.attempts - 1)))
     changed = connection.execute(
         """
@@ -236,11 +251,21 @@ def fail_job(
 def recover_expired_jobs(connection: Any) -> int:
     cursor = connection.execute(
         """
-        UPDATE postprocess_jobs
+        WITH expired_projects AS MATERIALIZED (
+            SELECT project.id FROM projects project
+            WHERE EXISTS (
+                SELECT 1 FROM postprocess_jobs job WHERE job.project_id=project.id
+                  AND job.status='running' AND job.lease_expires_at<now()
+            )
+            ORDER BY project.id
+            FOR NO KEY UPDATE OF project SKIP LOCKED
+        )
+        UPDATE postprocess_jobs job
         SET status = 'retry', locked_by = NULL, lease_token = NULL,
             lease_expires_at = NULL, next_attempt_at = now(),
             last_error = COALESCE(last_error, 'worker lease expired'), updated_at = now()
-        WHERE status = 'running' AND lease_expires_at < now()
+        FROM expired_projects project
+        WHERE job.project_id=project.id AND job.status = 'running' AND job.lease_expires_at < now()
         """
     )
     return cursor.rowcount

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -9,9 +10,9 @@ import uuid
 from pathlib import Path
 
 from backend.blackboard import graph_store
+from backend.blackboard.db import Database
 from backend.core.config import AppConfig, load_config, save_config
 from backend.core.logging_util import IPCLogger
-from backend.blackboard.db import Database
 from backend.mcp.mcp_client import MCPRegistry
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
@@ -20,10 +21,12 @@ from backend.platform.ret2shell.mcp import build_ret2shell_mcp
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
-from backend.tools.tool_mcp import build_tool_search_mcp
 from backend.tools.catalog import ToolCatalog
+from backend.tools.tool_mcp import build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name, "").strip().lower()
@@ -90,8 +93,8 @@ class AppState:
         self.network = NetworkManager(backend=self.config.runtime.sandbox_backend)
 
         self.mcps = MCPRegistry()
-        from backend.skills.store import SkillStore
         from backend.skills.mcp import build_skills_mcp
+        from backend.skills.store import SkillStore
         self.skills = SkillStore(self.artifact_root / "skills", Path("/opt/ipc-skills"))
         self.skills.bootstrap()
         self.mcps.register(build_skills_mcp(self.skills))
@@ -140,12 +143,20 @@ class AppState:
     def reload_config(self) -> None:
         self.config = load_config(self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+        self.limiter.update_limits(
+            max_concurrent_tasks=self.config.limits.max_concurrent_tasks,
+            total_cpu=self.config.limits.total_cpu,
+        )
         if self.orchestrator is not None:
             self.orchestrator.reload_config()
 
     def save_config(self) -> None:
         save_config(self.config, self.config_dir)
         self.logger.set_enabled(self.config.log_enabled)
+        self.limiter.update_limits(
+            max_concurrent_tasks=self.config.limits.max_concurrent_tasks,
+            total_cpu=self.config.limits.total_cpu,
+        )
         if self.orchestrator is not None:
             self.orchestrator.reload_config()
 
@@ -164,6 +175,7 @@ class AppState:
             with self.db.connect() as conn:
                 return graph_store.project_log_filename(conn, project_id)
         except Exception:
+            _recovery_logger.debug('Error handled in project_log_filename', exc_info=True)
             return project_id
 
     def attachments_dir(self, project_id: str) -> Path:

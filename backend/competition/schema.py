@@ -15,6 +15,7 @@ COMPETITION_SCHEMA = (
         status TEXT NOT NULL DEFAULT 'preflight' CHECK (status IN
           ('preflight','importing','running','paused','blocked','draining','finished','stopped')),
         config_snapshot JSONB NOT NULL,
+        limits JSONB NOT NULL DEFAULT '{}'::jsonb,
         revision BIGINT NOT NULL DEFAULT 1,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -125,6 +126,7 @@ COMPETITION_SCHEMA = (
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS last_error TEXT",
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS lease_owner TEXT",
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+    "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS limits JSONB NOT NULL DEFAULT '{}'::jsonb",
     "ALTER TABLE competition_session_events ADD COLUMN IF NOT EXISTS event_id BIGSERIAL",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_competition_event_id ON competition_session_events(event_id)",
     """CREATE TABLE IF NOT EXISTS competition_run_events (

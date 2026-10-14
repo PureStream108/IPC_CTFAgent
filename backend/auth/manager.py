@@ -9,12 +9,14 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from backend.auth.session_store import ActiveSessionStore
+from backend.core.validation import InputValidationError
 
 AUTH_FILE_ENV = "IPC_AUTH_FILE"
 SESSION_COOKIE_NAME = "ipc_session"
@@ -328,7 +330,7 @@ class AuthManager:
     @staticmethod
     def _validate_new_password(password: str) -> None:
         if not isinstance(password, str):
-            raise ValueError("password must be a string")
+            raise InputValidationError("password must be a string")
         if len(password) < _MIN_PASSWORD_LENGTH:
             raise ValueError(f"password must contain at least {_MIN_PASSWORD_LENGTH} characters")
         if len(password) > _MAX_PASSWORD_LENGTH:

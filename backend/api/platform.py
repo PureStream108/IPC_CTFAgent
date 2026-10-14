@@ -14,9 +14,9 @@ from backend.blackboard import graph_store
 from backend.core.state import AppState
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.factory import build_adapter
+from backend.platform.gzctf import GZCTFError
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient, Ret2ShellError
-from backend.platform.gzctf import GZCTFError
 
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
@@ -69,8 +69,12 @@ def preview_challenges(body: ChallengeRequest):
     return {"challenges": [challenge.model_dump() for challenge in challenges]}
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.post("/import", status_code=201)
-def import_challenges(body: ImportRequest, state: AppState = Depends(get_state)):
+def import_challenges(body: ImportRequest, state: AppState = _GET_STATE_DEPENDENCY):
     adapter, challenges = _fetch(body.mapping)
     by_id = {challenge.external_id: challenge for challenge in challenges}
     if body.select is None:

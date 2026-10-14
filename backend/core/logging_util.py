@@ -5,6 +5,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 from backend.core.redaction import redact_flag
 
@@ -14,7 +15,7 @@ def _utcnow() -> str:
 
 
 class IPCLogger:
-    KINDS = {
+    KINDS: ClassVar[dict] = {
         "project": "project_logs",
         "tool": "tool_logs",
         "llm": "llm_logs",

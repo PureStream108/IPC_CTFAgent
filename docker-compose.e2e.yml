@@ -1,0 +1,68 @@
+name: ipc-e2e
+services:
+  e2e-postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:15433:5432"
+    environment:
+      POSTGRES_DB: ipc_e2e
+      POSTGRES_USER: ipc
+      POSTGRES_PASSWORD: ipc
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ipc -d ipc_e2e"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  e2e-platform:
+    image: python:3.12-slim
+    volumes:
+      - ./docker/e2e/fake_platform.py:/opt/fake_platform.py:ro
+    command: ["python", "/opt/fake_platform.py"]
+
+  e2e-app:
+    image: ipc-ctfagent:latest
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app:app --app-dir /app/docker/e2e --host 0.0.0.0 --port 8000"]
+    environment:
+      IPC_ROOT: /app
+      IPC_ARTIFACT_ROOT: /app/data/artifacts
+      IPC_DATABASE_URL: postgresql://ipc:ipc@e2e-postgres:5432/ipc_e2e
+      IPC_ALLOW_LOCAL_SANDBOX: "1"
+      IPC_LOG_ENABLED: "true"
+    volumes:
+      - e2e-data:/app/data
+      - ./docker/e2e/config:/app/backend/config:ro
+      - ./docker/e2e:/app/docker/e2e:ro
+      - ./backend:/app/backend:ro
+      - ./frontend:/app/frontend:ro
+    ports:
+      - "18000:8000"
+    depends_on:
+      e2e-postgres:
+        condition: service_healthy
+      e2e-platform:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/auth/status', timeout=3)"]
+      interval: 2s
+      timeout: 4s
+      retries: 30
+
+  e2e-runner:
+    build:
+      context: .
+      dockerfile: docker/e2e/runner.Dockerfile
+    image: ipc-e2e-browser:latest
+    environment:
+      IPC_E2E_BASE_URL: http://e2e-app:8000
+      IPC_E2E_ARTIFACT_DIR: /artifacts
+    volumes:
+      - ./scripts/playwright_e2e.py:/opt/playwright_e2e.py:ro
+      - ./data/exports/e2e:/artifacts
+    command: ["python", "/opt/playwright_e2e.py"]
+    depends_on:
+      e2e-app:
+        condition: service_healthy
+
+volumes:
+  e2e-data:

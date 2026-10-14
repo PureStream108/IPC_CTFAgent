@@ -13,7 +13,6 @@ Additive only: one new table, its indexes, and a view over existing columns.
 
 from alembic import op
 
-
 revision = "20261008_0010"
 down_revision = "20260929_0009"
 branch_labels = None
