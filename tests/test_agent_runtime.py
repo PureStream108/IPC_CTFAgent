@@ -534,6 +534,46 @@ def test_watchdog_resume_without_new_input_never_triggers_a_rebuild():
     assert not [i for i in writer.items if i["kind"] == "user_message"]
 
 
+def test_async_tool_order_repair_continues_without_replaying_an_interrupted_call():
+    writer = MemoryWriter()
+    executor = AsyncExecutor()
+    queued = [[{"role": "assistant", "tool_calls": [{
+        "id": "interrupted-call", "function": {"name": "shell", "arguments": "{}"},
+    }]}]]
+
+    def deliver_after_bootstrap(_runtime):
+        return queued.pop(0) if queued else []
+
+    class RecoveringAdapter(Adapter):
+        emits_reasoning = True
+
+        def turn(self, messages, system, tools, emit, cancel, emit_reasoning):
+            self.seen.append(list(messages))
+            emit_reasoning("checking recovered history")
+            if len(self.seen) == 1:
+                raise _Status400Error()
+            if len(self.seen) == 3:
+                return Turn([{"role": "assistant", "content": "complete"}], [], "complete")
+            return Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "recovery-check"}]}],
+                [ToolCall("recovery-check", "shell", {"command": "pwd"})],
+                "recovered",
+            )
+
+    adapter = RecoveringAdapter([])
+    result = asyncio.run(runtime(
+        writer, adapter, executor, before_turn=deliver_after_bootstrap,
+        max_turns=2,
+    ).run_async("continue"))
+
+    assert result.status == "idle" and result.turns == 2
+    assert len(adapter.seen) == 3
+    assert any(message.get("tool_call_id") == "interrupted-call" for message in adapter.seen[1])
+    assert executor.calls == [("shell", {"command": "pwd"}, "s1:recovery-check")]
+    assert any(item["kind"] == "status" and item["payload"].get("status") == "tool_order_repaired" for item in writer.items)
+    assert writer.epoch == 1
+
+
 def test_an_invalid_tool_order_turn_is_repaired_in_place_before_a_retry():
     """A 400 whose repair changes the projection retries over the fixed history.
 

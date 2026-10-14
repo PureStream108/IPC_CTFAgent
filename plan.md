@@ -122,6 +122,10 @@ python scripts/monitor_real_competition.py \
 
 实现已提交到独立分支 `codex/competition-reliability-20261014`，首个 commit `05893ab23421beac43e37727de7b3c1f01276472`。草稿 [PR #4](https://github.com/PureStream108/IPC_CTFAgent/pull/4) 已触发 [CI run 38545171757](https://github.com/PureStream108/IPC_CTFAgent/actions/runs/38545171757)：hosted 浏览器 E2E 通过，但 pytest 捕获同一 flag 重复 complete 与后台 postprocess 的 PostgreSQL 死锁，整体 CI 尚未通过。已统一项目/任务的加锁顺序，并为领取与过期恢复增加跳过已锁项目的并发回归；本机相关 128 项测试通过。修复将更新到同一草稿 PR，要求新 revision 的三个 check 全部通过。状态快照保存于 `data/exports/github-plan-ci-verification.json`，锁回归证据为 `pytest-postprocess-lock-verification.log/.xml`。
 
+死锁修复已发布为 `480df326cc0b26172f8ed498afe7223f59ac335e`，对应 [CI run 38549517281](https://github.com/PureStream108/IPC_CTFAgent/actions/runs/38549517281)。该 revision 的 hosted E2E 已通过；test 和 task-image 尚在运行。Linux 临时 PostgreSQL 另外实际执行同 flag 完成和并发锁回归，4 项通过，见 `data/exports/native-postprocess-lock-verification.log/.xml`。
+
+该次 hosted pytest 随后完成：`774 passed, 2 skipped`，但 Agent 覆盖率为 81.25%，低于保存的 81.33% 基线；Competition 为 82.73%。门禁正确阻止了通过。已补充异步 tool-order 故障恢复回归：修复输入历史后执行一个新的工具调用，确认旧的中断副作用不重放，且不消耗额外成功 turn 配额。Agent runtime 38 项测试通过，基线保持 81.33%/80.93%，等待新 revision 的 hosted 验证。
+
 - [x] 最新全量 pytest 与覆盖率门禁通过，并保存 81.33%/80.93% 新基线。
 - [x] 最终回归后刷新正常栈应用镜像并重验健康状态。
 - [x] 完整 `python -m ruff check backend scripts tests` 通过，Windows/Linux 实跑均为零诊断；新增故障回归和完整 pytest 通过，覆盖率未下降。
