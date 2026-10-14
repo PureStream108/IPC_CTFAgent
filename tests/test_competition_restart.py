@@ -14,7 +14,6 @@ from backend.competition.store import CompetitionConflict
 from backend.competition.workspace import SharedWorkspace
 from backend.ops.models import PlatformWorkflowSpec
 from backend.platform.mapping import PlatformChallenge
-
 from tests.test_competition_service_fixture import (
     _FixtureConfig,
     _FixtureLogger,
@@ -76,8 +75,8 @@ def test_coordinator_restart_recovers_session_checkpoint_artifact_and_deadline(t
         state.orchestrator = _FixtureOrchestrator(service)
         return service, state
 
-    first, first_state = make_service("old-coordinator")
-    second = second_state = None
+    first, _first_state = make_service("old-coordinator")
+    second = None
     try:
         snapshot = first.start(workflow_id, "restart-run")
         run_id = snapshot["run"]["id"]
@@ -112,7 +111,7 @@ def test_coordinator_restart_recovers_session_checkpoint_artifact_and_deadline(t
             )
 
         first.shutdown()
-        second, second_state = make_service("new-coordinator")
+        second, _second_state = make_service("new-coordinator")
         second.tick()
         recovered = second.store.assignments(run_id, active_only=True)[0]
         challenge_after = second.store.challenges(run_id)[0]

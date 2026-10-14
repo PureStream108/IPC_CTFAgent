@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -10,6 +11,8 @@ from typing import Any
 
 from backend.blackboard import graph_store
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 WRITEUP_REQUEST = (
     "CTF 题目已解出。请撰写一份 Markdown writeup，并在其中包含一个完整的 Python 利用脚本。"
@@ -320,6 +323,7 @@ def _generate_writeup(detail, generator: Callable[[str], str], evidence_logs: Ma
         try:
             content = _unwrap_markdown(generator(prompt))
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _generate_writeup', exc_info=True)
             failures.append(f"generator call {attempt + 1}: {type(exc).__name__}: {exc}")
             continue
         errors = validate_writeup(content, expected_flag=detail.project.flag, require_complete=True)

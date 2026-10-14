@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import re
 import shlex
@@ -11,6 +12,8 @@ from backend.blackboard import graph_store
 from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.docker_manager import _load_docker_sdk
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 class OpsToolError(RuntimeError):
     """A tool call was invalid or could not be completed."""
@@ -126,7 +129,7 @@ class OpsToolExecutor:
                 raise OpsToolError("question requires a conversation session")
             try:
                 return QuestionStore(self.state).create(session_id=session_id, **args)
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, RuntimeError) as exc:
                 raise OpsToolError(str(exc)) from exc
         handlers = {
             "list_task_sandboxes": self.list_task_sandboxes,
@@ -222,7 +225,7 @@ class OpsToolExecutor:
                 try:
                     container.remove(force=True)
                 except Exception:
-                    pass
+                    _recovery_logger.debug('Error handled in host_exec', exc_info=True)
 
         stdout, stderr = _split_output(output)
         return {
@@ -292,6 +295,7 @@ def _host_helper_image(client) -> str:
         client.images.get(preferred)
         return preferred
     except Exception:
+        _recovery_logger.debug('Error handled in _host_helper_image', exc_info=True)
         return "ipc-ctfagent:latest"
 
 

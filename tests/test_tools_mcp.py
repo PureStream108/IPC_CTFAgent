@@ -117,7 +117,7 @@ def test_category_tools_mcp_returns_tool_contract(registry):
 
 
 def test_removed_webshell_mcp_is_not_exposed():
-    removed_name = "".join(("ant", "sword"))
+    removed_name = "antsword"
     assert removed_name not in SERVER_NAMES
     with pytest.raises(ValueError, match="unknown MCP server"):
         build_mcp_server(removed_name)

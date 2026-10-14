@@ -9,12 +9,11 @@ since that is exactly the work P4a exists to make possible.
 """
 from __future__ import annotations
 
-import pytest
-
 from backend.agent.watchdog import (
     CANCEL_AFTER,
     DIAGNOSE_AFTER,
     HANDOFF_AFTER,
+    SessionWatchdog,
     classify,
     diagnosis,
 )
@@ -107,3 +106,23 @@ def test_the_verdict_carries_the_evidence_behind_it():
 
 def test_quiet_seconds_is_read_defensively():
     assert classify(health(quiet_seconds=None)).level == "ok"
+
+
+def test_session_watchdog_filters_actionable_rows_and_preserves_scope():
+    rows = [health(session_id="quiet", quiet_seconds=CANCEL_AFTER),
+            health(session_id="busy", quiet_seconds=10, running_jobs=1)]
+
+    class Store:
+        def health_for_scope(self, **kwargs):
+            assert kwargs == {"kind": "competition"}
+            return rows
+
+    watchdog = SessionWatchdog(
+        Store(), object(), diagnose_after=100, cancel_after=200, handoff_after=300,
+    )
+    assert [item.session_id for item in watchdog.verdicts()] == ["quiet", "busy"]
+    actionable = watchdog.inspect()
+    assert len(actionable) == 1
+    verdict, evidence = actionable[0]
+    assert verdict.session_id == "quiet"
+    assert evidence["session_id"] == "quiet"

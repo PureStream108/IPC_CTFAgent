@@ -70,7 +70,9 @@ def test_index_served(client):
     assert "deleteOpsWorkflow" in body
     assert "authorizeOpsWorkflow" in body
     assert "/confirmation" in body
-    assert "opsConfirmMissing" in body
+    assert "onQuestionEnter($event, question.id)" in body
+    assert "Workflow secret" not in body
+    assert 'question.sensitive?"******"' not in body
     assert 'placeholder="confirmation phrase"' not in body
     assert "Review every URL, method and template above, then type:" not in body
     assert "startOpsRun" in body
@@ -182,6 +184,7 @@ def test_ops_chat_helpers_behave():
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip().endswith("ok")

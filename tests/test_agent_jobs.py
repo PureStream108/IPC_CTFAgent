@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +53,82 @@ def wait_for(predicate, timeout=20.0):
             return value
         time.sleep(0.1)
     return None
+
+
+def test_detached_start_failure_never_leaves_a_running_job(jobs, session):
+    def unavailable(*_args):
+        raise ConnectionError("sandbox disconnected during launch")
+
+    service = JobService(jobs, SimpleNamespace(exec_detached=unavailable), session["id"])
+    assert service.start("  ")["ok"] is False
+    result = service.start("sleep 300")
+    assert result["ok"] is False
+    row = jobs.job(result["job_id"])
+    assert row["state"] == "lost" and row["exit_code"] is None
+    assert jobs.jobs(session["id"], active_only=True) == []
+
+
+def test_detached_status_recovers_after_a_temporary_probe_failure(jobs, session):
+    job = jobs.start(session["id"], "sleep 300", pid=4242)
+
+    def unavailable(_job_id):
+        raise TimeoutError("sandbox probe timed out")
+
+    sandbox = SimpleNamespace(job_state=unavailable)
+    service = JobService(jobs, sandbox, session["id"])
+    assert service.status(job["id"])["state"] == "running"
+    assert service.jobs(active_only=True)["jobs"][0]["state"] == "running"
+    assert jobs.job(job["id"])["exit_code"] is None
+
+    sandbox.job_state = lambda _job_id: {"state": "exited", "exit_code": 7}
+    assert service.status(job["id"])["exit_code"] == 7
+    assert service.jobs(active_only=True)["jobs"] == []
+    assert service.status("missing")["ok"] is False
+
+
+def test_detached_log_read_failure_preserves_the_retry_cursor(jobs, session):
+    job = jobs.start(session["id"], "sleep 300")
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("temporary output transport failure")
+
+    sandbox = SimpleNamespace(job_output=unavailable)
+    service = JobService(jobs, sandbox, session["id"])
+    assert service.logs(job["id"])["ok"] is False
+    assert jobs.job(job["id"])["stdout_offset"] == 0
+
+    reads = []
+
+    def restored(_job_id, _stream, *, offset, limit):
+        reads.append(offset)
+        return "evidence", offset + len("evidence")
+
+    sandbox.job_output = restored
+    assert service.logs(job["id"])["text"] == "evidence"
+    assert reads == [0]
+    assert jobs.job(job["id"])["stdout_offset"] == len("evidence")
+    assert service.logs("missing")["ok"] is False
+    assert service.logs(job["id"], stream="invalid")["ok"] is False
+
+
+def test_detached_cancel_failure_can_retry_without_claiming_success(jobs, session):
+    job = jobs.start(session["id"], "sleep 300")
+
+    def unavailable(_job_id):
+        raise ConnectionError("sandbox disconnected during cancellation")
+
+    sandbox = SimpleNamespace(job_cancel=unavailable)
+    service = JobService(jobs, sandbox, session["id"])
+    assert service.cancel(job["id"])["ok"] is False
+    assert jobs.job(job["id"])["state"] == "running"
+
+    cancelled = []
+    sandbox.job_cancel = cancelled.append
+    assert service.cancel(job["id"])["state"] == "cancelled"
+    assert cancelled == [job["id"]]
+    assert service.cancel(job["id"])["state"] == "cancelled"
+    assert cancelled == [job["id"]]
+    assert service.cancel("missing")["ok"] is False
 
 
 def test_job_rows_record_lifecycle_and_keep_the_first_terminal_state(jobs, session):
@@ -96,11 +173,11 @@ def test_detached_job_outlives_the_sixty_second_foreground_ceiling(
     job_id = started["job_id"]
     assert service.status(job_id)["state"] in {"running", "exited"}
 
-    final = wait_for(
-        lambda: (lambda view: view if view["state"] == "exited" else None)(
-            service.status(job_id)
-        )
-    )
+    def completed_job():
+        view = service.status(job_id)
+        return view if view["state"] == "exited" else None
+
+    final = wait_for(completed_job)
     assert final is not None, "detached job never reached a terminal state"
     assert final["exit_code"] == 3
 

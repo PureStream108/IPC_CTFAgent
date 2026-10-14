@@ -4,7 +4,14 @@ import pytest
 from fastapi import HTTPException
 
 from backend.api.config import ConfigUpdate, LLMUpdate, RuntimeUpdate, update_config
-from backend.core.config import AppConfig, LLMConfig, MEMBER_NAMES, MemberConfig, load_config, save_config
+from backend.core.config import (
+    MEMBER_NAMES,
+    AppConfig,
+    LLMConfig,
+    MemberConfig,
+    load_config,
+    save_config,
+)
 
 
 def test_conflicting_legacy_endpoints_require_explicit_selection(tmp_path):

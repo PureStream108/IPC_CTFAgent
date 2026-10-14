@@ -39,7 +39,7 @@ def owned(store, task_key="ops:session-1", owner="worker-a", kind="ops"):
 
 def test_event_keys_are_idempotent_and_reuse_with_new_content_is_rejected(store):
     session = owned(store)
-    args = dict(owner="worker-a", epoch=1)
+    args = {"owner": "worker-a", "epoch": 1}
     first = store.append_event(session["id"], "call-1", "tool_call", {"cmd": "id"}, **args)
     assert store.append_event(session["id"], "call-1", "tool_call", {"cmd": "id"}, **args) == first
     with pytest.raises(SessionConflict, match="different content"):
@@ -97,7 +97,7 @@ def test_handoff_transfers_write_access_without_starting_a_new_transcript(store)
     assert [event["kind"] for event in events] == [
         "provider_messages", "handoff", "provider_messages",
     ]
-    assert [event["event_key"] for event in events][0] == "first"
+    assert next(event["event_key"] for event in events) == "first"
     assert events[1]["payload"] == {
         "previous_owner": "worker-a", "owner": "worker-b",
         "epoch": 2, "reason": "member_handoff",
@@ -225,3 +225,21 @@ def test_events_can_be_read_by_the_global_event_id_cursor(store):
     assert second["event_id"] > first["event_id"]
     tail = store.events_after_event_id(session["id"], first["event_id"])
     assert [event["event_key"] for event in tail] == ["e2"]
+
+
+def test_session_store_rejects_invalid_transitions_and_missing_rows(store):
+    with pytest.raises(SessionConflict, match="task key"):
+        store.create_session("ops", "   ")
+    session = owned(store, task_key="ops:edge-cases")
+    with pytest.raises(SessionConflict, match="unknown session state"):
+        store.set_state(session["id"], "running")
+    with pytest.raises(SessionConflict, match="provider session state"):
+        store.record_provider_session(session["id"], "provider", "running")
+    with pytest.raises(SessionConflict, match="status"):
+        store.finish_turn(session["id"], 99, "mystery")
+    with pytest.raises(KeyError):
+        store.session("missing-session")
+    with pytest.raises(KeyError):
+        store.save_checkpoint("missing-session", {})
+    with pytest.raises(KeyError):
+        store.record_provider_session("missing-session", "provider", "native")

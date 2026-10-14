@@ -9,6 +9,7 @@ it.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -25,7 +26,23 @@ from backend.sandbox.task_sandbox import (
     parse_job_probe,
 )
 
-BASH = shutil.which("bash")
+
+def find_bash() -> str | None:
+    if os.name == "nt":
+        # Windows' system bash.exe launches WSL; these tests share Windows
+        # temp paths and therefore need Git Bash's MSYS filesystem mapping.
+        git = shutil.which("git")
+        if git:
+            root = Path(git).resolve().parent.parent
+            for relative in ("bin/bash.exe", "usr/bin/bash.exe"):
+                candidate = root / relative
+                if candidate.is_file():
+                    return str(candidate)
+        return None
+    return shutil.which("bash")
+
+
+BASH = find_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="requires a POSIX bash")
 
 
@@ -46,6 +63,7 @@ def posix(path: Path) -> str:
 def run(script: str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [BASH, "-lc", script], cwd=str(cwd), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         timeout=60, check=False,
     )
 
@@ -85,11 +103,11 @@ def test_launch_records_pid_and_real_exit_status(tmp_path):
     early = probe(directory, tmp_path)
     assert early["state"] in {"running", "exited"}
 
-    final = wait_for(
-        lambda: (lambda v: v if v["state"] == "exited" else None)(
-            probe(directory, tmp_path)
-        )
-    )
+    def completed_job():
+        view = probe(directory, tmp_path)
+        return view if view["state"] == "exited" else None
+
+    final = wait_for(completed_job)
     assert final is not None, "job never recorded a status"
     assert final["exit_code"] == 5
     assert (directory / "stdout").read_text().split() == ["one", "two"]

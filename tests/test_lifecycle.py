@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -8,12 +9,17 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard.db import Database
 from backend.core.state import AppState
-from backend.mcp.mcp_client import MCPClient
+from backend.mcp.mcp_client import MCPClient, MCPToolError
 from backend.mcp.mcp_server import close_lifespan, create_mcp_server
 from backend.memory.memory_store import MemoryStore
 from backend.server.app import create_app
 from backend.tools.tool_registry import ToolRegistry
 from tests.helpers import setup_test_auth, write_mock_config
+
+if sys.version_info >= (3, 11):
+    from builtins import ExceptionGroup
+else:
+    from exceptiongroup import ExceptionGroup
 
 
 def test_postgres_pool_serves_concurrent_connections():
@@ -39,12 +45,10 @@ def test_storage_close_methods_are_idempotent_and_clear_local_cache():
         resource.close()
         resource.close()
 
-    with pytest.raises(Exception, match="closed|reused"):
-        with database.connect():
-            pass
-    with pytest.raises(Exception, match="closed|reused"):
-        with memory.db.connect():
-            pass
+    with pytest.raises(Exception, match="closed|reused"), database.connect():
+        pass
+    with pytest.raises(Exception, match="closed|reused"), memory.db.connect():
+        pass
     assert registry.cached_search("query") is None
 
 
@@ -77,9 +81,8 @@ def test_app_state_closes_owned_resources_in_dependency_order(tmp_path, monkeypa
     state.close()
 
     assert order[:3] == ["registry", "memory", "database"]
-    with pytest.raises(Exception, match="closed|reused"):
-        with state.db.connect():
-            pass
+    with pytest.raises(Exception, match="closed|reused"), state.db.connect():
+        pass
 
 
 def test_fastmcp_lifespan_closes_owned_resource_on_normal_and_error_exit():
@@ -94,7 +97,7 @@ def test_fastmcp_lifespan_closes_owned_resource_on_normal_and_error_exit():
         raise RuntimeError("expected")
 
     async def run() -> None:
-        with pytest.raises(Exception):
+        with pytest.raises((MCPToolError, ExceptionGroup)):
             async with MCPClient.in_process(server) as client:
                 await client.call_tool("explode")
 
@@ -117,6 +120,5 @@ def test_fastapi_lifespan_closes_state_after_request_exception(tmp_path):
             assert conn.execute("SELECT 1 AS value").fetchone()["value"] == 1
 
     assert state.registry._cache == {}
-    with pytest.raises(Exception, match="closed|reused"):
-        with state.db.connect():
-            pass
+    with pytest.raises(Exception, match="closed|reused"), state.db.connect():
+        pass

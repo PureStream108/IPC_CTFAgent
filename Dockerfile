@@ -33,11 +33,17 @@ RUN python -c "from pathlib import Path; from backend.skills.store import SkillS
 # subprocesses are owned by the backend process (Members just connect to
 # ipc-app:<port>).
 ARG WSRX_VERSION=0.6.1
-RUN python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/XDSEC/WebSocketReflectorX/releases/download/${WSRX_VERSION}/wsrx-cli-${WSRX_VERSION}-linux-musl-x86_64.tar.gz', '/tmp/wsrx.tar.gz')" \
-    && tar -xzf /tmp/wsrx.tar.gz -C /tmp \
-    && install -m 0755 /tmp/wsrx /usr/local/bin/wsrx \
-    && rm -f /tmp/wsrx /tmp/wsrx.tar.gz \
-    && wsrx --version
+ARG INSTALL_WSRX=1
+RUN if [ "$INSTALL_WSRX" = "1" ]; then \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/XDSEC/WebSocketReflectorX/releases/download/${WSRX_VERSION}/wsrx-cli-${WSRX_VERSION}-linux-musl-x86_64.tar.gz', '/tmp/wsrx.tar.gz')" \
+      && tar -xzf /tmp/wsrx.tar.gz -C /tmp \
+      && install -m 0755 /tmp/wsrx /usr/local/bin/wsrx \
+      && rm -f /tmp/wsrx /tmp/wsrx.tar.gz \
+      && wsrx --version; \
+    else \
+      printf '#!/bin/sh\necho wsrx disabled in this image\nexit 127\n' > /usr/local/bin/wsrx \
+      && chmod +x /usr/local/bin/wsrx; \
+    fi
 
 # /app/data is bind-mounted by docker-compose.yml. PostgreSQL owns runtime
 # facts; filesystem workspaces and generated files share one Artifact tree.

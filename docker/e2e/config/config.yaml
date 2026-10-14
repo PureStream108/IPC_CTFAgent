@@ -1,0 +1,17 @@
+log_enabled: true
+diamond:
+  api_format: mock
+  api_surface: auto
+  reasoning_effort: high
+member:
+  api_format: mock
+  api_surface: auto
+  reasoning_effort: high
+runtime:
+  interval: 1
+  sandbox_backend: local
+  max_member_steps: 10
+  max_member_actions_per_task: 5
+limits:
+  max_concurrent_tasks: 2
+  total_cpu: 2

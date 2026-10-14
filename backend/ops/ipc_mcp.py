@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from collections.abc import Callable
 from typing import Any
 
-from mcp.server.transport_security import TransportSecuritySettings
-
 from mcp.server.fastmcp import Context
+from mcp.server.transport_security import TransportSecuritySettings
 
 from backend.blackboard import edge_store, graph_store
 from backend.core.config import CATEGORIES
@@ -25,6 +25,9 @@ from backend.core.wp_writer import persist_validated_writeup, write_wp_content
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 _SESSION_ID_RE = re.compile(r"^ops_[a-f0-9]{16}$")
 _SENSITIVE_FIELD_RE = re.compile(
@@ -598,5 +601,6 @@ def _session_id_from_context(ctx: Context | None) -> str | None:
         headers = getattr(request, "headers", None)
         value = headers.get("x-ipc-ops-session", "") if headers is not None else ""
     except Exception:
+        _recovery_logger.debug('Error handled in _session_id_from_context', exc_info=True)
         return None
     return value if isinstance(value, str) and _SESSION_ID_RE.fullmatch(value) else None

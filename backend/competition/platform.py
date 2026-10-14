@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import quote, urlsplit
 
 from backend.ops.models import PlatformWorkflowSpec
@@ -7,6 +8,8 @@ from backend.ops.service import _resolve_headers
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.verdict import interpret_response
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 class CompetitionPlatform:
     """Freeze one Workflow revision; refresh only its referenced credentials."""
@@ -23,9 +26,7 @@ class CompetitionPlatform:
             base = str(adapter_identity).rstrip("/")
             team = quote(str(self.spec.team_id), safe="")
             team_marker = f"/team/{team}"
-            if base.endswith(f"/{team}") or base.endswith(team_marker) or (
-                team_marker in base and "/account/" in base
-            ):
+            if base.endswith((f"/{team}", team_marker)) or team_marker in base and "/account/" in base:
                 return base
             return f"{base}/{quote(str(self.spec.competition_id), safe='')}/{team}"
         base = self.spec.challenges.list_url
@@ -58,6 +59,7 @@ class CompetitionPlatform:
         try:
             limit = method()
         except Exception:
+            _recovery_logger.debug('Error handled in instance_limit', exc_info=True)
             return None
         try:
             limit = int(limit) if limit is not None else None

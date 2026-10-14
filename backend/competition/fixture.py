@@ -90,6 +90,7 @@ class FixturePlatform:
             "state": "ready",
             "generation": 1,
             "renewals": 0,
+            "entry": f"http://{external_id}.fixture.invalid/instance/1",
         }
         self._instances[external_id] = instance
         return deepcopy(instance)
@@ -118,6 +119,7 @@ class FixturePlatform:
             "generation": generation,
             "renewals": 0,
             "renew_after": 300,
+            "entry": f"http://{external_id}.fixture.invalid/instance/{generation}",
         }
         self._instances[external_id] = replacement
         self.rebuilds.append(external_id)

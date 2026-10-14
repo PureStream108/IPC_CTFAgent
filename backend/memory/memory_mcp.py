@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.memory.memory_search import search

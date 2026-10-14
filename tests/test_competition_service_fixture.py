@@ -24,7 +24,6 @@ from backend.competition.service import CompetitionService
 from backend.ops.models import PlatformWorkflowSpec
 from backend.platform.mapping import PlatformChallenge
 
-
 pytestmark = pytest.mark.postgres
 
 
@@ -166,6 +165,96 @@ class _FixtureOrchestrator:
 
     def _resume_after_verdict(self, *_args, **_kwargs) -> None:
         return None
+
+
+@pytest.mark.parametrize("failure_stage", ["verification", "writeup"])
+def test_correct_closeout_recovers_without_resubmitting_or_releasing_early(tmp_path, monkeypatch, failure_stage):
+    import backend.competition.service as service_module
+
+    platform = FixturePlatform([
+        PlatformChallenge(external_id="closeout", title="Closeout", category="misc", description="fixture"),
+    ], flags={"closeout": "fixture:correct"})
+    db, service, _state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "closeout-fault")
+    try:
+        run_id = service.start(workflow_id, "closeout-fault-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        seat = service.store.assignments(run_id, active_only=True)[0]
+        with db.connect() as connection:
+            connection.execute("DELETE FROM intents WHERE project_id=%s AND to_fact_id='goal'", (challenge["project_id"],))
+
+        original_accept = service_module.accept_verified_flag
+        original_closeout = service.store.finalize_correct_challenge
+
+        def unavailable(*_args, **_kwargs):
+            raise OSError("temporary closeout storage failure")
+
+        def unavailable_writeup(connection, owner_run_id, challenge_id):
+            original_closeout(connection, owner_run_id, challenge_id)
+            raise OSError("writeup persistence failed after flag verification")
+
+        if failure_stage == "verification":
+            monkeypatch.setattr(service_module, "accept_verified_flag", unavailable)
+        else:
+            monkeypatch.setattr(service.store, "finalize_correct_challenge", unavailable_writeup)
+        service.submit_candidate(run_id, challenge["id"], seat["session_id"], "fixture:correct", "verified evidence", 0)
+        service.tick()
+        assert service.store.get_run(run_id)["status"] == "blocked"
+        assert service.store.assignments(run_id, active_only=True)
+        with db.connect() as connection:
+            submission = connection.execute("SELECT status FROM competition_submissions WHERE run_id=%s", (run_id,)).fetchone()
+            assert submission["status"] == "correct"
+            assert connection.execute("SELECT 1 FROM competition_wp_jobs WHERE run_id=%s", (run_id,)).fetchone() is None
+            assert connection.execute("SELECT flag FROM projects WHERE id=%s", (challenge["project_id"],)).fetchone()["flag"] is None
+
+        monkeypatch.setattr(service_module, "accept_verified_flag", original_accept)
+        monkeypatch.setattr(service.store, "finalize_correct_challenge", original_closeout)
+        service._process_submissions(service.store.get_run(run_id), allow_new=False)
+        assert platform.calls == [("closeout", "fixture:correct")]
+        assert all(row["role"] == "wp" for row in service.store.assignments(run_id, active_only=True))
+        with db.connect() as connection:
+            project = connection.execute("SELECT status,flag FROM projects WHERE id=%s", (challenge["project_id"],)).fetchone()
+            assert project["status"] == "solved" and project["flag"] == "fixture:correct"
+            assert connection.execute("SELECT count(*) AS n FROM competition_wp_jobs WHERE run_id=%s", (run_id,)).fetchone()["n"] == 1
+        service._process_submissions(service.store.get_run(run_id), allow_new=False)
+        assert platform.calls == [("closeout", "fixture:correct")]
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_external_solve_refresh_releases_solver_and_instance_once(tmp_path, monkeypatch):
+    item = PlatformChallenge(external_id="external", title="External", category="web", description="fixture", remote=True)
+    platform = FixturePlatform([item], remote_limit=1)
+    db, service, state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "external-solve")
+    try:
+        run_id = service.start(workflow_id, "external-solve-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        assert service.store.assignments(run_id, active_only=True)
+        assert platform.instances()
+        stopped = []
+        original_stop = platform.stop_instance
+
+        def stop(external_id):
+            stopped.append(external_id)
+            original_stop(external_id)
+
+        monkeypatch.setattr(platform, "stop_instance", stop)
+        platform.replace_challenges([item.model_copy(update={"solved": True})])
+        service.control(run_id, "refresh", service.store.get_run(run_id)["revision"])
+        assert service.store.challenges(run_id)[0]["state"] == "solved"
+        assert service.store.assignments(run_id, active_only=True) == []
+        assert platform.instances() == []
+        assert challenge["project_id"] in state.orchestrator.stopped
+        service.control(run_id, "refresh", service.store.get_run(run_id)["revision"])
+        assert stopped == ["external"]
+        with db.connect() as connection:
+            assert connection.execute("SELECT flag FROM projects WHERE id=%s", (challenge["project_id"],)).fetchone()["flag"] is None
+            assert connection.execute("SELECT 1 FROM competition_wp_jobs WHERE run_id=%s", (run_id,)).fetchone() is None
+    finally:
+        service.shutdown()
+        db.close()
 
 
 def test_competition_service_fixture_runs_to_finished_with_wp_and_release(tmp_path):
@@ -470,6 +559,176 @@ def test_instance_renewal_failure_rebuilds_and_fences_new_generation(tmp_path):
             for kind, _fields in _state.logger.events
         )
         assert platform.instances()[0]["generation"] == 2
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_instance_entry_is_published_once_to_active_members(tmp_path):
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="entry-remote", title="Entry", category="web",
+            description="entry fixture", remote=True,
+        )],
+        flags={"entry-remote": "fixture:correct"}, remote_limit=1,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "entry"
+    )
+    try:
+        run_id = service.start(workflow_id, "entry-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        snapshot = service.store.run_snapshot(run_id)
+        assert snapshot["resource_capacity"]["remote"]["limit"] == 1
+        assert snapshot["resource_capacity"]["remote"]["used"] == 1
+        assert snapshot["resource_capacity"]["local"]["used"] == 0
+        assert snapshot["resource_capacity"]["remote"]["source"] == "workflow.remote_instance_limit"
+        kinds = {row["kind"] for row in service.store.run_events(run_id)}
+        assert {"instance.start_requested", "instance.started"}.issubset(kinds)
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE competition_instances SET metadata=%s WHERE challenge_id=%s",
+                (Jsonb({"entry": "10.0.0.5:30001"}), challenge["id"]),
+            )
+        messages = []
+        service.publish_recon = messages.append
+        run = service.store.get_run(run_id)
+        service._publish_instance_entries(run)
+        service._publish_instance_entries(run)
+        assert len(messages) == 1
+        assert messages[0].payload["kind"] == "target_instance"
+        assert messages[0].payload["entry"] == "10.0.0.5:30001"
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_missing_instance_renewal_is_marked_expired_for_deferred_repair(tmp_path):
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="expired-remote", title="Expired", category="web",
+            description="expired fixture", remote=True,
+        )],
+        flags={"expired-remote": "fixture:correct"}, remote_limit=1,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(
+        tmp_path, platform, "expired"
+    )
+    try:
+        run_id = service.start(workflow_id, "expired-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        platform._instances.clear()
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE competition_instances SET next_renew_at=now()-interval '1 second' WHERE challenge_id=%s",
+                (challenge["id"],),
+            )
+        service._renew_instances(service.store.get_run(run_id))
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT state,metadata->>'repair_required' AS repair_required FROM competition_instances WHERE challenge_id=%s",
+                (challenge["id"],),
+            ).fetchone()
+        assert row["state"] == "expired"
+        assert row["repair_required"] == "true"
+        assert any(event["kind"] == "instance.expired" for event in service.store.run_events(run_id))
+        run = service.store.get_run(run_id)
+        service._repair_assigned_instances(run)
+        assert platform.instances() == []
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE competition_instances SET metadata=metadata || %s WHERE challenge_id=%s",
+                (Jsonb({"repair_after": "2026-01-01T00:00:00+00:00"}), challenge["id"]),
+            )
+        service._repair_assigned_instances(run)
+        assert platform.instances()
+        service._publish_instance_entries(run)
+        assert any(event["kind"] == "instance.repaired" for event in service.store.run_events(run_id))
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_submission_wrong_verdict_keeps_run_retriable(tmp_path):
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="wrong-remote", title="Wrong", category="web",
+            description="wrong fixture", remote=False,
+        )],
+        flags={"wrong-remote": "fixture:correct"}, remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "wrong")
+    try:
+        run_id = service.start(workflow_id, "wrong-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        seat = service.store.assignments(run_id, active_only=True)[0]
+        service.submit_candidate(run_id, challenge["id"], seat["session_id"], "fixture:wrong", "wrong evidence", challenge["instance_generation"])
+        service.tick()
+        assert platform.calls[-1] == ("wrong-remote", "fixture:wrong")
+        assert service.store.get_run(run_id)["status"] == "running"
+        assert service.store.challenges(run_id)[0]["state"] == "solving"
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_rate_limited_verdict_is_requeued_with_backoff(tmp_path):
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="rate-remote", title="Rate", category="web",
+            description="rate fixture", remote=False,
+        )],
+        flags={"rate-remote": "fixture:correct"}, remote_limit=0,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "rate")
+    try:
+        run_id = service.start(workflow_id, "rate-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        seat = service.store.assignments(run_id, active_only=True)[0]
+        service.submit_candidate(run_id, challenge["id"], seat["session_id"], "fixture:rate-limited", "rate evidence", challenge["instance_generation"])
+        service.tick()
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM competition_submissions WHERE challenge_id=%s ORDER BY created_at DESC LIMIT 1",
+                (challenge["id"],),
+            ).fetchone()
+        assert row["status"] == "queued"
+    finally:
+        service.shutdown()
+        db.close()
+
+
+def test_renewal_failure_without_rebuild_uses_delayed_retry(tmp_path):
+    platform = FixturePlatform(
+        [PlatformChallenge(
+            external_id="retry-remote", title="Retry", category="web",
+            description="retry fixture", remote=True,
+        )],
+        flags={"retry-remote": "fixture:correct"}, remote_limit=1,
+        renew_failures=1, rebuild_on_renew_failure=False,
+    )
+    db, service, _state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "retry")
+    try:
+        run_id = service.start(workflow_id, "retry-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        with db.connect() as connection:
+            connection.execute(
+                "UPDATE competition_instances SET next_renew_at=now()-interval '1 second' WHERE challenge_id=%s",
+                (challenge["id"],),
+            )
+        service._renew_instances(service.store.get_run(run_id))
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT state,next_renew_at>now() AS delayed FROM competition_instances WHERE challenge_id=%s",
+                (challenge["id"],),
+            ).fetchone()
+        assert row["state"] == "ready" and row["delayed"] is True
+        assert any(event["kind"] == "instance.renew_failed" for event in service.store.run_events(run_id))
     finally:
         service.shutdown()
         db.close()

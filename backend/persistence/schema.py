@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS external_id TEXT",
     "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'misc'",
@@ -230,7 +229,8 @@ SCHEMA_STATEMENTS = (
         title TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
-        agent_session_id TEXT
+        agent_session_id TEXT,
+        agent_workflow_id TEXT
     )
     """,
     """
@@ -293,6 +293,8 @@ SCHEMA_STATEMENTS = (
         updated_at TIMESTAMPTZ NOT NULL
     )
     """,
+    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS agent_workflow_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_ops_sessions_workflow ON sessions(agent_workflow_id)",
     """
     CREATE TABLE IF NOT EXISTS active_sessions (
         session_hash BYTEA PRIMARY KEY,

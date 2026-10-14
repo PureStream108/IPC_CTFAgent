@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from contextlib import suppress
 import re
 import threading
+from contextlib import suppress
 from pathlib import Path
 
 from backend.sandbox.resource_limiter import TaskSlotLimiter

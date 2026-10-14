@@ -12,7 +12,12 @@ import asyncio
 import pytest
 
 from backend.agent.context import compacted_history, summary_message
-from backend.agent.runtime import AgentRuntime, SessionResult
+from backend.agent.runtime import (
+    AgentRuntime,
+    AgentSessionWriter,
+    AssignmentSessionWriter,
+    SessionResult,
+)
 from backend.agent.session import SessionConflict, SessionNeedsRebuild
 from backend.competition.conversation import ToolCall, Turn, TurnTruncated
 
@@ -758,3 +763,95 @@ def test_a_reused_tool_call_id_with_different_arguments_is_rejected():
     writer.append("tool-call:dup", "tool_call", {"id": "c1", "name": "shell", "arguments": {"a": 2}})
     with pytest.raises(RuntimeError, match="reused with different arguments"):
         runtime(writer, Adapter([])).run("start")
+
+
+def test_async_truncation_continues_and_preserves_partial_evidence():
+    class TruncatedAdapter(Adapter):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
+        def turn(self, messages, system, tools, emit, cancel):
+            self.calls += 1
+            if self.calls == 1:
+                raise TurnTruncated(Turn([{"role": "assistant", "content": "partial evidence"}], text="partial evidence"), "length")
+            assert "partial evidence" in str(messages)
+            return Turn([{"role": "assistant", "content": "continued"}], text="continued")
+
+    writer = MemoryWriter()
+    result = asyncio.run(runtime(writer, TruncatedAdapter()).run_async("start"))
+    assert result.status == "idle" and result.text == "continued"
+    assert writer.usage[0][1] == "truncated"
+
+
+def test_async_repeated_tool_batches_are_bounded_with_distinct_call_ids():
+    turns = [Turn([{"role": "assistant", "content": "check"}],
+                  [ToolCall(f"call-{index}", "shell", {"command": "pwd"})]) for index in range(3)]
+    writer = MemoryWriter()
+    with pytest.raises(RuntimeError, match="identical tool batch"):
+        asyncio.run(runtime(writer, Adapter(turns), repeated_batch_limit=3).run_async("start"))
+    assert writer.items[-1]["kind"] == "loop_detected"
+
+
+def test_durable_writer_adapters_forward_fences_and_calibration():
+    class Store:
+        def __init__(self):
+            self.calls = []
+            self.page = 0
+
+        def append_event(self, *args, **kwargs):
+            self.calls.append(("append", args, kwargs))
+            return {"kind": args[2]}
+
+        def events(self, session_id, *, after=0, limit=500):
+            self.calls.append(("events", session_id, after, limit))
+            if after == 0 and self.page == 0:
+                self.page += 1
+                return [{"sequence": index} for index in range(1, 501)]
+            return [{"sequence": 501}] if after == 500 else []
+
+        def save_checkpoint(self, *args):
+            self.calls.append(("checkpoint", args))
+
+        def record_compaction(self, *args, **kwargs):
+            self.calls.append(("compaction", args, kwargs))
+
+        def session(self, _session_id):
+            return {"token_budget": {"old": 1}}
+
+        def save_token_budget(self, *args):
+            self.calls.append(("budget", args))
+
+        def handoff(self, _session_id, new_owner, *, reason):
+            self.calls.append(("handoff", new_owner, reason))
+            return {"owner": new_owner, "epoch": 4}
+
+        def record_turn(self, assignment, turn, status, *, usage=None):
+            self.calls.append(("turn", assignment, turn, status, usage))
+
+        def renew_assignment_writer(self, assignment):
+            self.calls.append(("renew", assignment))
+            return True
+
+    store = Store()
+    writer = AgentSessionWriter(store, "s1", "owner-a", 3)
+    assert writer.session_id == "s1"
+    writer.append("e", "status", {"ok": True})
+    assert len(writer.events(0, 10)) == 500
+    writer.save_checkpoint({"status": "ok"})
+    store.page = 0
+    writer.record_compaction({"facts": []}, token_estimate=12)
+    writer.save_calibration(1.25)
+    assert writer.handoff("owner-b", reason="resume") == {"owner": "owner-b", "epoch": 4}
+    assert writer.owner == "owner-b" and writer.epoch == 4
+    assert any(item[0] == "compaction" for item in store.calls)
+
+    assignment = {"id": "a1", "session_id": "s1", "lease_owner": "owner", "epoch": 2}
+    seat = AssignmentSessionWriter(store, assignment)
+    assert seat.session_id == "s1"
+    seat.append("e2", "status", {})
+    seat.save_checkpoint({"status": "running"})
+    seat.record_usage(2, "completed", {"prompt_tokens": 10})
+    assert seat.renew() is True
+    seat.save_calibration(0.9)
+    assert any(item[0] == "turn" for item in store.calls)

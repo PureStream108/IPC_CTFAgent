@@ -8,12 +8,14 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 from mcp.shared.memory import create_connected_server_and_client_session
+from typing_extensions import Self
 
 MCPClientTarget = FastMCP | StdioServerParameters
 
@@ -84,7 +86,7 @@ class MCPClient:
             raise RuntimeError("MCPClient must be used as an async context manager")
         return self._session
 
-    async def __aenter__(self) -> MCPClient:
+    async def __aenter__(self) -> Self:
         if self._stack is not None:
             raise RuntimeError("MCPClient session is already open")
         stack = AsyncExitStack()
@@ -111,7 +113,10 @@ class MCPClient:
         self._session = session
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None,
+        exc: BaseException | None, tb: TracebackType | None,
+    ) -> None:
         stack, self._stack = self._stack, None
         self._session = None
         if stack is not None:
@@ -156,12 +161,15 @@ class MCPRegistrySession:
         self._clients: dict[str, MCPClient] = {}
         self._open = False
 
-    async def __aenter__(self) -> MCPRegistrySession:
+    async def __aenter__(self) -> Self:
         await self._stack.__aenter__()
         self._open = True
         return self
 
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None,
+        exc: BaseException | None, tb: TracebackType | None,
+    ) -> None:
         self._open = False
         self._clients.clear()
         await self._stack.__aexit__(exc_type, exc, tb)

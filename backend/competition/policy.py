@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from collections.abc import Iterable
 
 from backend.core.config import MEMBER_NAMES
 
@@ -64,8 +64,10 @@ def plan_assignments(
     free = [name for name in member_order if name not in occupied]
     eligible = [c for c in challenges if c.state in {"ready", "solving"}
                 and (c.deadline_at is None or c.deadline_at > now)]
-    running = sum(bool(c.members) for c in challenges)
-    available_local = max(0, local_capacity - running)
+    running_local = sum(bool(c.members) and not c.remote for c in challenges)
+    running_remote = sum(bool(c.members) and c.remote for c in challenges)
+    available_local = max(0, local_capacity - running_local)
+    available_remote = max(0, remote_capacity - running_remote)
     candidates = [c for c in eligible if not c.members]
     candidates.sort(key=lambda c: (
         -(c.solve_count if c.solve_count is not None else -1),
@@ -76,16 +78,20 @@ def plan_assignments(
     result: list[Assignment] = []
     assigned: set[str] = set()
     for challenge in candidates:
-        if not free or not available_local:
+        if not free:
             break
         needs_instance = challenge.remote and not challenge.instance_ready
-        if needs_instance and remote_capacity == 0:
-            continue
+        if challenge.remote:
+            if available_remote <= 0:
+                continue
+        elif available_local <= 0:
+            break
         result.append(Assignment(free.pop(0), challenge.id, "primary", needs_instance))
         assigned.add(challenge.id)
-        available_local -= 1
-        if needs_instance:
-            remote_capacity -= 1
+        if challenge.remote:
+            available_remote -= 1
+        else:
+            available_local -= 1
     if len(eligible) < 10:
         helpers = [c for c in eligible if len(c.members) == 1 and c.id not in assigned]
         helpers.sort(key=lambda c: (c.first_assigned_at or c.ready_at, c.id))

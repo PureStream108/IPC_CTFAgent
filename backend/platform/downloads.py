@@ -1,11 +1,11 @@
 """Bounded parallel staging with a fresh adapter for each challenge."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from threading import BoundedSemaphore
-from typing import Callable
 from urllib.parse import urlsplit
 
 

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import threading
+from typing import ClassVar
 
 import pytest
 import requests
 
-from backend.sandbox import docker_manager, task_sandbox
 from backend.core.resource_manager import ResourceManager
+from backend.sandbox import docker_manager, task_sandbox
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
@@ -67,7 +68,7 @@ def test_local_sandbox_timeout_kills_grandchildren_holding_pipes(tmp_path):
 def test_local_sandbox_exposes_webui_via_proxy(tmp_path):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            body = f"origin {self.path}".encode("utf-8")
+            body = f"origin {self.path}".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -316,7 +317,7 @@ def test_task_sandbox_initializes_shared_workspace_and_copies_attachments(tmp_pa
     (attachments / "challenge.bin").write_bytes(b"binary")
 
     class FakeContainer:
-        attrs = {"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}}
+        attrs: ClassVar[dict] = {"NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}}
 
         def __init__(self):
             self.commands = []

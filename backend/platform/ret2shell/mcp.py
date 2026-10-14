@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import socket
 import subprocess
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from backend.mcp.mcp_server import MCPServer, close_lifespan, create_mcp_server
 from backend.platform.ret2shell.adapter import Ret2ShellClient
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 WSRX_BINARY = os.getenv("IPC_R2S_WSRX_BINARY", "wsrx")
 WSRX_BIND_HOST = os.getenv("IPC_R2S_WSRX_BIND_HOST", "0.0.0.0")
@@ -140,9 +145,10 @@ class WsrxTunnelManager:
             try:
                 process.wait(timeout=5)
             except Exception:
+                _recovery_logger.debug('Error handled in _terminate_process', exc_info=True)
                 process.kill()
         except Exception:
-            pass
+            _recovery_logger.debug('Error handled in _terminate_process', exc_info=True)
 
 
     def _alive(self, challenge_id: int) -> list[_Tunnel]:

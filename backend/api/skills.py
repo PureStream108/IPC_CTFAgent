@@ -44,13 +44,17 @@ def _view(state):
     }
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("")
-def list_skills(state=Depends(get_state)):
+def list_skills(state=_GET_STATE_DEPENDENCY):
     return _view(state)
 
 
 @router.post("")
-def install_skill(body: InstallSkill, state=Depends(get_state)):
+def install_skill(body: InstallSkill, state=_GET_STATE_DEPENDENCY):
     try:
         state.skills.install(body.repository, body.revision)
     except ValueError as exc:
@@ -61,7 +65,7 @@ def install_skill(body: InstallSkill, state=Depends(get_state)):
 
 
 @router.post("/add")
-def add_skill(body: AddSkill, state=Depends(get_state)):
+def add_skill(body: AddSkill, state=_GET_STATE_DEPENDENCY):
     """Install a skill package with the ``skills`` CLI."""
     try:
         result = state.skills.install_with_npx(body.spec)
@@ -72,8 +76,12 @@ def add_skill(body: AddSkill, state=Depends(get_state)):
     return {**_view(state), "output": result["output"], "spec": result["spec"]}
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_REQUIRED_UPLOAD_FILE = File(...)
+
 @router.post("/upload")
-async def upload_skill(file: UploadFile = File(...), state=Depends(get_state)):
+async def upload_skill(file: UploadFile = _REQUIRED_UPLOAD_FILE, state=_GET_STATE_DEPENDENCY):
     """Accept an operator-provided SKILL.md into the Custom folder."""
     if not file.filename:
         raise HTTPException(400, "a SKILL.md filename is required")
@@ -95,7 +103,7 @@ async def upload_skill(file: UploadFile = File(...), state=Depends(get_state)):
 
 
 @router.post("/move")
-def move_skill(body: MoveSkill, state=Depends(get_state)):
+def move_skill(body: MoveSkill, state=_GET_STATE_DEPENDENCY):
     """Reassign a skill to another folder (drag-and-drop in the UI)."""
     try:
         state.skills.move(body.repository, body.path, body.folder)
@@ -107,7 +115,7 @@ def move_skill(body: MoveSkill, state=Depends(get_state)):
 
 
 @router.patch("")
-def enable_skill(body: EnableSkill, state=Depends(get_state)):
+def enable_skill(body: EnableSkill, state=_GET_STATE_DEPENDENCY):
     try:
         state.skills.enable(body.repository, body.enabled)
     except KeyError as exc:

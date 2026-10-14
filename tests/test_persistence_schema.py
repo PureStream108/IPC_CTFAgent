@@ -157,7 +157,6 @@ def test_alembic_env_prefers_explicit_config_url_when_environment_is_empty(monke
 def _load_migration_env_for_test():
     import sys
     import types
-
     from contextlib import nullcontext
 
     context = types.SimpleNamespace(config=types.SimpleNamespace(config_file_name=None))

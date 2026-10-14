@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from psycopg.errors import UniqueViolation
+
 from backend.core.config import LLMConfig
 from backend.ops.models import PlatformWorkflowSpec, validate_secret_name
 from backend.persistence.database import Database, PostgresDatabase
-from psycopg.errors import UniqueViolation
 
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
 _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
@@ -22,6 +23,10 @@ _TERMINAL_RUN_STATUSES = {"completed", "interrupted", "error", "abandoned"}
 
 class WorkflowInUse(RuntimeError):
     """A workflow still referenced by a competition run cannot be deleted."""
+
+
+class WorkflowSessionConflict(RuntimeError):
+    """An Ops conversation attempted to switch its bound workflow."""
 
 
 class OpsStore:
@@ -120,7 +125,7 @@ class OpsStore:
         session_id = f"ops_{secrets.token_hex(8)}"
         with self._lock, self._connect() as connection:
             connection.execute(
-                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (%s, %s, %s, %s)",
+                "INSERT INTO sessions (id, title, created_at, updated_at, agent_workflow_id) VALUES (%s, %s, %s, %s, NULL)",
                 (session_id, title[:120] or "New conversation", now, now),
             )
         return self.get_session(session_id)
@@ -128,7 +133,7 @@ class OpsStore:
     def get_session(self, session_id: str) -> dict[str, str]:
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT id, title, created_at, updated_at FROM sessions WHERE id = %s",
+                "SELECT id, title, created_at, updated_at, agent_workflow_id FROM sessions WHERE id = %s",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -138,7 +143,7 @@ class OpsStore:
     def list_sessions(self) -> list[dict[str, str]]:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
+                "SELECT id, title, created_at, updated_at, agent_workflow_id FROM sessions ORDER BY updated_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -159,6 +164,40 @@ class OpsStore:
             ).fetchone()
         value = row["agent_session_id"] if row is not None else None
         return str(value) if value else None
+
+    def agent_workflow_id(self, session_id: str) -> str | None:
+        """Return the workflow permanently associated with an Ops session."""
+        self.get_session(session_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT agent_workflow_id FROM sessions WHERE id = %s", (session_id,)
+            ).fetchone()
+        value = row["agent_workflow_id"] if row is not None else None
+        return str(value) if value else None
+
+    def bind_agent_workflow(self, session_id: str, workflow_id: str) -> str:
+        """Bind a session once; switching workflows requires a new session."""
+        self.get_session(session_id)
+        workflow_id = str(workflow_id or "").strip()
+        if not workflow_id:
+            raise ValueError("workflow_id is required")
+        with self._lock, self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM workflows WHERE id=%s", (workflow_id,)).fetchone():
+                raise KeyError(workflow_id)
+            row = connection.execute(
+                "SELECT agent_workflow_id FROM sessions WHERE id=%s FOR UPDATE",
+                (session_id,),
+            ).fetchone()
+            current = row["agent_workflow_id"] if row else None
+            if current and str(current) != workflow_id:
+                raise WorkflowSessionConflict(
+                    "this Ops session is already bound to another workflow; create a new session"
+                )
+            connection.execute(
+                "UPDATE sessions SET agent_workflow_id=%s,updated_at=%s WHERE id=%s",
+                (workflow_id, _now(), session_id),
+            )
+        return workflow_id
 
     def set_agent_session_id(self, session_id: str, agent_session_id: str | None) -> None:
         self.get_session(session_id)
@@ -462,6 +501,15 @@ class OpsStore:
         workflow_id = f"wf_{secrets.token_hex(8)}"
         spec_json, digest = _serialize_spec(spec)
         with self._lock, self._connect() as connection:
+            if session_id is not None:
+                bound = connection.execute(
+                    "SELECT agent_workflow_id FROM sessions WHERE id=%s FOR UPDATE",
+                    (session_id,),
+                ).fetchone()
+                if bound and bound["agent_workflow_id"]:
+                    raise WorkflowSessionConflict(
+                        "this Ops session is already bound to another workflow; create a new session"
+                    )
             connection.execute(
                 """
                 INSERT INTO workflows (
@@ -471,6 +519,11 @@ class OpsStore:
                 """,
                 (workflow_id, session_id, source, spec.name, spec_json, digest, now, now),
             )
+            if session_id is not None:
+                connection.execute(
+                    "UPDATE sessions SET agent_workflow_id=%s,updated_at=%s WHERE id=%s",
+                    (workflow_id, now, session_id),
+                )
         if session_id is not None:
             session_values = self._secret_namespace("sessions", session_id)
             selected = {
@@ -501,6 +554,13 @@ class OpsStore:
             raise KeyError(workflow_id)
         return self.get_workflow(workflow_id)
 
+    def update_session_workflow(self, session_id: str, spec: PlatformWorkflowSpec) -> dict[str, Any]:
+        """Create the first proposal or update the workflow already bound to a session."""
+        bound = self.agent_workflow_id(session_id)
+        if bound:
+            return self.update_workflow(bound, spec)
+        return self.create_workflow(spec, session_id=session_id, source="agent")
+
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         with self._lock, self._connect() as connection:
             row = connection.execute("SELECT * FROM workflows WHERE id = %s", (workflow_id,)).fetchone()
@@ -520,6 +580,39 @@ class OpsStore:
         with self._lock, self._connect() as connection:
             rows = connection.execute("SELECT id FROM workflows ORDER BY updated_at DESC").fetchall()
         return [self.get_workflow(row["id"]) for row in rows]
+
+    def cleanup_duplicate_workflows(self) -> int:
+        """Remove unreferenced historical drafts while preserving provenance."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """SELECT w.id,w.session_id,w.status,w.updated_at,
+                          EXISTS (SELECT 1 FROM competition_runs r WHERE r.workflow_id=w.id) AS referenced
+                   FROM workflows w ORDER BY w.session_id NULLS LAST,w.updated_at DESC,w.id DESC"""
+            ).fetchall()
+            keep: set[str] = set()
+            keep.update(
+                row["agent_workflow_id"] for row in connection.execute(
+                    "SELECT agent_workflow_id FROM sessions WHERE agent_workflow_id IS NOT NULL"
+                ).fetchall()
+            )
+            latest: set[str] = set()
+            unbound_kept = False
+            for row in rows:
+                sid = row.get("session_id")
+                if sid and sid not in latest:
+                    latest.add(sid)
+                    keep.add(row["id"])
+                elif sid is None and not unbound_kept:
+                    keep.add(row["id"])
+                    unbound_kept = True
+                if row.get("referenced"):
+                    keep.add(row["id"])
+            doomed = [row["id"] for row in rows if row["id"] not in keep and row.get("status") == "draft"]
+            if doomed:
+                connection.execute("DELETE FROM workflows WHERE id = ANY(%s)", (doomed,))
+        for workflow_id in doomed:
+            self._delete_secret_namespace("workflows", workflow_id)
+        return len(doomed)
 
     def delete_workflow(self, workflow_id: str) -> bool:
         with self._lock, self._connect() as connection:

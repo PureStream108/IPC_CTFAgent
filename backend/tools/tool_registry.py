@@ -4,9 +4,9 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection
 
 import yaml
 

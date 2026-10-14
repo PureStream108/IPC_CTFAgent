@@ -15,6 +15,10 @@ class ResourceManager:
     def acquire_task(self, project_id: str) -> bool:
         return self.limiter.acquire(project_id)
 
+    def acquire_coordinated_task(self, project_id: str) -> bool:
+        """Track cleanup for work already admitted by the competition scheduler."""
+        return self.limiter.acquire(project_id, externally_scheduled=True)
+
     def reclaim_orphaned_projects(self, active_project_ids: set[str]) -> list[str]:
         orphaned = sorted(pid for pid in self.pool.active_projects() if pid not in active_project_ids)
         for project_id in orphaned:

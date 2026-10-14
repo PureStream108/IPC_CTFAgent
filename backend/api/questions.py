@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from backend.api.deps import get_state
 from backend.competition.store import CompetitionConflict
 from backend.ops.questions import QuestionStore
+from backend.ops.store import WorkflowSessionConflict
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -13,18 +14,24 @@ class Answer(BaseModel):
     value: str = Field(min_length=1, max_length=16384)
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("")
-def pending_questions(session_id: str, state=Depends(get_state)):
+def pending_questions(session_id: str, state=_GET_STATE_DEPENDENCY):
     return {"questions": QuestionStore(state).list(session_id)}
 
 
 @router.post("/{question_id}/answer")
-def answer_question(question_id: str, body: Answer, state=Depends(get_state)):
+def answer_question(question_id: str, body: Answer, state=_GET_STATE_DEPENDENCY):
     try:
         return QuestionStore(state).answer(question_id, body.session_id, body.value)
     except KeyError as exc:
         raise HTTPException(404, "Question not found") from exc
     except CompetitionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except WorkflowSessionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

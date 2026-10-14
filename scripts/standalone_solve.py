@@ -5,10 +5,10 @@ import os
 import sys
 import time
 from pathlib import Path
+
 from psycopg import OperationalError
 
-from backend.blackboard import edge_store
-from backend.blackboard import graph_store
+from backend.blackboard import edge_store, graph_store
 from backend.core.orchestrator import Orchestrator
 from backend.core.state import AppState
 

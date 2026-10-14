@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.server.app import create_app
 from tests.helpers import setup_test_auth, write_mock_config
-
 
 pytestmark = pytest.mark.postgres
 
@@ -54,7 +55,7 @@ def workflow():
 def test_competition_lifecycle_is_revisioned_and_idempotent(client, monkeypatch):
     class Response:
         status_code = 200
-        headers = {}
+        headers: ClassVar[dict] = {}
 
         def raise_for_status(self):
             return None
@@ -135,7 +136,7 @@ def _two_challenge_platform(monkeypatch):
 
     class Response:
         status_code = 200
-        headers = {}
+        headers: ClassVar[dict] = {}
 
         def raise_for_status(self):
             return None

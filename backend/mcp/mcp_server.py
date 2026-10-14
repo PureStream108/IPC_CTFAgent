@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -66,7 +67,10 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
             lifespan=close_lifespan(store.close),
         )
     if name in {"tool_search", "tools"}:
-        from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
+        from backend.tools.tool_mcp import (
+            build_category_tools_mcp,
+            build_tool_search_mcp,
+        )
         from backend.tools.tool_registry import ToolRegistry
 
         registry = ToolRegistry().load()

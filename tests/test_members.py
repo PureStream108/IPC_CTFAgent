@@ -8,15 +8,14 @@ from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.db import Database
 from backend.core.config import LLMConfig, MemberConfig
 from backend.core.logging_util import IPCLogger
+from backend.mcp.mcp_client import MCPClient, MCPRegistry, MCPRegistrySession
+from backend.mcp.shared import build_browser_mcp
 from backend.members.adapters import MemberAction, _extract_json, make_adapter
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
-from backend.mcp.mcp_client import MCPClient, MCPRegistry, MCPRegistrySession
-from backend.mcp.shared import build_browser_mcp
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
-from backend.sandbox.sandbox import ExecResult
-from backend.sandbox.sandbox import LocalSandbox
+from backend.sandbox.sandbox import ExecResult, LocalSandbox
 from backend.tools.tool_registry import ToolRegistry
 
 
@@ -51,8 +50,11 @@ def test_mcp_registry_opens_servers_lazily():
     assert unused.exited == 0
 
 
-@pytest.fixture
-def deps(tmp_path):
+@pytest.fixture(params=[False, True], ids=["streaming", "legacy"])
+def deps(tmp_path, request, monkeypatch):
+    # Both supported drivers must preserve the same flag, graph, validation,
+    # interruption, and observation contracts.
+    monkeypatch.setattr("backend.members.base_member.MEMBER_LEGACY_DRIVER", request.param)
     db = Database().configure()
     mem = MemoryStore(db).configure()
     reg = ToolRegistry().load()
@@ -70,7 +72,11 @@ def deps(tmp_path):
         on_flag=lambda pid: flags.append(pid),
         expected_flag="flag{test}",
     )
-    return db, d, reports, flags
+    try:
+        yield db, d, reports, flags
+    finally:
+        sb.stop()
+        db.close()
 
 
 def _project(db):
@@ -118,7 +124,7 @@ def test_adapter_extracts_common_non_strict_json_shapes(raw, kind):
 
 
 def test_initial_member_solves_to_flag(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="aventurine", api_format="mock")
     script = [
@@ -144,7 +150,7 @@ def test_initial_member_solves_to_flag(deps):
 
 
 def test_member_interrupt_after_model_call_prevents_returned_action(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     member = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
 
@@ -163,7 +169,7 @@ def test_member_interrupt_after_model_call_prevents_returned_action(deps):
 
 
 def test_continuous_member_is_not_stopped_by_legacy_action_budget(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 1
     d.continuous = True
@@ -187,7 +193,7 @@ def test_continuous_member_is_not_stopped_by_legacy_action_budget(deps):
 
 
 def test_member_restores_observations_after_failed_model_call(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 3
     first = create_member(MemberConfig(name="aventurine", api_format="mock"), d)
@@ -222,7 +228,7 @@ def test_member_restores_observations_after_failed_model_call(deps):
 
 
 def test_followup_member_concludes(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="pearl", api_format="mock")
     script = [
@@ -350,7 +356,7 @@ def test_member_dispatch_validation_error_is_non_retryable(deps):
 
 
 def test_member_reports_difficulty_on_eval_step(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     cfg = MemberConfig(name="aventurine", api_format="mock")
     script = [
@@ -370,7 +376,7 @@ def test_member_reports_difficulty_on_eval_step(deps):
 
 
 def test_scripted_member_tool_and_done(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     script = [
         {"action": "tool", "server": "browser", "tool": "navigate", "args": {"url": "http://t"}},
@@ -425,7 +431,7 @@ def test_member_observes_shared_webui_proxy(tmp_path):
 
 
 def test_member_stalls_after_repeated_invalid_bash(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 5
     script = [
@@ -448,7 +454,7 @@ def test_member_stalls_after_repeated_unavailable_cli_tool(deps, tmp_path):
                 return ExecResult(127, "", "bash: line 1: rg: command not found")
             return super().exec(command, timeout=timeout)
 
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     sandbox = MissingRgSandbox("missing-rg", tmp_path / "missing-rg")
     sandbox.start()
     d.sandbox = sandbox
@@ -487,7 +493,7 @@ def test_member_bash_cannot_reach_host_paths(deps, tmp_path):
             self.commands.append(command)
             return super().exec(command, timeout=timeout)
 
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     sandbox = RecordingSandbox("host-escape", tmp_path / "host-escape")
     sandbox.start()
     d.sandbox = sandbox
@@ -530,7 +536,7 @@ def test_member_installs_a_missing_library_into_its_container(deps, tmp_path):
                 return ExecResult(0, "Successfully installed pymupdf-1.24.0", "")
             return super().exec(command, timeout=timeout)
 
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     sandbox = InstallSandbox("installer", tmp_path / "installer")
     sandbox.start()
     d.sandbox = sandbox
@@ -556,7 +562,7 @@ def test_member_installs_a_missing_library_into_its_container(deps, tmp_path):
 
 
 def test_member_install_rejects_an_unsupported_manager(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     d.max_actions_per_task = 5
     pid, iid = _project(db)
     script = [
@@ -574,7 +580,7 @@ def test_member_install_rejects_an_unsupported_manager(deps):
 
 
 def test_scripted_member_category_tools_mcp(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     script = [
         {"action": "tool", "server": "tools", "tool": "get_tool", "args": {"name": "sqlmap"}},
@@ -612,7 +618,7 @@ def test_scripted_member_category_tools_mcp(deps):
 
 
 def test_member_context_uses_sandbox_visible_attachment_paths(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     with db.connect() as conn:
         graph_store.create_attachment(
@@ -640,7 +646,7 @@ def test_member_context_uses_sandbox_visible_attachment_paths(deps):
 
 
 def test_member_context_includes_challenge_description_and_external_id(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     origin = "https://ctf.example/challenges\n\nConnect: nc 10.0.0.1 9999\nFlag format: flag{...}"
     with db.connect() as conn:
         pid = graph_store.create_project(
@@ -659,7 +665,7 @@ def test_member_context_includes_challenge_description_and_external_id(deps):
 
 
 def test_member_context_defaults_without_external_id(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     member = create_member(MemberConfig(name="jade", api_format="mock"), d)
 
@@ -670,7 +676,7 @@ def test_member_context_defaults_without_external_id(deps):
 
 
 def test_member_report_defaults_to_low_when_unspecified(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 2
     script = [
@@ -686,7 +692,7 @@ def test_member_report_defaults_to_low_when_unspecified(deps):
 
 
 def test_member_suppresses_same_difficulty_without_new_evidence(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 3
     script = [
@@ -704,7 +710,7 @@ def test_member_suppresses_same_difficulty_without_new_evidence(deps):
 
 
 def test_member_reports_same_difficulty_when_evidence_accumulates(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 3
     script = [
@@ -723,7 +729,7 @@ def test_member_reports_same_difficulty_when_evidence_accumulates(deps):
 
 
 def test_no_new_fact_accumulates_for_same_intent_across_members(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     intent_tag = f"intent:{iid}"
     with db.connect() as conn:
@@ -751,7 +757,7 @@ def test_no_new_fact_accumulates_for_same_intent_across_members(deps):
 
 
 def test_member_duplicate_intent_does_not_count_as_progress(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 1
     script = [
@@ -769,7 +775,7 @@ def test_member_duplicate_intent_does_not_count_as_progress(deps):
 
 
 def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps):
-    db, d, reports, flags = deps
+    db, d, reports, _flags = deps
     pid, iid = _project(db)
     with db.connect() as conn:
         node_store.create_fact(
@@ -800,7 +806,7 @@ def test_source_disclosure_does_not_escalate_from_speculative_open_intents(deps)
 
 
 def test_member_creates_at_most_one_new_intent_per_task(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     d.max_actions_per_task = 3
     script = [
@@ -818,7 +824,7 @@ def test_member_creates_at_most_one_new_intent_per_task(deps):
 
 
 def test_member_defaults_new_intent_to_latest_fact_and_draws_link(deps):
-    db, d, reports, flags = deps
+    db, d, _reports, _flags = deps
     pid, iid = _project(db)
     with db.connect() as conn:
         fact = node_store.create_fact(conn, pid, "found debug endpoint")

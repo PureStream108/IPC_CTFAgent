@@ -12,7 +12,7 @@ from backend.api.deps import get_state
 from backend.competition.service import CompetitionService
 from backend.competition.store import CompetitionConflict
 from backend.core.state import AppState
-
+from backend.core.validation import InputValidationError
 
 router = APIRouter(prefix="/api", tags=["competition"])
 
@@ -30,7 +30,7 @@ class StartRequest(BaseModel):
         cleaned: list[str] = []
         for item in value:
             if not isinstance(item, str):
-                raise ValueError("challenge ids must be strings")
+                raise InputValidationError("challenge ids must be strings")
             item = item.strip()
             if not item or len(item) > 256:
                 raise ValueError("challenge ids must be 1 to 256 characters")
@@ -46,6 +46,15 @@ class ControlRequest(BaseModel):
     revision: int = Field(ge=1)
 
 
+class LimitsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=1)
+    limits: dict[str, int] = Field(default_factory=dict)
+    max_concurrent_tasks: int | None = None
+    total_cpu: int | None = None
+    remote_concurrency: int | None = None
+
+
 class CandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: str = Field(min_length=1, max_length=128)
@@ -55,7 +64,11 @@ class CandidateRequest(BaseModel):
     instance_generation: int = Field(ge=0)
 
 
-def get_competition(state: AppState = Depends(get_state)) -> CompetitionService:
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
+def get_competition(state: AppState = _GET_STATE_DEPENDENCY) -> CompetitionService:
     service = getattr(state, "competition", None)
     if service is None:
         service = CompetitionService(state)
@@ -72,15 +85,23 @@ def _call(function, *args, **kwargs):
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except CompetitionConflict as exc:
-        raise HTTPException(409, str(exc)) from exc
+        headers = {}
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after is not None:
+            headers["Retry-After"] = str(retry_after)
+        raise HTTPException(409, str(exc), headers=headers) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_COMPETITION_DEPENDENCY = Depends(get_competition)
+
 @router.post("/workflows/{workflow_id}/preflight")
 def preflight(
     workflow_id: str,
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return _call(service.preflight, workflow_id)
 
@@ -89,7 +110,7 @@ def preflight(
 def start(
     workflow_id: str,
     body: StartRequest,
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return _call(service.start, workflow_id, body.idempotency_key, body.select)
 
@@ -97,18 +118,18 @@ def start(
 @router.get("/runs")
 def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return {"runs": service.store.list_runs(limit)}
 
 
 @router.get("/runs/{run_id}")
-def get_run(run_id: str, service: CompetitionService = Depends(get_competition)):
+def get_run(run_id: str, service: CompetitionService = _GET_COMPETITION_DEPENDENCY):
     return _call(service.store.run_snapshot, run_id)
 
 
 @router.get("/runs/{run_id}/members")
-def get_members(run_id: str, service: CompetitionService = Depends(get_competition)):
+def get_members(run_id: str, service: CompetitionService = _GET_COMPETITION_DEPENDENCY):
     return {"members": _call(service.store.member_snapshot, run_id)}
 
 
@@ -117,9 +138,23 @@ def control_run(
     run_id: str,
     action: Literal["pause", "resume", "stop", "refresh"],
     body: ControlRequest,
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return _call(service.control, run_id, action, body.revision)
+
+
+@router.patch("/runs/{run_id}/limits")
+def patch_run_limits(
+    run_id: str,
+    body: LimitsRequest,
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
+):
+    limits = {**body.limits}
+    for key in ("max_concurrent_tasks", "total_cpu", "remote_concurrency"):
+        value = getattr(body, key)
+        if value is not None:
+            limits[key] = value
+    return _call(service.update_limits, run_id, limits, body.revision)
 
 
 @router.get("/runs/{run_id}/events")
@@ -127,7 +162,7 @@ def run_events(
     run_id: str,
     after: int = Query(default=0, ge=0),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     cursor = after
     if last_event_id:
@@ -170,7 +205,7 @@ def run_events(
 def run_observations(
     run_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return {"observations": _call(service.store.observations, run_id, limit=limit)}
 
@@ -180,7 +215,7 @@ def session_events(
     session_id: str,
     after: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=500),
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     _call(service.store.session, session_id)
     return {"events": service.store.events(session_id, after, limit)}
@@ -190,7 +225,7 @@ def session_events(
 def submit_candidate(
     challenge_id: str,
     body: CandidateRequest,
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return _call(
         service.submit_candidate,
@@ -206,11 +241,11 @@ def submit_candidate(
 @router.get("/submissions/{submission_id}")
 def get_submission(
     submission_id: str,
-    service: CompetitionService = Depends(get_competition),
+    service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return _call(service.store.submission, submission_id)
 
 
 @router.post("/wp-jobs/{job_id}/retry")
-def retry_wp(job_id: str, service: CompetitionService = Depends(get_competition)):
+def retry_wp(job_id: str, service: CompetitionService = _GET_COMPETITION_DEPENDENCY):
     return _call(service.retry_wp, job_id)

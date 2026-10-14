@@ -110,4 +110,8 @@ with sync_playwright() as playwright:
 PY
 fi
 
+if [[ -n "${IPC_E2E_BASE_URL:-}" ]]; then
+  run "IPC competition Playwright E2E" python3 /acceptance/playwright_e2e.py
+fi
+
 printf '\n[C5] all task-image checks passed\n'

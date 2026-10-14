@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Collection
+from collections.abc import Callable, Collection
+from typing import Any
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.tools.tool_registry import ToolRegistry

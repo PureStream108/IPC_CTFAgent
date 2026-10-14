@@ -6,10 +6,12 @@ model turn and never silently retries after receiving part of a response.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
@@ -19,6 +21,8 @@ from backend.members.adapters import (
     opencode_provider_headers,
 )
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 @dataclass
 class ToolCall:
@@ -169,6 +173,7 @@ class ConversationAdapter:
         )
         self._provider_session = provider_session_id or f"ipc-session-{uuid.uuid4().hex[:16]}"
         self._stream_usage_supported = True
+        self.on_first_response: Callable[[], None] | None = None
 
     @property
     def provider_session_id(self) -> str:
@@ -254,6 +259,7 @@ class ConversationAdapter:
         try:
             detail = response.text or ""
         except Exception:
+            _recovery_logger.debug('Error handled in _should_drop_stream_options', exc_info=True)
             detail = ""
         return "stream_options" in detail or "include_usage" in detail
 
@@ -266,7 +272,12 @@ class ConversationAdapter:
         complete = False
         truncated: str | None = None
         usage: dict | None = None
+        first_event = True
         for event in sse(response):
+            if first_event:
+                first_event = False
+                if self.on_first_response is not None:
+                    self.on_first_response()
             if cancel.is_set():
                 raise InterruptedError("session cancelled")
             delta_text = ""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +12,8 @@ from backend.sandbox.errors import (
     classify_docker_startup_error,
 )
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 @dataclass
 class ChallengeEnv:
@@ -106,6 +108,7 @@ class NetworkManager:
             env.error = str(env.startup_error)
             return False
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _docker_up', exc_info=True)
             env.startup_error = classify_docker_startup_error(
                 exc,
                 "start challenge environment",
@@ -137,4 +140,4 @@ class NetworkManager:
             else:
                 subprocess.run(["docker", "rm", "-f", env.network_name], check=False, capture_output=True)
         except Exception:
-            pass
+            _recovery_logger.debug('Error handled in _docker_down', exc_info=True)

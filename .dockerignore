@@ -5,7 +5,14 @@
 **/__pycache__
 **/*.pyc
 .pytest_cache
+.ruff_cache
+coverage.json
 .venv
+.env
+.env.*
+.qa-artifacts/
+testconfigkey.txt
+backend/config/config.yaml
 tools/
 data/
 logs/

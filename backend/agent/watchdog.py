@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 DIAGNOSE_AFTER = 300
 CANCEL_AFTER = 900
 HANDOFF_AFTER = 1800

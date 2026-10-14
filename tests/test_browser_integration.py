@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import threading
 
 import pytest
 
@@ -11,7 +11,6 @@ pytest.importorskip("playwright.async_api")
 
 from backend.mcp.mcp_client import MCPClient
 from backend.mcp.shared import _BrowserSession, build_browser_mcp
-
 
 _PAGE = b"""<!doctype html>
 <html>

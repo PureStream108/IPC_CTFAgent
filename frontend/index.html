@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>IPC Agent</title>
-  <link rel="icon" type="image/png" href="/static/Interastral_Peace_Corporation_2.png" />
+  <link rel="icon" type="image/png" href="/static/ipc.png" />
   <script src="/static/vendor/tailwindcss.js"></script>
   <script src="/static/vendor/dagre.min.js"></script>
   <script src="/static/vendor/cytoscape.min.js"></script>
@@ -542,6 +542,7 @@
       <div class="mx-auto max-w-[1500px] px-4 py-4 space-y-4">
         <div x-show="competitionPreflight" class="border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 text-xs text-teal-800">
           <span x-text="competitionPreflight?.challenge_count+' challenges, '+competitionPreflight?.remote_count+' remote'"></span>
+          <span class="ml-3 text-teal-600" x-show="competitionPreflight?.limits" x-text="'local '+competitionPreflight?.limits?.local_concurrency+' · remote '+competitionPreflight?.limits?.remote_concurrency"></span>
           <span class="ml-3 text-teal-600" x-text="competitionPreflight?.identity_key"></span>
         </div>
         <div x-show="competitionError" class="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-700" x-text="competitionError"></div>
@@ -555,6 +556,8 @@
                   <span class="text-teal-700" x-text="competitionRun.capacity.solving+' solving'"></span>
                   <span class="mx-2 text-amber-700" x-text="competitionRun.capacity.writing+' WP'"></span>
                   <span x-text="competitionRun.capacity.idle+' idle'"></span>
+                  <span class="ml-2 text-emerald-700" data-testid="competition-score" x-show="competitionRun.challenges.some(c=>typeof c.metadata.score==='number')" x-text="competitionRun.challenges.filter(c=>c.state==='solved').reduce((total,c)=>total+(c.metadata.score||0),0)+' solved challenge points'"></span>
+                  <span class="ml-2 text-slate-500" x-show="competitionRun.resource_capacity" x-text="'local '+competitionRun.resource_capacity.local.used+'/'+competitionRun.resource_capacity.local.limit+' · remote '+competitionRun.resource_capacity.remote.used+'/'+competitionRun.resource_capacity.remote.limit"></span>
                 </div>
               </div>
               <div class="grid grid-cols-2 sm:grid-cols-5 xl:grid-cols-10 gap-2">
@@ -578,23 +581,26 @@
               <div class="border border-slate-200 bg-white rounded-lg overflow-hidden">
                 <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
                   <h3 class="text-xs font-semibold uppercase text-slate-500">Challenges</h3>
-                  <span class="text-[11px] text-slate-400" x-text="competitionRun.challenges.length+' total'"></span>
+                  <span class="text-[11px] text-slate-400" x-text="competitionChallengeGroups().map(group=>group.items.length+' '+group.label.toLowerCase()).join(' · ')"></span>
                 </div>
                 <div class="overflow-x-auto">
                   <table class="w-full text-xs">
                     <thead class="bg-slate-50 text-slate-400 uppercase text-[10px]"><tr><th class="text-left px-3 py-2">Challenge</th><th class="text-left px-3 py-2">Category</th><th class="text-left px-3 py-2">State</th><th class="text-left px-3 py-2">Members</th><th class="text-left px-3 py-2">Deadline</th><th class="text-right px-3 py-2">Wrong</th></tr></thead>
-                    <tbody class="divide-y divide-slate-100">
-                      <template x-for="challenge in competitionRun.challenges" :key="challenge.id">
-                        <tr class="hover:bg-slate-50">
-                          <td class="px-3 py-2"><div class="font-medium text-slate-700" x-text="challenge.metadata.title||challenge.external_id"></div><div class="text-[10px] text-slate-400" x-text="challenge.external_id"></div></td>
-                          <td class="px-3 py-2 text-slate-500" x-text="challenge.metadata.category||'misc'"></td>
-                          <td class="px-3 py-2"><span class="rounded px-1.5 py-0.5" :class="competitionChallengeClass(challenge.state)" x-text="challenge.state"></span></td>
-                          <td class="px-3 py-2 text-slate-500" x-text="challenge.assignments.map(a=>displayMember(a.member)).join(', ')||'-'"></td>
-                          <td class="px-3 py-2 text-slate-500 tabular-nums" x-text="competitionDeadline(challenge.deadline_at)"></td>
-                          <td class="px-3 py-2 text-right tabular-nums" x-text="challenge.wrong_count"></td>
-                        </tr>
-                      </template>
-                    </tbody>
+                    <template x-for="group in competitionChallengeGroups()" :key="group.label">
+                      <tbody class="divide-y divide-slate-100" x-show="group.items.length">
+                        <tr class="bg-slate-50" x-show="group.items.length"><td colspan="6" class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500" x-text="group.label"></td></tr>
+                        <template x-for="challenge in group.items" :key="challenge.id">
+                          <tr class="hover:bg-slate-50">
+                                <td class="px-3 py-2"><div class="font-medium text-slate-700" x-text="challenge.metadata.title||challenge.external_id"></div><div class="text-[10px] text-slate-400" x-text="challenge.external_id"></div><div class="text-[10px] text-amber-600" x-show="challenge.metadata.queue_reason" x-text="challenge.metadata.queue_reason"></div></td>
+                            <td class="px-3 py-2 text-slate-500" x-text="challenge.metadata.category||'misc'"></td>
+                            <td class="px-3 py-2"><span class="rounded px-1.5 py-0.5" :class="competitionChallengeClass(challenge.state)" x-text="challenge.state"></span></td>
+                            <td class="px-3 py-2 text-slate-500" x-text="challenge.assignments.map(a=>displayMember(a.member)).join(', ')||'-'"></td>
+                            <td class="px-3 py-2 text-slate-500 tabular-nums" x-text="competitionDeadline(challenge.deadline_at)"></td>
+                            <td class="px-3 py-2 text-right tabular-nums" x-text="challenge.wrong_count"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </template>
                   </table>
                 </div>
               </div>
@@ -1054,11 +1060,10 @@
                       </template>
                     </div>
                     <div class="mt-2 flex gap-1.5">
-                      <input class="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-xs"
-                        :type="question.sensitive?'password':'text'"
-                        :placeholder="question.sensitive?'Value is stored as a workflow secret':'Your answer'"
+                      <textarea class="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-xs resize-y"
+                        rows="2" placeholder="Your answer"
                         x-model="questionAnswers[question.id]"
-                        @keydown.enter="answerQuestion(question.id)">
+                        @keydown.enter="onQuestionEnter($event, question.id)"></textarea>
                       <button class="btn rounded-lg px-3 py-1.5 text-xs disabled:opacity-40"
                         :disabled="questionBusy||!(questionAnswers[question.id]||'').trim()"
                         @click="answerQuestion(question.id)">Answer</button>
@@ -1172,25 +1177,8 @@
                 <pre class="mt-2 max-h-40 overflow-auto rounded-lg bg-slate-900 p-2 text-[10px] text-slate-300 whitespace-pre-wrap" x-text="JSON.stringify(selectedOpsWorkflow().spec,null,2)"></pre>
               </div>
 
-              <div class="rounded-xl border border-slate-200 bg-white p-3">
-                <div class="text-xs font-semibold text-slate-600 mb-2">Workflow secret</div>
-                <div class="flex flex-wrap gap-1 mb-2">
-                  <template x-for="secret in selectedOpsWorkflow().secrets" :key="secret.name"><span class="rounded-md px-2 py-0.5 text-[10px]" :class="secret.secret_set?'bg-emerald-50 text-emerald-700':'bg-rose-50 text-rose-600'" x-text="secret.name+(secret.secret_set?' set':' missing')"></span></template>
-                </div>
-                <div class="flex gap-1.5">
-                  <input class="w-28 rounded-lg px-2 py-1 text-xs" x-model="workflowSecret.name" placeholder="alias">
-                  <input type="password" class="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs" x-model="workflowSecret.value" placeholder="value">
-                  <button class="btn-ghost rounded-lg px-2 py-1 text-xs" @click="saveWorkflowSecret()">Set</button>
-                </div>
-              </div>
-
               <div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3" x-show="!workflowTokens[selectedOpsWorkflow().id]">
                 <div class="text-[11px] leading-relaxed text-amber-800">Review the URLs, methods and templates above before authorizing.</div>
-                <div class="mt-2 flex flex-wrap gap-1" x-show="(opsConfirmMissing[selectedOpsWorkflow().id]||[]).length" x-cloak>
-                  <template x-for="name in opsConfirmMissing[selectedOpsWorkflow().id]||[]" :key="name">
-                    <span class="rounded-md bg-rose-50 px-2 py-0.5 text-[10px] text-rose-600" x-text="name+' missing'"></span>
-                  </template>
-                </div>
                 <button class="mt-2 btn w-full rounded-lg px-2 py-1.5 text-xs disabled:opacity-40"
                   :disabled="opsWorkflowBusy" @click="authorizeOpsWorkflow()"
                   x-text="opsWorkflowBusy?'Authorizing…':'Authorize workflow'"></button>
@@ -1266,9 +1254,9 @@
       opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsRunId: null, opsNextCalls: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
       opsAnswer: "", opsReasoning: "", opsReasoningOpen: false, opsToolNames: [], opsToolsOpen: false,
       opsError: "", opsRetryMessage: null, opsRunStartedAt: 0, projectPhaseErrorOpen: false,
-      opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowSecret: {name:"",value:""},
+      opsWorkflows: [], opsWorkflowId: null, workflowTokens: {},
       opsConfirmInput: "", opsResult: null,
-      opsWorkflowBusy: false, opsConfirmError: "", opsConfirmMissing: {},
+      opsWorkflowBusy: false, opsConfirmError: "",
       opsStartBusy: false, opsStartError: "",
       projectStatusFilter: [], projectFilterOpen: false,
       competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
@@ -1288,7 +1276,7 @@
         this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
         this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsRunId=null; this.opsNextCalls=[]; this.opsAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsUploading=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
         this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[]; this.opsError=""; this.opsRetryMessage=null;
-        this.workflowTokens={}; this.workflowSecret={name:"",value:""}; this.opsResult=null;
+        this.workflowTokens={}; this.opsResult=null;
         this.competitionRuns=[]; this.competitionRun=null; this.competitionMembers=[]; this.competitionEvents=[];
         if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
         this.sessionHealth=[]; this.sessionEvents=[]; this.sessionEventCursor=0;
@@ -1932,6 +1920,11 @@
         if(!this.opsInput.trim() || !this.opsCfg?.configured) return;
         this.sendOpsMessage();
       },
+      onQuestionEnter(event, questionId){
+        if(event.isComposing || event.keyCode===229 || event.shiftKey) return;
+        event.preventDefault();
+        this.answerQuestion(questionId);
+      },
       autoGrowOpsInput(){
         const element=this.$refs.opsInputBox; if(!element) return;
         element.style.height="auto";
@@ -2291,6 +2284,13 @@
         const challenge=this.competitionRun?.challenges?.find(item=>item.id===challengeId);
         return challenge?.metadata?.title||"";
       },
+      competitionChallengeGroups(){
+        const challenges=this.competitionRun?.challenges||[];
+        return [
+          {label:"Ordinary challenges",items:challenges.filter(item=>!item.metadata?.remote)},
+          {label:"Container challenges",items:challenges.filter(item=>!!item.metadata?.remote)},
+        ];
+      },
       competitionStatusClass(){
         const status=this.competitionRun?.run?.status;
         return status==="running"?"bg-teal-50 text-teal-700":status==="paused"?"bg-amber-50 text-amber-700":status==="blocked"?"bg-rose-50 text-rose-700":"bg-slate-100 text-slate-600";
@@ -2314,15 +2314,7 @@
       },
       selectOpsWorkflow(workflowId){
         this.opsWorkflowId = this.opsWorkflowId===workflowId ? null : workflowId;
-        this.opsConfirmInput=""; this.opsResult=null; this.workflowSecret={name:"",value:""};
-      },
-      async saveWorkflowSecret(){
-        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
-        const name=this.workflowSecret.name.trim().toLowerCase(), value=this.workflowSecret.value;
-        if(!/^[a-z][a-z0-9_]{0,63}$/.test(name)||!value){ this.flash("enter a valid workflow secret"); return; }
-        const updated=await this.api("PUT","/api/ops/workflows/"+workflow.id+"/secrets",{secrets:{[name]:value}});
-        this.opsWorkflows=this.opsWorkflows.map(item=>item.id===updated.id?updated:item);
-        this.workflowSecret={name:"",value:""}; this.flash("workflow secret saved");
+        this.opsConfirmInput=""; this.opsResult=null;
       },
       async confirmOpsWorkflow(){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
@@ -2336,9 +2328,8 @@
         this.opsWorkflowBusy=true; this.opsConfirmError="";
         try{
           const preview=await this.api("GET","/api/ops/workflows/"+workflow.id+"/confirmation");
-          this.opsConfirmMissing={...this.opsConfirmMissing,[workflow.id]:preview.missing_secrets||[]};
           if((preview.missing_secrets||[]).length){
-            this.opsConfirmError="Set the missing workflow secrets first: "+preview.missing_secrets.join(", ");
+            this.opsConfirmError="The workflow is missing required configuration; answer the pending IPC question first.";
             return;
           }
           this.opsConfirmInput=preview.confirmation_phrase;
@@ -2465,17 +2456,16 @@
       async answerQuestion(questionId){
         const question=this.pendingQuestions.find(item=>item.id===questionId)||this.pendingQuestions[0];
         if(this.questionBusy||!question) return;
-        const value=(this.questionAnswers[question.id]||"").trim();
-        if(!value) return;
+        const value=this.questionAnswers[question.id]||"";
+        if(!value.trim()) return;
         this.questionBusy=true; this.questionError="";
         try{
           await this.api("POST","/questions/"+question.id+"/answer",{session_id:this.opsSessionId,value});
           delete this.questionAnswers[question.id];
           await this.loadQuestions();
-          const shown=question.sensitive?"******":value;
           this.opsNextCalls.push({
             id:"answer-"+question.id,
-            message:"已回答问题「"+question.title+"」："+shown
+            message:"已回答问题「"+question.title+"」："+value
               +"\n\n请使用该问题原本的 operation key 读取答案，并继续之前的操作。",
             attachments:[]
           });

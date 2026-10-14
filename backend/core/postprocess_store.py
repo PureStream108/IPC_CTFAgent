@@ -4,7 +4,6 @@ import secrets
 from dataclasses import dataclass
 from typing import Any
 
-
 POSTPROCESS_KINDS = ("writeup", "memory", "archive")
 
 

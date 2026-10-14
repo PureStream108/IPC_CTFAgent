@@ -4,7 +4,7 @@ from psycopg.types.json import Jsonb
 
 from backend.competition.store import CompetitionConflict, new_id
 from backend.ops.models import validate_secret_name
-from backend.ops.store import OpsStore
+from backend.ops.store import OpsStore, WorkflowSessionConflict
 
 
 class QuestionStore:
@@ -27,6 +27,14 @@ class QuestionStore:
         with self.state.db.connect() as connection:
             if not connection.execute("SELECT id FROM sessions WHERE id=%s", (session_id,)).fetchone():
                 raise ValueError("question session not found")
+            if workflow_id:
+                bound = connection.execute(
+                    "SELECT agent_workflow_id FROM sessions WHERE id=%s", (session_id,)
+                ).fetchone()
+                if bound and bound["agent_workflow_id"] and bound["agent_workflow_id"] != workflow_id:
+                    raise WorkflowSessionConflict(
+                        "question targets another workflow; create a new Ops session"
+                    )
             connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (scoped_key,))
             old = connection.execute("SELECT * FROM competition_questions WHERE operation_key=%s", (scoped_key,)).fetchone()
             if old:

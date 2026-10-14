@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from backend.core.validation import InputValidationError
 
 ENGINE_KINDS = {"legacy", "competition"}
 
@@ -117,7 +118,7 @@ def release_engine_leases_for_owner(
 
     _validate(kind, owner, 60)
     if not isinstance(epochs, Mapping):
-        raise ValueError("engine lease epochs are required")
+        raise InputValidationError("engine lease epochs are required")
     released = 0
     for project_id, epoch in epochs.items():
         if not isinstance(epoch, int) or epoch < 1:

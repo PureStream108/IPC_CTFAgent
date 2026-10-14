@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
-from backend.platform.gzctf import GZCTFAdapter, GZCTFPreflightError
-from backend.platform.mapping import FieldMapping
 from backend.competition.platform import CompetitionPlatform
 from backend.ops.models import PlatformWorkflowSpec
+from backend.platform.gzctf import GZCTFAdapter, GZCTFPreflightError
+from backend.platform.mapping import FieldMapping
 
 
 class _Response:
@@ -420,3 +421,132 @@ def test_platform_reported_container_limit_wins_over_silence():
     assert _adapter(_ContainerClient(limit=3)).instance_limit() == 3
     assert _adapter(_ContainerClient(limit=0)).instance_limit() is None
     assert _adapter(_ContainerClient()).instance_limit() is None
+
+
+def test_competition_platform_fallbacks_and_lifecycle_errors(monkeypatch):
+    class _HttpResponse:
+        status_code = 200
+        headers: ClassVar[dict] = {}
+
+        @staticmethod
+        def json():
+            return {"verdict": "correct", "submission": "s-1"}
+
+    class _Http:
+        @staticmethod
+        def get(url, headers=None):
+            assert url.endswith("/challenge%2F1/sub-1")
+            assert headers == {"Authorization": "secret"}
+            return _HttpResponse()
+
+    class _Store:
+        @staticmethod
+        def workflow_secrets(_workflow_id):
+            return {"token": "secret"}
+
+    class _Adapter:
+        identity = "https://platform.example/account/a"
+        supports_submit = False
+        supports_instances = True
+
+        def fetch_challenges(self):
+            return ["fetched"]
+
+        def submit(self, external_id, flag):
+            return {"native": external_id, "flag": flag}
+
+        def instance_limit(self):
+            return "4"
+
+        def instances(self):
+            return ["instance"]
+
+        def start_instance(self, external_id):
+            return {"started": external_id}
+
+        def stop_instance(self, external_id):
+            return {"stopped": external_id}
+
+        def renew_instance(self, external_id):
+            return {"renewed": external_id}
+
+        def rebuild_instance(self, external_id):
+            return {"rebuilt": external_id}
+
+    spec = PlatformWorkflowSpec.model_validate(
+        {
+            "name": "Fallback platform",
+            "competition_id": "competition/id",
+            "team_id": "team/x",
+            "challenges": {"list_url": "https://platform.example/challenges"},
+            "submit": {
+                "url": "https://platform.example/submit/{{external_id}}",
+                "success_path": "verdict",
+                "success_values": ["correct"],
+                "query_url": "https://platform.example/query/{{external_id}}/{{submission_id}}",
+                "headers": [{"name": "Authorization", "secret_name": "token"}],
+            },
+        }
+    )
+    adapter = _Adapter()
+    submitted = []
+
+    class _Ops:
+        store = _Store()
+
+        @staticmethod
+        def _adapter(_workflow_id, _spec):
+            return adapter
+
+        @staticmethod
+        def _submit(_workflow_id, _spec, external_id, flag, *, include_verdict):
+            submitted.append((external_id, flag, include_verdict))
+            return {"fallback": True}
+
+        @staticmethod
+        def _http_client(_spec):
+            return _Http()
+
+    platform = CompetitionPlatform(_Ops(), "wf", spec)
+    assert platform.identity == "https://platform.example/account/a/competition%2Fid/team%2Fx"
+    assert platform.supports_submit is True
+    assert platform.supports_instances is True
+    assert platform.instance_limit() == 4
+    assert platform.challenges() == ["fetched"]
+    assert platform.submit("id", "flag") == {"native": "id", "flag": "flag"}
+    assert platform.query("challenge/1", "sub-1")["verdict"] == "correct"
+    assert platform.instances() == ["instance"]
+    assert platform.start_instance("id") == {"started": "id"}
+    assert platform.stop_instance("id") == {"stopped": "id"}
+    assert platform.renew_instance("id") == {"renewed": "id"}
+    assert platform.rebuild_instance("id") == {"rebuilt": "id"}
+
+    class _FallbackAdapter:
+        identity = "https://platform.example/team/team%2Fx"
+
+        def fetch_challenges(self):
+            return ["fallback"]
+
+    fallback = _FallbackAdapter()
+    adapter = fallback
+    platform = CompetitionPlatform(_Ops(), "wf", spec)
+    assert platform.identity == "https://platform.example/team/team%2Fx"
+    assert platform.challenges() == ["fallback"]
+    assert platform.submit("id", "flag") == {"fallback": True}
+    assert submitted == [("id", "flag", True)]
+    assert platform.instances() == []
+    for operation in (platform.start_instance, platform.stop_instance,
+                      platform.renew_instance, platform.rebuild_instance):
+        with pytest.raises(ValueError, match="no verified"):
+            operation("id")
+
+    class _BrokenAdapter:
+        identity = None
+
+        def instance_limit(self):
+            raise RuntimeError("unavailable")
+
+    adapter = _BrokenAdapter()
+    broken = CompetitionPlatform(_Ops(), "wf", spec)
+    assert broken.instance_limit() is None
+    assert broken.identity.startswith("https://platform.example/")

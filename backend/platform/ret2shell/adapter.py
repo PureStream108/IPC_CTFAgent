@@ -4,10 +4,12 @@ import hashlib
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
+from typing_extensions import Self
 
 from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
@@ -481,7 +483,7 @@ class Ret2ShellClient:
     def close(self) -> None:
         self.session.close()
 
-    def __enter__(self) -> Ret2ShellClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,15 +19,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from backend.competition.service import CompetitionService
 from backend.core.orchestrator import Orchestrator
 from backend.core.state import AppState
-from backend.competition.service import CompetitionService
 from backend.mcp.mcp_client import MCPClient
 from backend.ops.ipc_mcp import build_ipc_mcp
 from backend.ops.questions import QuestionStore
 from backend.ops.service import OpsAgentService
 from backend.ops.store import OpsStore
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 BASE_URL = "https://gz.imxbt.cn"
 DOWNLOAD_URL = "https://download.imxbt.cn"
@@ -332,7 +335,7 @@ async def _run() -> dict[str, object]:
                 try:
                     competition.control(active["id"], "stop", int(active["revision"]))
                 except Exception:
-                    pass
+                    _recovery_logger.debug('Error handled in _run', exc_info=True)
         finally:
             competition.shutdown()
             orchestrator.shutdown()

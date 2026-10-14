@@ -12,7 +12,6 @@ end, so it leaves the competition DB as it found it.
 """
 from __future__ import annotations
 
-import json
 import sys
 
 from psycopg.types.json import Jsonb
@@ -134,6 +133,7 @@ def gzctf_detection():
 
 def policy_ordering():
     from datetime import datetime, timezone
+
     from backend.competition.policy import Challenge, plan_assignments
 
     now = datetime.now(timezone.utc)

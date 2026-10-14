@@ -1,28 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from contextlib import suppress
-from datetime import datetime, timedelta, timezone
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import hashlib
 import json
+import logging
+import re
 import sys
+import threading
+import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any
-import uuid
 
 from psycopg.errors import UndefinedColumn, UndefinedTable
+from psycopg.types.json import Jsonb
 
 from backend.blackboard import edge_store, graph_store, node_store
+from backend.competition.transport import Envelope
+from backend.core.archive import archive_completed_project
+from backend.core.diamond import Diamond
 from backend.core.engine_lease import (
     claim_engine_lease,
     release_engine_lease,
 )
-from backend.core.archive import archive_completed_project
-from backend.core.diamond import Diamond
 from backend.core.ipc import (
     accept_verified_flag,
     lock_project_completion,
@@ -42,6 +46,7 @@ from backend.core.postprocess_store import (
 )
 from backend.core.project_manager import ProjectManager
 from backend.core.resource_manager import ResourceManager
+from backend.core.wp_writer import persist_validated_writeup
 from backend.mcp.mcp_client import MCPClient, MCPRegistryTarget
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
@@ -52,9 +57,9 @@ from backend.platform.ret2shell import (
 )
 from backend.sandbox.errors import SandboxStartupError
 from backend.sandbox.task_sandbox import member_workdir, task_container_name
-from backend.core.wp_writer import persist_validated_writeup
-from backend.competition.transport import Envelope
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ReasonCheckpoint:
@@ -225,6 +230,7 @@ class Orchestrator:
             else:
                 self.start_project(project_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _run_project_startup', exc_info=True)
             self._mark_project_startup_failure(
                 project_id,
                 exc,
@@ -286,6 +292,7 @@ class Orchestrator:
                 self.state.db, project_id, context[0], context[1], epoch=context[2]
             )
         except Exception:
+            _recovery_logger.debug('Error handled in _release_project_engine_lease', exc_info=True)
             return
 
     def _ensure_project_lease(self, project_id: str) -> bool:
@@ -548,6 +555,14 @@ class Orchestrator:
         with self._lock:
             return project_id in self._startup_project_ids
 
+    def _acquire_task(self, project_id: str) -> bool:
+        # Competition already owns local/remote capacity and Member seats.
+        # A second generic task gate would merge the pools again, and would
+        # reject valid run-level capacity overrides.
+        if self._competition_project(project_id):
+            return self.resources.acquire_coordinated_task(project_id)
+        return self.resources.acquire_task(project_id)
+
     def startup_in_progress(self, project_id: str) -> bool:
         """Public read-only view for the competition coordinator."""
         return self._startup_in_progress(project_id)
@@ -572,6 +587,7 @@ class Orchestrator:
                 return
             self._dispatch_project(project_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _redispatch_project', exc_info=True)
             self.state.logger.project(
                 "project_redispatch_failed",
                 project_id,
@@ -599,7 +615,7 @@ class Orchestrator:
             self._release_project_lease(project_id)
             return
         self._clear_project_member_retries(project_id)
-        if not self.resources.acquire_task(project_id):
+        if not self._acquire_task(project_id):
             self._queue_project(project_id)
             self._set_runtime_phase(project_id, "queued_capacity")
             self.state.logger.project(
@@ -704,7 +720,7 @@ class Orchestrator:
             self._release_project_lease(project_id)
             return
         self._clear_project_member_retries(project_id)
-        if not self.resources.acquire_task(project_id):
+        if not self._acquire_task(project_id):
             self._queue_project(project_id)
             self._set_runtime_phase(project_id, "queued_capacity")
             self.state.logger.project(
@@ -896,6 +912,7 @@ class Orchestrator:
                 )
                 competition.publish_recon(message)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _publish_competition_recon', exc_info=True)
             self.state.logger.project(
                 "competition_recon_publish_failed",
                 project_id,
@@ -963,6 +980,7 @@ class Orchestrator:
                     (project_id,),
                 ).fetchone())
         except Exception:
+            _recovery_logger.debug('Error handled in _competition_project', exc_info=True)
             return False
 
     def _competition_running(self, project_id: str) -> bool:
@@ -991,6 +1009,7 @@ class Orchestrator:
                 ).fetchall()
             return {row["member"] for row in rows}
         except Exception:
+            _recovery_logger.debug('Error handled in _competition_members', exc_info=True)
             return None
 
     def _competition_preferred_member(self, project_id: str) -> str | None:
@@ -1009,6 +1028,7 @@ class Orchestrator:
                 ).fetchone()
             return row["member"] if row else None
         except Exception:
+            _recovery_logger.debug('Error handled in _competition_preferred_member', exc_info=True)
             return None
 
     def _competition_assignment(self, project_id: str, member_name: str) -> dict | None:
@@ -1025,6 +1045,7 @@ class Orchestrator:
                     (project_id, member_name),
                 ).fetchone()
         except Exception:
+            _recovery_logger.debug('Error handled in _competition_assignment', exc_info=True)
             return None
 
     def _global_active_members_locked(self) -> set[str]:
@@ -1350,10 +1371,19 @@ class Orchestrator:
 
     def _run_member(self, project_id, member, intent_id, category, is_initial):
         try:
+            seat = getattr(member.deps, "competition_assignment", None)
+            if seat is not None:
+                member.deps.competition_store.append_run_event(
+                    seat["run_id"], "member.started",
+                    {"assignment_id": seat["id"], "challenge_id": seat["challenge_id"],
+                     "session_id": seat["session_id"], "member": member.name,
+                     "intent_id": intent_id, "epoch": seat["epoch"]},
+                )
             return asyncio.run(
                 member.solve_async(project_id, intent_id, category, is_initial=is_initial)
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _run_member', exc_info=True)
             self.state.logger.project("member_crash", project_id, member=member.name, error=str(exc))
         finally:
             with self._lock:
@@ -1518,18 +1548,18 @@ class Orchestrator:
         try:
             self._judge_pending_submissions(project_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _run_platform_verdict', exc_info=True)
             self.state.logger.project(
                 "platform_verdict_crashed",
                 project_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            with suppress(Exception):
-                with self.state.db.connect() as conn:
-                    conn.execute(
-                        "UPDATE flag_submissions SET status = 'unknown' "
-                        "WHERE project_id = %s AND status = 'judging'",
-                        (project_id,),
-                    )
+            with suppress(Exception), self.state.db.connect() as conn:
+                conn.execute(
+                    "UPDATE flag_submissions SET status = 'unknown' "
+                    "WHERE project_id = %s AND status = 'judging'",
+                    (project_id,),
+                )
         finally:
             with self._lock:
                 self._completing.discard(project_id)
@@ -1628,6 +1658,7 @@ class Orchestrator:
         except Ret2ShellError as exc:
             return "unknown", f"platform submit failed: {exc}"
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _submit_to_platform', exc_info=True)
             return "unknown", f"{type(exc).__name__}: {exc}"
         solved = submission.get("solved") if isinstance(submission, dict) else None
         if solved is True:
@@ -1664,6 +1695,7 @@ class Orchestrator:
                     source="platform",
                 )
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _reject_submission', exc_info=True)
                 self.state.logger.project(
                     "rejected_flag_memory_failed",
                     project_id,
@@ -1709,6 +1741,7 @@ class Orchestrator:
             try:
                 prepared = self._prepare_postprocess_job(job)
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _drain_postprocess_jobs', exc_info=True)
                 heartbeat_stop.set()
                 heartbeat.join()
                 error = f"{type(exc).__name__}: {exc}"
@@ -1736,6 +1769,7 @@ class Orchestrator:
             except PostprocessLeaseLost:
                 self._log_stale_postprocess_job(job, stage="commit")
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _drain_postprocess_jobs', exc_info=True)
                 error = f"{type(exc).__name__}: {exc}"
                 with self.state.db.connect() as connection:
                     failed = fail_job(connection, job, error)
@@ -1766,6 +1800,7 @@ class Orchestrator:
                         lease_seconds=self._POSTPROCESS_LEASE_SECONDS,
                     )
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _heartbeat_postprocess_job', exc_info=True)
                 self.state.logger.project(
                     "postprocess_heartbeat_error",
                     job.project_id,
@@ -1843,6 +1878,7 @@ class Orchestrator:
                 try:
                     self.state.memory._mirror_to_disk(memory)
                 except Exception as exc:
+                    _recovery_logger.debug('Error handled in _commit_postprocess_job', exc_info=True)
                     self.state.logger.project(
                         "memory_mirror_failed",
                         job.project_id,
@@ -1881,9 +1917,11 @@ class Orchestrator:
             try:
                 self._tick()
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _run_loop', exc_info=True)
                 try:
                     self.state.logger.project("scheduler_error", "system", error=str(exc))
                 except Exception:
+                    _recovery_logger.debug('Error handled in _run_loop', exc_info=True)
                     print(f"[ipc-orchestrator] tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             self._stop.wait(interval)
 
@@ -1917,6 +1955,7 @@ class Orchestrator:
                 else:
                     terminal.add(row["project_id"])
         except Exception:
+            _recovery_logger.debug('Error handled in _competition_project_ownership', exc_info=True)
             return set(), set()
         return active, terminal
 
@@ -1943,6 +1982,7 @@ class Orchestrator:
                     try:
                         self._dispatch_project(summary.id)
                     except Exception as exc:
+                        _recovery_logger.debug('Error handled in _tick', exc_info=True)
                         self.state.logger.project("scheduler_error", summary.id, error=str(exc))
                 continue
             if summary.id in competition_terminal_projects:
@@ -1967,12 +2007,13 @@ class Orchestrator:
                 continue
             if self._startup_in_progress(summary.id):
                 continue
-            if not self.resources.acquire_task(summary.id):
+            if not self._acquire_task(summary.id):
                 self._queue_project(summary.id)
                 continue
             try:
                 self._dispatch_project(summary.id)
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _tick', exc_info=True)
                 self._mark_project_startup_failure(
                     summary.id,
                     exc,
@@ -1987,6 +2028,7 @@ class Orchestrator:
         try:
             future = self.startup_executor.submit(self._recover_running_project, project_id)
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _schedule_running_recovery', exc_info=True)
             with self._lock:
                 self._startup_project_ids.discard(project_id)
             self._mark_project_startup_failure(
@@ -2005,7 +2047,7 @@ class Orchestrator:
         try:
             if not self._ensure_project_lease(project_id):
                 return
-            if not self.resources.acquire_task(project_id):
+            if not self._acquire_task(project_id):
                 self._queue_project(project_id)
                 self._set_runtime_phase(project_id, "queued_capacity")
                 self._release_project_lease(project_id)
@@ -2033,6 +2075,7 @@ class Orchestrator:
                 "project_recovered", project_id, instance=self.state.instance_id
             )
         except Exception as exc:
+            _recovery_logger.debug('Error handled in _recover_running_project', exc_info=True)
             self._mark_project_startup_failure(
                 project_id,
                 exc,
@@ -2235,20 +2278,17 @@ class Orchestrator:
                 if not self._pending_projects:
                     return
                 project_id = self._pending_projects[0]
-            if not self.resources.can_admit_task(project_id):
+            if not self._competition_project(project_id) and not self.resources.can_admit_task(project_id):
                 return
             self._remove_queued_project(project_id)
             status = self.lifecycle.status(project_id)
-            if status == "created":
+            if status == "created" or status == "stopped":
                 self.start_project_async(project_id)
-            elif status == "stopped":
-                self.start_project_async(project_id)
-            elif status == "running":
-                if (
-                    not self._startup_in_progress(project_id)
-                    and self._ensure_project_lease(project_id)
-                ):
-                    self._schedule_running_recovery(project_id)
+            elif status == "running" and (
+                not self._startup_in_progress(project_id)
+                and self._ensure_project_lease(project_id)
+            ):
+                self._schedule_running_recovery(project_id)
 
     def _select_member_for_intent(self, project_id: str, detail, intent, active: set[str]) -> str | None:
         preferred = self._intent_member_candidates(detail, intent)
@@ -2419,6 +2459,7 @@ class Orchestrator:
             try:
                 result = future.result()
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _reap_finished_futures', exc_info=True)
                 crashed = True
                 failure_error = f"{type(exc).__name__}: {exc}"
                 self.state.logger.project(
@@ -2490,9 +2531,72 @@ class Orchestrator:
                 self.state.logger.project("member_task_concluded", project_id, intent=intent_id, fact=result.fact_id)
                 if result.fact_id is not None:
                     self._broadcast_fact(project_id, result.fact_id, self._intent_worker(project_id, intent_id))
+                    self._flag_followup_from_fact(project_id, result.fact_id)
             elif result.status == "flag":
                 self._clear_member_stalls(project_id, intent_id)
                 self.state.logger.project("member_task_flag", project_id, intent=intent_id, flag=result.flag)
+
+    def _flag_followup_from_fact(self, project_id: str, fact_id: str) -> None:
+        """Turn a flag-shaped conclusion into an explicit submit tool task.
+
+        A prose ``conclude`` is evidence only.  The follow-up intent keeps the
+        submission contract enforceable while avoiding an automatic network
+        submission when a conclusion contains multiple candidates.
+        """
+        with self.state.db.connect() as connection:
+            connection.execute(
+                "SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,)
+            )
+            row = connection.execute(
+                "SELECT description FROM facts WHERE project_id=%s AND id=%s",
+                (project_id, fact_id),
+            ).fetchone()
+            if row is None:
+                return
+            candidates = sorted(set(re.findall(r"(?:flag|ctf)\{[^}\n]{1,400}\}", row["description"], re.IGNORECASE)))
+            if len(candidates) != 1:
+                if len(candidates) > 1:
+                    self.state.logger.project(
+                        "flag.multiple_candidates_in_fact", project_id, fact_id=fact_id,
+                        candidates=len(candidates),
+                    )
+                return
+            candidate = candidates[0]
+            existing = connection.execute(
+                "SELECT 1 FROM flag_submissions WHERE project_id=%s AND normalized_flag=%s LIMIT 1",
+                (project_id, candidate),
+            ).fetchone()
+            if existing:
+                return
+            description = "Submit the verified flag with the submit_flag tool; do not conclude prose"
+            open_intent = edge_store.find_similar_open_intent(
+                connection, project_id, [fact_id], description,
+            )
+            if open_intent is None:
+                edge_store.create_intent(
+                    connection, project_id, [fact_id],
+                    description,
+                    "orchestrator",
+                )
+            self.state.logger.project(
+                "flag.found_in_fact_without_submission", project_id,
+                fact_id=fact_id, candidate=candidate,
+            )
+            competition = connection.execute(
+                """SELECT c.run_id,c.id AS challenge_id FROM competition_challenges c
+                   WHERE c.project_id=%s ORDER BY c.id LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            if competition:
+                connection.execute(
+                    """INSERT INTO competition_run_events (run_id,kind,payload)
+                       VALUES (%s,'flag.found_in_fact_without_submission',%s)""",
+                    (competition["run_id"], Jsonb({
+                        "challenge_id": competition["challenge_id"],
+                        "fact_id": fact_id,
+                        "candidate": candidate,
+                    })),
+                )
 
     def _intent_worker(self, project_id: str, intent_id: str) -> str | None:
         with self.state.db.connect() as conn:

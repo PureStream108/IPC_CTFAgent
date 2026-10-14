@@ -297,8 +297,8 @@ def test_chat_completions_usage_is_requested_and_parsed():
         return _StreamResponse([
             '{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}',
             '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-            '{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":34,'
-            '"completion_tokens_details":{"reasoning_tokens":12}}}',
+            ('{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":34,'
+            '"completion_tokens_details":{"reasoning_tokens":12}}}'),
         ])
 
     turn = _run(_conversation(), request)
@@ -359,14 +359,14 @@ def test_anthropic_usage_is_merged_across_start_and_delta_events():
     def request(url, **kwargs):
         return _StreamResponse(
             [
-                '{"type":"message_start","message":{"usage":{"input_tokens":900,'
-                '"cache_read_input_tokens":100}}}',
-                '{"type":"content_block_start","index":0,'
-                '"content_block":{"type":"text","text":""}}',
-                '{"type":"content_block_delta","index":0,'
-                '"delta":{"type":"text_delta","text":"hello"}}',
-                '{"type":"message_delta","delta":{"stop_reason":"end_turn"},'
-                '"usage":{"output_tokens":42}}',
+                ('{"type":"message_start","message":{"usage":{"input_tokens":900,'
+                '"cache_read_input_tokens":100}}}'),
+                ('{"type":"content_block_start","index":0,'
+                '"content_block":{"type":"text","text":""}}'),
+                ('{"type":"content_block_delta","index":0,'
+                '"delta":{"type":"text_delta","text":"hello"}}'),
+                ('{"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                '"usage":{"output_tokens":42}}'),
                 '{"type":"message_stop"}',
             ],
             done=False,
@@ -384,9 +384,9 @@ def test_responses_usage_is_read_from_the_completed_event():
         return _StreamResponse(
             [
                 '{"type":"response.output_text.delta","delta":"done"}',
-                '{"type":"response.completed","response":{"output":[],'
+                ('{"type":"response.completed","response":{"output":[],'
                 '"usage":{"input_tokens":777,"output_tokens":21,'
-                '"output_tokens_details":{"reasoning_tokens":9}}}}',
+                '"output_tokens_details":{"reasoning_tokens":9}}}}'),
             ],
             done=False,
         )
@@ -404,8 +404,8 @@ def test_a_truncated_turn_still_reports_its_usage():
     def request(url, **kwargs):
         return _StreamResponse([
             '{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}',
-            '{"choices":[{"index":0,"delta":{},"finish_reason":"length"}],'
-            '"usage":{"prompt_tokens":50,"completion_tokens":4096}}',
+            ('{"choices":[{"index":0,"delta":{},"finish_reason":"length"}],'
+            '"usage":{"prompt_tokens":50,"completion_tokens":4096}}'),
         ])
 
     with pytest.raises(TurnTruncated) as caught:
@@ -421,6 +421,19 @@ def test_provider_session_id_is_stable_across_rebuilt_adapters():
     second = _conversation(provider_session_id=durable)
     assert first.provider_session_id == second.provider_session_id == durable
     assert _conversation().provider_session_id != _conversation().provider_session_id
+
+
+def test_first_response_hook_runs_for_tool_only_stream():
+    adapter = _conversation()
+    responses = []
+    adapter.on_first_response = lambda: responses.append("first event")
+    turn = _run(adapter, lambda *args, **kwargs: _StreamResponse([
+        '{"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+        '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}',
+    ]))
+    assert responses == ["first event"]
+    assert turn.tools[0].id == "call1"
+    assert turn.text == ""
 
 
 def test_member_adapter_accepts_a_durable_provider_session_id():
@@ -474,14 +487,14 @@ def test_anthropic_thinking_is_streamed_without_entering_the_answer():
 
     def request(url, **kwargs):
         return _StreamResponse([
-            '{"type":"content_block_start","index":0,'
-            '"content_block":{"type":"thinking"}}',
-            '{"type":"content_block_delta","index":0,'
-            '"delta":{"type":"thinking_delta","thinking":"let me check"}}',
-            '{"type":"content_block_start","index":1,'
-            '"content_block":{"type":"text","text":""}}',
-            '{"type":"content_block_delta","index":1,'
-            '"delta":{"type":"text_delta","text":"the answer"}}',
+            ('{"type":"content_block_start","index":0,'
+            '"content_block":{"type":"thinking"}}'),
+            ('{"type":"content_block_delta","index":0,'
+            '"delta":{"type":"thinking_delta","thinking":"let me check"}}'),
+            ('{"type":"content_block_start","index":1,'
+            '"content_block":{"type":"text","text":""}}'),
+            ('{"type":"content_block_delta","index":1,'
+            '"delta":{"type":"text_delta","text":"the answer"}}'),
             '{"type":"message_stop"}',
         ], done=False)
 
@@ -499,12 +512,12 @@ def test_chat_completions_reasoning_content_is_streamed():
 
     def request(url, **kwargs):
         return _StreamResponse([
-            '{"choices":[{"index":0,"delta":{"reasoning_content":"step one"},'
-            '"finish_reason":null}]}',
-            '{"choices":[{"index":0,"delta":{"reasoning":" step two"},'
-            '"finish_reason":null}]}',
-            '{"choices":[{"index":0,"delta":{"content":"done"},'
-            '"finish_reason":null}]}',
+            ('{"choices":[{"index":0,"delta":{"reasoning_content":"step one"},'
+            '"finish_reason":null}]}'),
+            ('{"choices":[{"index":0,"delta":{"reasoning":" step two"},'
+            '"finish_reason":null}]}'),
+            ('{"choices":[{"index":0,"delta":{"content":"done"},'
+            '"finish_reason":null}]}'),
             '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
         ])
 
@@ -520,8 +533,8 @@ def test_responses_reasoning_summary_is_streamed():
         return _StreamResponse([
             '{"type":"response.reasoning_summary_text.delta","delta":"planning"}',
             '{"type":"response.output_text.delta","delta":"result"}',
-            '{"type":"response.completed","response":{"output":['
-            '{"type":"message","content":[{"type":"output_text","text":"result"}]}]}}',
+            ('{"type":"response.completed","response":{"output":['
+            '{"type":"message","content":[{"type":"output_text","text":"result"}]}]}}'),
         ])
 
     _, text, reasoning = _run_with_reasoning(
@@ -537,10 +550,10 @@ def test_a_turn_without_a_reasoning_callback_still_streams_text():
 
     def request(url, **kwargs):
         return _StreamResponse([
-            '{"choices":[{"index":0,"delta":{"reasoning_content":"ignored"},'
-            '"finish_reason":null}]}',
-            '{"choices":[{"index":0,"delta":{"content":"plain"},'
-            '"finish_reason":null}]}',
+            ('{"choices":[{"index":0,"delta":{"reasoning_content":"ignored"},'
+            '"finish_reason":null}]}'),
+            ('{"choices":[{"index":0,"delta":{"content":"plain"},'
+            '"finish_reason":null}]}'),
             '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
         ])
 

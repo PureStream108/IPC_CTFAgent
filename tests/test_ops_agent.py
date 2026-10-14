@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 import threading
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -12,15 +12,15 @@ from fastapi.testclient import TestClient
 
 from backend.blackboard import graph_store
 from backend.core.config import LLMConfig
+from backend.mcp.mcp_client import MCPClient
 from backend.members.adapters import (
     ClaudeAdapter,
     DecisionOutputError,
     NonRetryableProviderError,
     OpenAICompatibleAdapter,
 )
-from backend.mcp.mcp_client import MCPClient
-from backend.ops.network import NetworkPolicyError, WorkflowHttpClient
 from backend.ops.ipc_mcp import build_ipc_mcp
+from backend.ops.network import NetworkPolicyError, WorkflowHttpClient
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolExecutor
 from backend.server.app import create_app
@@ -214,7 +214,7 @@ def test_ops_workflow_proposal_is_an_explicit_tool_call(client, monkeypatch):
 
     service = _configure_openai(client)
     spec = {
-        "name": "Proposed",
+        "name": "Fixture CTF 2026",
         "challenges": {
             "list_url": "https://ctf.invalid/api/challenges",
             "list_path": "data",
@@ -242,7 +242,7 @@ def test_ops_workflow_proposal_is_an_explicit_tool_call(client, monkeypatch):
 
     assert result["reply"] == "drafted a workflow"
     assert len(result["proposals"]) == 1
-    assert result["proposals"][0]["name"] == "Proposed"
+    assert result["proposals"][0]["name"] == "Fixture CTF 2026"
     assert result["proposals"][0]["status"] == "draft"
 
 
@@ -379,7 +379,7 @@ def test_ops_store_uses_shared_postgres_schema(client):
             for row in connection.execute(
                 """
                 SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public'
+                WHERE table_schema = current_schema()
                   AND table_name IN ('sessions', 'events', 'runs', 'workflows')
                 """
             )

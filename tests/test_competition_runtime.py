@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from backend.competition.conversation import ToolCall, Turn, TurnTruncated
 from backend.competition.runtime import SessionRunner
@@ -104,6 +104,29 @@ def assignment():
     }
 
 
+def test_provider_progress_records_start_first_response_and_completion_once():
+    store = MemoryStore()
+    store.provider_progress_events = True
+
+    class Streaming(Adapter):
+        emits_reasoning = True
+
+        def turn(self, messages, system, tools, emit, cancel, emit_reasoning=None):
+            assert store.turns[1]["status"] == "running"
+            emit_reasoning("checking")
+            emit("first")
+            emit("second")
+            return Turn([{"role": "assistant", "content": "firstsecond"}], text="firstsecond")
+
+    runner = SessionRunner(store, Streaming([]), Executor(), assignment=assignment(), system="solve", tools=[])
+    result = runner.run("start")
+    assert result.status == "idle"
+    progress = [row["payload"] for row in store.items if row["kind"] == "status"]
+    assert [row["status"] for row in progress] == ["provider.started", "provider.first_response", "provider.completed"]
+    assert progress[2]["latency_seconds"] >= progress[1]["latency_seconds"] >= 0
+    assert store.turns[1]["status"] == "completed"
+
+
 def test_session_runner_persists_native_messages_and_tool_results():
     store = MemoryStore()
     executor = Executor()
@@ -180,8 +203,8 @@ def test_conversation_adapter_tolerates_null_stream_fields():
 
     payloads = [
         '{"choices":[{"index":0,"delta":{"role":"assistant","content":"working","tool_calls":null},"finish_reason":null}]}',
-        '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
-        '"function":{"name":"member_action","arguments":"{\\"action\\": \\"done\\"}"}}]},"finish_reason":"tool_calls"}]}',
+        ('{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
+        '"function":{"name":"member_action","arguments":"{\\"action\\": \\"done\\"}"}}]},"finish_reason":"tool_calls"}]}'),
     ]
 
     class FakeResponse:
@@ -605,10 +628,10 @@ def test_anthropic_output_limit_yields_a_continuable_partial_turn():
     payloads = [
         '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
         '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"analysing"}}',
-        '{"type":"content_block_start","index":1,"content_block":'
-        '{"type":"tool_use","id":"cut","name":"member_action"}}',
-        '{"type":"content_block_delta","index":1,"delta":'
-        '{"type":"input_json_delta","partial_json":"{\\"action\\": \\"ba"}}',
+        ('{"type":"content_block_start","index":1,"content_block":'
+        '{"type":"tool_use","id":"cut","name":"member_action"}}'),
+        ('{"type":"content_block_delta","index":1,"delta":'
+        '{"type":"input_json_delta","partial_json":"{\\"action\\": \\"ba"}}'),
         '{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}',
     ]
 

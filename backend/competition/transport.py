@@ -7,21 +7,26 @@ ZeroMQ representation, with explicit conversion through ``Envelope``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import grpc
 import zmq
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.competition.proto import pair_pb2
+from backend.core.validation import InputValidationError
 
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 class Envelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -126,7 +131,7 @@ def result_from_proto(raw: pair_pb2.Result) -> dict:
     except (TypeError, ValueError) as exc:
         raise ValueError("result payload_json is not valid JSON") from exc
     if not isinstance(value, dict):
-        raise ValueError("result payload must be a JSON object")
+        raise InputValidationError("result payload must be a JSON object")
     value.setdefault("status", raw.status)
     value.setdefault("request_id", raw.request_id)
     return value
@@ -227,6 +232,7 @@ class PairCoordinator:
             try:
                 result = self.execute(message, cancel)
             except Exception as exc:
+                _recovery_logger.debug('Error handled in _call', exc_info=True)
                 result = {
                     "status": "failed",
                     "request_id": message.request_id,
@@ -340,6 +346,7 @@ class ReconPublisher:
             self._socket = socket
             self._bound = True
         except BaseException as exc:
+            _recovery_logger.debug('Error handled in _run', exc_info=True)
             self._error = exc
             self._ready.set()
             if socket is not None:
@@ -358,6 +365,7 @@ class ReconPublisher:
                 try:
                     socket.send_multipart([topic, payload], flags=zmq.NOBLOCK)
                 except Exception as exc:
+                    _recovery_logger.debug('Error handled in _run', exc_info=True)
                     self._error = exc
                     break
         finally:
@@ -443,10 +451,10 @@ class ReconSubscriber:
 
     def _normalize(self, value: Any) -> dict:
         if not isinstance(value, dict):
-            raise ValueError("recon record must be a JSON object")
+            raise InputValidationError("recon record must be a JSON object")
         envelope_value = value.get("envelope", value)
         if not isinstance(envelope_value, dict):
-            raise ValueError("recon envelope must be a JSON object")
+            raise InputValidationError("recon envelope must be a JSON object")
         sequence = value.get("sequence", envelope_value.get("sequence"))
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
             raise ValueError("recon record requires a positive persisted sequence")

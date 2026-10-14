@@ -20,7 +20,11 @@ competition rows, so there is nothing to clean up.
 """
 from __future__ import annotations
 
+import logging
 import sys
+
+# Error boundaries keep their recovery behavior and retain debug diagnostics.
+_recovery_logger = logging.getLogger(__name__)
 
 results: list[tuple[str, bool, str]] = []
 
@@ -108,6 +112,7 @@ def _runtime(writer, adapter):
 
 def t7_event_keys():
     import hashlib
+
     from backend.agent.session import SessionNeedsRebuild
 
     writer = _MemWriter(epoch=9)
@@ -171,11 +176,13 @@ def t3_self_heal():
     except SessionNeedsRebuild:
         check("T3 non-400 propagates unchanged", False, "wrongly rebuilt")
     except Exception:
+        _recovery_logger.debug('Error handled in t3_self_heal', exc_info=True)
         check("T3 non-400 propagates unchanged", True, "raised as-is")
 
 
 def t4_ownership_and_throttle():
     from types import SimpleNamespace
+
     from backend.core.orchestrator import Orchestrator
     from backend.persistence.database import Database
 
@@ -211,6 +218,7 @@ def t4_ownership_and_throttle():
 
 def t12_hardening():
     import psycopg.errors
+
     from backend.api import project as project_api
 
     calls = {"n": 0}
@@ -235,6 +243,7 @@ def t12_hardening():
         check("T12 persistent deadlock propagates", True, "raised after one retry")
 
     import os
+
     import backend.persistence as persist_pkg
     env_path = os.path.join(
         os.path.dirname(persist_pkg.__file__), "migrations", "env.py"
@@ -251,6 +260,7 @@ def main():
         try:
             fn()
         except Exception as exc:
+            _recovery_logger.debug('Error handled in main', exc_info=True)
             check(f"{fn.__name__} ran without crashing", False, f"{type(exc).__name__}: {exc}")
     passed = sum(1 for _n, ok, _d in results if ok)
     total = len(results)

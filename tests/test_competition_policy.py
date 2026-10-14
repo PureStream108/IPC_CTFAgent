@@ -55,7 +55,7 @@ def test_container_challenges_precede_local_ones_at_equal_solve_counts():
     """
     tasks = [task(1, remote=True, category="pwn"), task(2, remote=True, category="web"), task(3)]
     assignments = plan_assignments(tasks, occupied_members=set(), remote_capacity=5, now=NOW, local_capacity=1)
-    assert [a.challenge_id for a in assignments] == ["1"]
+    assert [a.challenge_id for a in assignments] == ["1", "2", "3"]
 
 
 def test_most_solved_challenges_are_scheduled_first():
@@ -122,8 +122,8 @@ def test_container_challenges_are_serialised_inside_the_instance_quota():
     both = plan_assignments(
         ready, occupied_members=set(), remote_capacity=1, now=NOW, local_capacity=10,
     )
-    assert [a.challenge_id for a in both] == ["c1", "c2"]
-    assert [a.needs_instance for a in both] == [False, True]
+    assert [a.challenge_id for a in both] == ["c1"]
+    assert [a.needs_instance for a in both] == [False]
 
 
 def test_naive_clock_rejected():

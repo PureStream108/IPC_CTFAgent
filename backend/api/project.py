@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import TypeVar
 
 import psycopg.errors
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from backend.api.deps import get_state
 from backend.blackboard import edge_store, graph_store, node_store
@@ -22,8 +23,8 @@ from backend.blackboard.models import (
     ReasonClaimRequest,
 )
 from backend.core.config import CATEGORIES
-from backend.core.state import AppState
 from backend.core.redaction import redact_object
+from backend.core.state import AppState
 
 router = APIRouter(tags=["projects"])
 MAX_PROJECT_ATTACHMENT_BYTES = 100 * 1024 * 1024
@@ -62,8 +63,12 @@ def _public_detail(detail):
     return detail.__class__.model_validate(redact_object(detail.model_dump(mode="json"), secret))
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_GET_STATE_DEPENDENCY = Depends(get_state)
+
 @router.get("/projects", response_model=list[ProjectSummary])
-def list_projects(state: AppState = Depends(get_state)):
+def list_projects(state: AppState = _GET_STATE_DEPENDENCY):
     def read() -> list[ProjectSummary]:
         with state.db.connect() as conn:
             _expire(state, conn)
@@ -80,7 +85,7 @@ def list_projects(state: AppState = Depends(get_state)):
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
-def create_project(body: CreateProjectRequest, state: AppState = Depends(get_state)):
+def create_project(body: CreateProjectRequest, state: AppState = _GET_STATE_DEPENDENCY):
     if body.category not in CATEGORIES:
         raise HTTPException(400, f"category must be one of {CATEGORIES}")
     hints = [(h.content, h.creator) for h in (body.hints or [])]
@@ -92,7 +97,7 @@ def create_project(body: CreateProjectRequest, state: AppState = Depends(get_sta
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
-def get_project(project_id: str, state: AppState = Depends(get_state)):
+def get_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     def read():
         with state.db.connect() as conn:
             _expire(state, conn, project_id)
@@ -113,7 +118,7 @@ def get_project(project_id: str, state: AppState = Depends(get_state)):
 
 
 @router.delete("/projects/{project_id}", status_code=204)
-def delete_project(project_id: str, state: AppState = Depends(get_state)):
+def delete_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     state.pool.stop_project(project_id)
     state.network.stop(project_id)
     with state.db.connect() as conn:
@@ -124,9 +129,13 @@ def delete_project(project_id: str, state: AppState = Depends(get_state)):
         graph_store.delete_project(conn, project_id)
 
 
+
+# FastAPI resolves request values from these reusable declaration markers.
+_REQUIRED_UPLOAD_FILE = File(...)
+
 @router.post("/projects/{project_id}/attachments")
 async def upload_attachment(
-    project_id: str, file: UploadFile = File(...), state: AppState = Depends(get_state)
+    project_id: str, file: UploadFile = _REQUIRED_UPLOAD_FILE, state: AppState = _GET_STATE_DEPENDENCY
 ):
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
@@ -165,7 +174,7 @@ async def upload_attachment(
 
 
 @router.post("/projects/{project_id}/hints", response_model=Hint, status_code=201)
-def create_hint(project_id: str, body: CreateHintRequest, state: AppState = Depends(get_state)):
+def create_hint(project_id: str, body: CreateHintRequest, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         if graph_store.get_project_row(conn, project_id) is None:
             raise HTTPException(404, "Project not found")
@@ -184,7 +193,7 @@ def _require_active(conn, project_id: str):
 
 
 @router.post("/projects/{project_id}/intents", response_model=Intent, status_code=201)
-def create_intent(project_id: str, body: CreateIntentRequest, state: AppState = Depends(get_state)):
+def create_intent(project_id: str, body: CreateIntentRequest, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
         for fid in body.from_:
@@ -199,7 +208,7 @@ def create_intent(project_id: str, body: CreateIntentRequest, state: AppState = 
 
 @router.post("/projects/{project_id}/intents/{intent_id}/heartbeat", response_model=Intent)
 def heartbeat_intent(
-    project_id: str, intent_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)
+    project_id: str, intent_id: str, body: HeartbeatRequest, state: AppState = _GET_STATE_DEPENDENCY
 ):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
@@ -226,7 +235,7 @@ def heartbeat_intent(
 
 @router.post("/projects/{project_id}/intents/{intent_id}/release", response_model=Intent)
 def release_intent(
-    project_id: str, intent_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)
+    project_id: str, intent_id: str, body: HeartbeatRequest, state: AppState = _GET_STATE_DEPENDENCY
 ):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
@@ -254,7 +263,7 @@ def release_intent(
 
 
 @router.post("/projects/{project_id}/reason/claim")
-def claim_reason(project_id: str, body: ReasonClaimRequest, state: AppState = Depends(get_state)):
+def claim_reason(project_id: str, body: ReasonClaimRequest, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
         _, reason_timeout = graph_store.get_timeouts(conn)
@@ -266,7 +275,7 @@ def claim_reason(project_id: str, body: ReasonClaimRequest, state: AppState = De
 
 
 @router.post("/projects/{project_id}/reason/heartbeat")
-def heartbeat_reason(project_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)):
+def heartbeat_reason(project_id: str, body: HeartbeatRequest, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
         _, reason_timeout = graph_store.get_timeouts(conn)
@@ -281,7 +290,7 @@ def heartbeat_reason(project_id: str, body: HeartbeatRequest, state: AppState = 
 
 
 @router.post("/projects/{project_id}/reason/release")
-def release_reason(project_id: str, body: HeartbeatRequest, state: AppState = Depends(get_state)):
+def release_reason(project_id: str, body: HeartbeatRequest, state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         _require_active(conn, project_id)
         current = graph_store.reason_holder(conn, project_id)
@@ -293,7 +302,7 @@ def release_reason(project_id: str, body: HeartbeatRequest, state: AppState = De
 
 @router.post("/projects/{project_id}/intents/{intent_id}/conclude", response_model=ConcludeResponse)
 def conclude_intent(
-    project_id: str, intent_id: str, body: ConcludeRequest, state: AppState = Depends(get_state)
+    project_id: str, intent_id: str, body: ConcludeRequest, state: AppState = _GET_STATE_DEPENDENCY
 ):
     with state.db.connect() as conn:
         _require_active(conn, project_id)

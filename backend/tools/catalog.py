@@ -87,7 +87,7 @@ class ToolCatalog:
         path: str | Path = CATALOG_PATH,
         *,
         validate_documents: bool = True,
-    ) -> "ToolCatalog":
+    ) -> ToolCatalog:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         groups = {str(k): str(v) for k, v in (data.get("groups") or {}).items()}
         entries = [CatalogEntry(**item) for item in data.get("entries", [])]
