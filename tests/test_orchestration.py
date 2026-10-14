@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -39,6 +39,56 @@ def _make_project(state, category="web"):
     with state.db.connect() as conn:
         pid = graph_store.create_project(conn, "Demo", "http://target", "capture the flag", category)
     return pid
+
+
+@pytest.mark.parametrize("other_project", [False, True])
+def test_postprocess_claim_skips_a_project_locked_by_completion(state, other_project):
+    project_id = _make_project(state)
+    other_id = _make_project(state) if other_project else None
+    with state.db.connect() as connection:
+        enqueue_postprocess(connection, project_id)
+        if other_id:
+            enqueue_postprocess(connection, other_id)
+
+    def claim():
+        with state.db.connect() as connection:
+            return claim_next_job(connection, "concurrent-worker")
+
+    with ThreadPoolExecutor(max_workers=1) as executor, state.db.connect() as completion:
+        completion.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+        claimed = executor.submit(claim).result(timeout=5)
+        assert (claimed.project_id if claimed else None) == other_id
+        # Repeating completion must not wait on a job row held by a worker
+        # that is itself waiting for this transaction's project row.
+        completion.execute("SET LOCAL lock_timeout='2s'")
+        enqueue_postprocess(completion, project_id)
+    with state.db.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM postprocess_jobs WHERE project_id=%s", (project_id,),
+        ).fetchone()["n"] == 3
+
+
+def test_expired_postprocess_recovery_skips_an_active_completion_transaction(state):
+    project_id = _make_project(state)
+    with state.db.connect() as connection:
+        enqueue_postprocess(connection, project_id)
+        stale = claim_next_job(connection, "stale-worker")
+        connection.execute(
+            "UPDATE postprocess_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s", (stale.id,),
+        )
+
+    def recover():
+        with state.db.connect() as connection:
+            return recover_expired_jobs(connection)
+
+    with ThreadPoolExecutor(max_workers=1) as executor, state.db.connect() as completion:
+        completion.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+        assert executor.submit(recover).result(timeout=5) == 0
+        completion.execute("SET LOCAL lock_timeout='2s'")
+        enqueue_postprocess(completion, project_id)
+    with state.db.connect() as connection:
+        assert recover_expired_jobs(connection) == 1
+        assert claim_next_job(connection, "replacement-worker").id == stale.id
 
 
 def test_real_orchestrator_starts_local_and_remote_tasks_with_independent_capacity(state):

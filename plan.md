@@ -120,6 +120,8 @@ python scripts/monitor_real_competition.py \
 
 `.github/workflows/ci.yml` 包含 PostgreSQL tests/coverage、静态和迁移检查、task-image/C5/AI 验收，以及独立 Playwright E2E 和失败诊断上传。
 
+实现已提交到独立分支 `codex/competition-reliability-20261014`，首个 commit `05893ab23421beac43e37727de7b3c1f01276472`。草稿 [PR #4](https://github.com/PureStream108/IPC_CTFAgent/pull/4) 已触发 [CI run 38545171757](https://github.com/PureStream108/IPC_CTFAgent/actions/runs/38545171757)：hosted 浏览器 E2E 通过，但 pytest 捕获同一 flag 重复 complete 与后台 postprocess 的 PostgreSQL 死锁，整体 CI 尚未通过。已统一项目/任务的加锁顺序，并为领取与过期恢复增加跳过已锁项目的并发回归；本机相关 128 项测试通过。修复将更新到同一草稿 PR，要求新 revision 的三个 check 全部通过。状态快照保存于 `data/exports/github-plan-ci-verification.json`，锁回归证据为 `pytest-postprocess-lock-verification.log/.xml`。
+
 - [x] 最新全量 pytest 与覆盖率门禁通过，并保存 81.33%/80.93% 新基线。
 - [x] 最终回归后刷新正常栈应用镜像并重验健康状态。
 - [x] 完整 `python -m ruff check backend scripts tests` 通过，Windows/Linux 实跑均为零诊断；新增故障回归和完整 pytest 通过，覆盖率未下降。
