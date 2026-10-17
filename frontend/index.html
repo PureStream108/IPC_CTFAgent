@@ -522,6 +522,8 @@
           </template>
         </select>
         <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="preflightCompetition()">Preflight</button>
+        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup()">New GZCTF</button>
+        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" x-show="opsWorkflows.find(w=>w.id===competitionWorkflowId)?.spec?.challenges?.platform==='gzctf'" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup(opsWorkflows.find(w=>w.id===competitionWorkflowId))">Settings</button>
         <button class="btn h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="startCompetition()">Start</button>
       </div>
       <button class="h-8 w-8 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100" title="Close competition view" @click="closeCompetition()">&times;</button>
@@ -540,6 +542,30 @@
 
     <main class="flex-1 min-h-0 overflow-auto">
       <div class="mx-auto max-w-[1500px] px-4 py-4 space-y-4">
+        <form x-show="showGzctfSetup" x-cloak @submit.prevent="saveGzctfWorkflow()" class="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+          <div class="font-semibold text-sm">GZCTF setup</div>
+          <p class="text-xs text-slate-500">Save your platform and competition once. Reuse the saved workflow for future runs.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <label>Platform URL<input type="url" required class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.base_url" placeholder="https://ctf.example" /></label>
+            <label>Game ID<input type="number" min="1" required class="mt-1 w-full rounded-lg px-3 py-2" x-model.number="gzctfDraft.game_id" /></label>
+            <label>Competition name (optional)<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.name" /></label>
+            <label>Team ID (optional)<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.team_id" /></label>
+            <label>Authentication<select class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfAuthMode"><option value="token">GZCTF token</option><option value="login">Username and password</option></select></label>
+            <label x-show="gzctfAuthMode==='token'">Token<input type="password" autocomplete="off" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfToken" placeholder="Leave empty to reuse saved credentials" /></label>
+            <label x-show="gzctfAuthMode==='login'">Username<input autocomplete="username" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfUsername" /></label>
+            <label x-show="gzctfAuthMode==='login'">Password<input type="password" autocomplete="current-password" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfPassword" /></label>
+            <label>Attachment CDN URL (optional)<input type="url" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.attachment_base_url" /></label>
+            <label>Deadline (local time, optional)<input type="datetime-local" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDeadline" /></label>
+            <label>Container concurrency (0 = platform default)<input type="number" min="0" max="100" class="mt-1 w-full rounded-lg px-3 py-2" x-model.number="gzctfDraft.remote_concurrency" /></label>
+            <label class="flex items-center gap-2"><input type="checkbox" x-model="gzctfDraft.allow_private_networks" />Allow this platform on a private network</label>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="submit" class="btn rounded-lg px-3 py-2 text-xs" :disabled="competitionBusy">Save draft</button>
+            <button type="button" class="btn-ghost rounded-lg px-3 py-2 text-xs" x-show="gzctfEditingId" :disabled="competitionBusy||opsWorkflowBusy" @click="opsWorkflowId=gzctfEditingId;authorizeOpsWorkflow()">Authorize saved workflow</button>
+            <button type="button" class="btn-ghost rounded-lg px-3 py-2 text-xs" @click="closeGzctfSetup()">Close</button>
+            <span class="text-xs text-rose-600" x-text="opsConfirmError"></span>
+          </div>
+        </form>
         <div x-show="competitionPreflight" class="border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 text-xs text-teal-800">
           <span x-text="competitionPreflight?.challenge_count+' challenges, '+competitionPreflight?.remote_count+' remote'"></span>
           <span class="ml-3 text-teal-600" x-show="competitionPreflight?.limits" x-text="'local '+competitionPreflight?.limits?.local_concurrency+' · remote '+competitionPreflight?.limits?.remote_concurrency"></span>
@@ -871,6 +897,7 @@
       <div class="flex items-center justify-between mb-4 shrink-0">
         <div class="text-lg font-semibold text-slate-700">Logs</div>
         <div class="flex items-center gap-2">
+          <input type="search" aria-label="Search loaded logs" placeholder="Search loaded logs" class="w-44 rounded-lg px-3 py-1.5 text-sm" x-model.debounce.150ms="logSearch" />
           <label class="btn-ghost px-3 py-1.5 rounded-lg text-sm inline-flex items-center gap-2">
             <input type="checkbox" x-model="logEnabled" @change="toggleLog()" />
             Enabled
@@ -1163,7 +1190,7 @@
           </div>
           <div class="mb-2 rounded-lg border border-dashed border-slate-200 px-2.5 py-2 text-[10px] leading-relaxed text-slate-400"
             x-show="opsWorkflows.length && !opsWorkflowId" x-cloak>
-            No workflow selected: IPC will individually adapt a new platform from your description.
+            No workflow selected: use the built-in GZCTF workflow setup, then provide only your platform and competition details.
           </div>
           <template x-if="selectedOpsWorkflow()">
             <div class="space-y-3">
@@ -1240,7 +1267,7 @@
     return {
       projects: [], selectedId: null, current: null, broadcasts: [],
       categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
-      sidebarOpen: true, sideTab: "detail", logEnabled: true, logEntries: [], llmEntries: [],
+      sidebarOpen: true, sideTab: "detail", logEnabled: true, logSearch: "", logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
       showGlobalLogs: false, showGlobalWP: false, showOps: false, showCompetition: false,
       _appStarted: false,
@@ -1261,6 +1288,7 @@
       projectStatusFilter: [], projectFilterOpen: false,
       competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
       competitionWorkflowId: "", competitionBusy: false, competitionPreflight: null, competitionError: "", competitionEventSource: null, competitionEventSourceToken: 0,
+      showGzctfSetup: false, gzctfEditingId: "", gzctfDraft: {}, gzctfAuthMode: "token", gzctfToken: "", gzctfUsername: "", gzctfPassword: "", gzctfDeadline: "",
       competitionEventCursor: 0, competitionEventRunId: "", competitionReconnectTimer: null,
       sessionHealth: [], sessionEvents: [], eventSourceFilter: "all",
       sessionEventSource: null, sessionEventSourceToken: 0, sessionEventCursor: 0,
@@ -1451,7 +1479,11 @@
       logEntryCount(item){ return this.logKinds().reduce((count, kind)=>count+this.logKindCount(item, kind), 0); },
       selectedLogProject(){ return this.globalLogs.find(x=>x.project_id===this.selectedLogProjectId)||this.globalLogs[0]||null; },
       selectedProjectLogFilename(item){ return item?.[this.globalLogKind]?.filename || item?.project_log?.filename || ""; },
-      selectedLogEntries(){ return this.selectedLogProject()?.[this.globalLogKind]?.entries || []; },
+      selectedLogEntries(){
+        const entries=this.selectedLogProject()?.[this.globalLogKind]?.entries || [];
+        const query=this.logSearch.trim().toLocaleLowerCase();
+        return query ? entries.filter(entry=>[this.globalLogDetail(entry),entry.event,this.logEntryMember(entry)].join("\n").toLocaleLowerCase().includes(query)) : entries;
+      },
       selectedLogFilename(){ return this.selectedProjectLogFilename(this.selectedLogProject()); },
       globalLogDetail(entry){
         const parts=[];
@@ -2081,6 +2113,34 @@
         this.opsWorkflows=data.workflows||[];
         if(this.opsWorkflowId&&!this.opsWorkflows.some(workflow=>workflow.id===this.opsWorkflowId)) this.opsWorkflowId=null;
       },
+      openGzctfSetup(workflow=null){
+        const spec=workflow?.spec||{};
+        this.gzctfEditingId=workflow?.id||"";
+        this.gzctfDraft={base_url:spec.challenges?.list_url||"",game_id:spec.challenges?.game_id||"",name:spec.name||"",team_id:spec.team_id||"",attachment_base_url:spec.challenges?.attachment_base_url||"",remote_concurrency:spec.remote_concurrency||0,allow_private_networks:!!spec.allow_private_networks};
+        this.gzctfDeadline=spec.ends_at ? new Date(Date.parse(spec.ends_at)-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : "";
+        this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.opsConfirmError="";this.showGzctfSetup=true;
+      },
+      closeGzctfSetup(){ this.showGzctfSetup=false;this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword=""; },
+      async saveGzctfWorkflow(){
+        if(this.competitionBusy)return;
+        this.competitionBusy=true;this.competitionError="";
+        try{
+          const secrets={};
+          if(this.gzctfAuthMode==="token"&&this.gzctfToken.trim())secrets.gzctf_token=this.gzctfToken.trim();
+          if(this.gzctfAuthMode==="login"){
+            if(this.gzctfUsername.trim())secrets.gzctf_username=this.gzctfUsername.trim();
+            if(this.gzctfPassword)secrets.gzctf_password=this.gzctfPassword;
+          }
+          const payload={...this.gzctfDraft,ends_at:this.gzctfDeadline?new Date(this.gzctfDeadline).toISOString():"",secrets};
+          const url=this.gzctfEditingId?"/api/ops/workflows/"+encodeURIComponent(this.gzctfEditingId)+"/gzctf":"/api/ops/workflows/gzctf";
+          const workflow=await this.api(this.gzctfEditingId?"PUT":"POST",url,payload);
+          this.gzctfEditingId=workflow.id;this.competitionWorkflowId=workflow.id;this.opsWorkflowId=workflow.id;
+          this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.competitionPreflight=null;
+          const tokens={...this.workflowTokens};delete tokens[workflow.id];this.workflowTokens=tokens;
+          await this.loadOpsWorkflows();this.flash("GZCTF workflow saved; authorize it before starting");
+        }catch(error){this.competitionError=error.message||"Could not save GZCTF settings";}
+        finally{this.competitionBusy=false;}
+      },
       selectedOpsWorkflow(){ return this.opsWorkflows.find(workflow=>workflow.id===this.opsWorkflowId)||null; },
       async openCompetition(){
         this.showCompetition=true; this.competitionError="";
@@ -2274,7 +2334,9 @@
         this.competitionBusy=true; this.competitionError="";
         const run=this.competitionRun.run;
         try{
-          this.competitionRun=await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/"+action,{revision:run.revision});
+          const operationId="control-"+(globalThis.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
+          this.competitionRun=await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/"+action,{revision:run.revision,operation_id:operationId});
+          if(this.competitionRun.control_operation)this.flash(action+" request accepted");
           await this.loadCompetitionRun(run.id,false);
         }catch(error){ this.competitionError=error.message||("Could not "+action+" competition"); }
         finally{ this.competitionBusy=false; }

@@ -98,7 +98,9 @@ def test_index_served(client):
     assert '@click="openSkills()"' in body
     assert "flex flex-col gap-1.5 pb-2 mb-2" in body
     assert "this.opsWorkflowId===workflowId ? null : workflowId" in body
-    assert "IPC will individually adapt a new platform" in body
+    assert "built-in GZCTF workflow setup" in body
+    assert "New GZCTF" in body
+    assert "Search loaded logs" in body
     assert "workflow_id:this.opsWorkflowId" in body
     assert "skillSearchResults" in body
     assert "installSkillSpec" in body
