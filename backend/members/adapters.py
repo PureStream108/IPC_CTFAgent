@@ -15,10 +15,13 @@ from urllib.parse import urlsplit, urlunsplit
 from backend.core.config import LLMConfig
 from backend.core.validation import InputValidationError
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 ACTION_KINDS = (
+    "fact",
+    "message",
+    "artifact_read",
+    "job_wait",
     "tool",
     "bash",
     "install",

@@ -1,22 +1,3 @@
-"""The single durable action loop shared by Ops, competition and projects.
-
-The loop has no step budget: it ends when the provider stops asking for tools,
-when cancellation is requested, when the writer loses its fence, or when the
-provider repeats an identical tool batch (a real loop, as opposed to slow
-progress). Everything it needs from storage arrives through a
-:class:`SessionWriter`, which is what lets one implementation serve a
-competition Member seat and an Ops chat turn without either knowing about the
-other's lease model.
-
-Durability rules the loop depends on:
-
-* Every provider message, tool call and tool result is appended before the next
-  step, keyed so a replay after a restart is idempotent.
-* A tool call whose result never landed is repaired as ``unknown`` rather than
-  silently retried, because the side effect may already have happened.
-* Executors receive a stable idempotency key and are responsible for returning
-  a prior result instead of repeating a side effect.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from backend.agent.compaction import deterministic_summary
+from backend.agent.compaction import deterministic_summary, fit_history
 from backend.agent.context import (
     calibrate,
     compacted_history,
@@ -45,7 +26,6 @@ from backend.competition.conversation import (
 )
 from backend.competition.store import CompetitionConflict
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _EVENT_KEY_REUSE_MESSAGE = "event key reused with different content"
@@ -420,6 +400,10 @@ class AgentRuntime:
         if not needed:
             return messages
 
+        started = time.monotonic()
+        self._append(f"compact-start:{self._writer_epoch()}:{turn}", "status",
+                     {"status": "compaction.started", "turn": turn, **detail})
+
         summary: Any
         compacted: list[dict[str, Any]]
         if self.compressor is None:
@@ -446,8 +430,27 @@ class AgentRuntime:
                     {**detail, "status": "compressor_failed",
                      "error": f"{type(exc).__name__}: {exc}"[:2000]},
                 )
-        payload = {"summary": summary, "messages": compacted}
+        from backend.sandbox.output import preview_text
+
+        summary_budget = max(1024, min(8192, self.context_bytes // 8))
+        if len(json.dumps(summary, ensure_ascii=False).encode("utf-8")) > summary_budget:
+            summary = {"text": preview_text(json.dumps(summary, ensure_ascii=False), summary_budget - 128)}
+        compacted = fit_history(
+            compacted, max_bytes=max(2048, int(self.context_bytes * .6) - summary_budget),
+            max_tokens=max(512, int(self.context_token_limit * .5)) if self.context_token_limit else 0,
+            calibration=self.calibration,
+        )
+        metadata = dict(getattr(self.compressor, "last_metadata", {}))
+        fallback = "compacted without a semantic summary" in json.dumps(summary, ensure_ascii=False)
+        payload = {"summary": summary, "messages": compacted, "metrics": {
+            "duration_seconds": round(time.monotonic() - started, 6),
+            "input_tokens": detail.get("tokens"), "output_tokens": estimate_tokens(compacted),
+            "output_bytes": len(json.dumps(compacted, ensure_ascii=False).encode("utf-8")),
+            "degraded": fallback or bool(metadata.get("degraded_reason")), **metadata,
+        }}
         self._append(f"compact:{self._writer_epoch()}:{turn}", "context_compacted", payload)
+        self._append(f"compact-end:{self._writer_epoch()}:{turn}", "status",
+                     {"status": "compaction.completed", "turn": turn, **payload["metrics"]})
         record = getattr(self.writer, "record_compaction", None)
         if callable(record):
             record(summary, token_estimate=detail.get("tokens"))
@@ -749,11 +752,17 @@ class AgentRuntime:
         return args
 
     def _provider_callbacks(self, turn: int):
+        sequences = getattr(self, "recon_sequences", [])
+        if sequences:
+            self._append(f"recon-context:{self._writer_epoch()}:{turn}", "status",
+                         {"status": "recon.in_provider_context", "turn": turn, "sequences": sequences})
+            self.recon_sequences = []
         recorder = getattr(self.writer, "record_provider_progress", None)
         if callable(recorder):
             recorder(turn, "provider.started", 0.0)
         started = time.monotonic()
         responded = False
+        content_received = False
 
         def first_response():
             nonlocal responded
@@ -767,8 +776,19 @@ class AgentRuntime:
             if callable(recorder):
                 recorder(turn, "provider.completed", time.monotonic() - started)
 
+        def first_content():
+            nonlocal content_received
+            if not content_received:
+                content_received = True
+                if callable(recorder):
+                    recorder(turn, "provider.first_content", time.monotonic() - started)
+
         if hasattr(self.adapter, "on_first_response"):
             self.adapter.on_first_response = first_response
+        if hasattr(self.adapter, "on_first_content"):
+            self.adapter.on_first_content = first_content
+        if hasattr(self.adapter, "on_progress") and callable(recorder):
+            self.adapter.on_progress = lambda: recorder(turn, "provider.progress", time.monotonic() - started)
         return first_response, completed
 
     def _record_tool_call(self, call: ToolCall) -> None:
@@ -980,7 +1000,7 @@ class AgentRuntime:
                 return SessionResult("turn_budget", turn_number - 1, last_text)
             if self.before_turn is not None:
                 messages.extend(self.before_turn(self))
-            messages = self._compact(messages, turn_number)
+            messages = await asyncio.to_thread(self._compact, messages, turn_number)
             deltas: list[str] = []
             first_response, provider_completed = self._provider_callbacks(turn_number)
 

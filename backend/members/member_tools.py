@@ -30,9 +30,13 @@ from backend.core.validation import InputValidationError
 
 TERMINAL_TOOLS = frozenset({"submit_flag", "conclude", "give_up"})
 
-PARALLEL_SAFE_TOOLS = frozenset({"memory_search", "tool_search", "job_status", "job_logs"})
+PARALLEL_SAFE_TOOLS = frozenset({"memory_search", "tool_search", "job_status", "job_logs", "artifact_read"})
 
 TOOL_ACTIONS: dict[str, str] = {
+    "publish_fact": "fact",
+    "send_message": "message",
+    "artifact_read": "artifact_read",
+    "job_wait": "job_wait",
     "bash": "bash",
     "install": "install",
     "mcp_tool": "tool",
@@ -71,6 +75,19 @@ _INTEGER = {"type": "integer"}
 
 
 MEMBER_TOOLS: tuple[dict[str, Any], ...] = (
+    _tool("publish_fact", "Publish a verified intermediate fact and notify active teammates without finishing your intent. Include concrete evidence and versioned shared artifact paths. Never use this instead of submit_flag.",
+          {"description": {**_STRING, "maxLength": 1800}, "evidence": {**_STRING, "maxLength": 1800},
+           "artifacts": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {
+               "path": _STRING, "sha256": _STRING, "version": _STRING, "purpose": _STRING},
+               "required": ["path", "sha256"], "additionalProperties": False}}, "thought": _STRING},
+          ["description", "evidence"]),
+    _tool("send_message", "Send a bounded business message to one active teammate on this challenge. State the requested subtask or handoff, shared artifact version, and expected response. Set reply_to to the incoming request_id when responding.",
+          {"receiver": _STRING, "content": {**_STRING, "maxLength": 1800}, "reply_to": _STRING, "thought": _STRING},
+          ["receiver", "content"]),
+    _tool("artifact_read", "Read a bounded page of a workspace artifact or a full-output file returned by bash. Use next_offset to continue; do not cat large files into context.",
+          {"path": _STRING, "offset": {**_INTEGER, "minimum": 0}, "limit": {**_INTEGER, "minimum": 1, "maximum": 8192}, "thought": _STRING}, ["path"]),
+    _tool("job_wait", "Wait up to 15 seconds for a job to exit or produce more progress. Use this instead of shell sleep loops. A still-running or lost job is not success.",
+          {"job_id": _STRING, "timeout": {**_INTEGER, "minimum": 1, "maximum": 15}, "thought": _STRING}, ["job_id"]),
     _tool(
         "bash",
         "Run one shell command in this challenge's container. Killed after 60 "

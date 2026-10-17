@@ -1,15 +1,3 @@
-"""Run a sandbox command that outlives the turn which started it.
-
-This is the orchestration half of P4a: :mod:`backend.agent.jobs` owns the
-durable rows, the sandbox owns the process, and this module is what keeps the
-two honest about each other.
-
-The distinction it exists to protect: a job whose process has vanished without
-a recorded exit status is ``lost``, not ``exited 0``.  Telling a model that a
-brute force "finished successfully" when the container was actually restarted
-underneath it produces confident, wrong conclusions, so the uncertainty is
-reported instead of smoothed over.
-"""
 from __future__ import annotations
 
 import logging
@@ -18,7 +6,6 @@ from typing import Any
 from backend.agent.jobs import INLINE_LIMIT, AgentJobStore, JobConflict, new_job_id
 from backend.sandbox.command_policy import host_path_violation
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 class JobService:
@@ -83,6 +70,24 @@ class JobService:
         if row["state"] != "running":
             return self._view(row)
         return self._view(self._reconcile(row))
+
+    def wait(self, job_id: str, *, timeout: int = 5, cancel=None) -> dict[str, Any]:
+        import time
+
+        deadline = time.monotonic() + max(1, min(15, timeout))
+        while True:
+            result = self.status(job_id)
+            if result.get("state") != "running" or not result.get("ok", True):
+                return result
+            if cancel is not None and cancel.is_set():
+                return {**result, "wait_cancelled": True}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {**result, "wait_timed_out": True}
+            if cancel is not None:
+                cancel.wait(min(.5, remaining))
+            else:
+                time.sleep(min(.5, remaining))
 
     def _reconcile(self, row: dict) -> dict:
         """Fold the sandbox's observation of a running job into its row."""

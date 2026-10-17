@@ -1,15 +1,3 @@
-"""One tool per Member action, and concurrency within a turn (P4b).
-
-Two invariants are the point of these tests:
-
-* A terminal action stops the rest of its batch. Running a side effect after
-  the call that submitted a flag or concluded the intent would apply changes
-  past the decision that ended the task, and the loop's dangling-call repair
-  assumes nothing lands after that point.
-* Parallel execution keeps ``tool-call:{id}`` and ``tool-result:{id}`` paired
-  and in the provider's order. The transcript has to match the ``tool_calls``
-  array regardless of which tool finished first.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -108,6 +96,10 @@ def test_every_action_kind_has_exactly_one_tool():
 def test_each_tool_payload_builds_a_valid_member_action():
     """The dispatcher is still keyed on the legacy kinds, so the map must hold."""
     samples = {
+        "publish_fact": {"description": "LFI verified", "evidence": "GET /read?file=/etc/hostname returned hostname"},
+        "send_message": {"receiver": "jade", "content": "Verify the shared solver"},
+        "artifact_read": {"path": "/workspace/shared/solver.log", "offset": 0},
+        "job_wait": {"job_id": "j1", "timeout": 1},
         "bash": {"command": "id"},
         "install": {"packages": ["jq"]},
         "mcp_tool": {"server": "web", "tool": "fetch", "args": {"url": "http://x"}},

@@ -1,18 +1,3 @@
-"""Context projection: rebuild what the provider sees from durable events.
-
-The reconstruction rule is deliberately simple and total: the newest
-compaction's summary leads, followed by every message the compaction retained
-and every event recorded after it. Because ``agent_events`` is append-only, a
-projection decision is never destructive - a bad compaction costs one turn of
-context quality, not the evidence chain.
-
-Budgeting works in tokens rather than bytes. A byte threshold is wrong by a
-factor of roughly two between CJK and ASCII text, which in practice means
-compacting far too late (context overflow) or far too early (throwing away
-usable evidence). The estimate is calibrated against the real
-``usage.prompt_tokens`` the provider reports, so it converges on the tokenizer
-actually in use instead of assuming one.
-"""
 from __future__ import annotations
 
 import json
@@ -45,7 +30,7 @@ _CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("gpt-4o", 128_000),
     ("o4", 200_000),
     ("o3", 200_000),
-    ("deepseek", 128_000),
+    ("deepseek", 1_000_000),
     ("kimi-k2", 256_000),
     ("kimi-for-coding", 256_000),
     ("qwen3", 128_000),

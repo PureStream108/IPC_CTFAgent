@@ -58,7 +58,6 @@ from backend.platform.ret2shell import (
 from backend.sandbox.errors import SandboxStartupError
 from backend.sandbox.task_sandbox import member_workdir, task_container_name
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
@@ -556,9 +555,6 @@ class Orchestrator:
             return project_id in self._startup_project_ids
 
     def _acquire_task(self, project_id: str) -> bool:
-        # Competition already owns local/remote capacity and Member seats.
-        # A second generic task gate would merge the pools again, and would
-        # reject valid run-level capacity overrides.
         if self._competition_project(project_id):
             return self.resources.acquire_coordinated_task(project_id)
         return self.resources.acquire_task(project_id)
@@ -865,11 +861,12 @@ class Orchestrator:
         *,
         event_id: str,
         payload: dict[str, Any],
-    ) -> None:
+        receiver_member: str | None = None,
+    ) -> list[dict]:
         """Bridge durable Member reports into the same-challenge PUB/SUB path."""
         competition = getattr(self.state, "competition", None)
         if competition is None or not callable(getattr(competition, "publish_recon", None)):
-            return
+            return []
         now = datetime.now(timezone.utc)
         try:
             with self.state.db.connect() as connection:
@@ -889,11 +886,14 @@ class Orchestrator:
                 if source_member is None or item["member"] == source_member
             ]
             if not senders:
-                return
+                return []
             sender = senders[0]
             actual_source = sender["member"]
+            published = []
             for receiver in assignments:
                 if receiver["member"] == actual_source:
+                    continue
+                if receiver_member and receiver["member"] != receiver_member:
                     continue
                 message = Envelope(
                     run_id=sender["run_id"],
@@ -906,11 +906,14 @@ class Orchestrator:
                     correlation_id=event_id,
                     lease_epoch=sender["epoch"],
                     created_at=now,
-                    deadline_at=now + timedelta(seconds=30),
+                    deadline_at=now + timedelta(seconds=300),
                     message_type="recon",
                     payload=payload,
                 )
-                competition.publish_recon(message)
+                receipt = competition.publish_recon(message)
+                published.append({"request_id": message.request_id, "receiver": receiver["member"],
+                                  "sequence": receipt.get("sequence") if isinstance(receipt, dict) else None})
+            return published
         except Exception as exc:
             _recovery_logger.debug('Error handled in _publish_competition_recon', exc_info=True)
             self.state.logger.project(
@@ -919,6 +922,15 @@ class Orchestrator:
                 member=source_member,
                 error=f"{type(exc).__name__}: {exc}",
             )
+            return []
+
+    def _send_member_message(self, project_id: str, source: str, receiver: str, payload: dict) -> dict:
+        event_id = "member:" + hashlib.sha256(json.dumps([project_id, source, receiver, payload], sort_keys=True).encode()).hexdigest()[:32]
+        receipts = self._publish_competition_recon(project_id, source, event_id=event_id,
+                                                   payload=payload, receiver_member=receiver)
+        if not receipts:
+            raise ValueError("recipient is not an active teammate on this challenge or message delivery is unavailable")
+        return {"published": True, "receipts": receipts}
 
     def _broadcast_fact(self, project_id: str, fact_id: str, source_member: str | None) -> None:
         with self.state.db.connect() as conn:
@@ -1194,6 +1206,8 @@ class Orchestrator:
                 max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
                 continuous=self._competition_project(project_id),
                 on_report=self.handle_report,
+                on_fact=self._broadcast_fact,
+                on_message=self._send_member_message,
                 on_flag=self.on_flag_found,
                 lease_owner=lease_owner,
                 lease_token=lease_token,
@@ -2553,7 +2567,10 @@ class Orchestrator:
             ).fetchone()
             if row is None:
                 return
-            candidates = sorted(set(re.findall(r"(?:flag|ctf)\{[^}\n]{1,400}\}", row["description"], re.IGNORECASE)))
+            text = row["description"]
+            if re.search(r"\b(?:example|placeholder|sample flag)\b|示例|占位", text, re.IGNORECASE):
+                return
+            candidates = sorted(set(re.findall(r"(?:[A-Za-z0-9_]*ctf|flag)\{[^}\n]{1,400}\}", text, re.IGNORECASE)))
             if len(candidates) != 1:
                 if len(candidates) > 1:
                     self.state.logger.project(

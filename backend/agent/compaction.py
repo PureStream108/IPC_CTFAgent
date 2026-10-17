@@ -1,22 +1,9 @@
-"""Semantic compaction: a structured summary, not a truncated transcript.
-
-Dropping the oldest messages loses exactly what a long investigation needs to
-keep: which facts were verified, which approaches already failed, and where the
-interesting bytes live. That is why the summary has an explicit schema with a
-``do_not_retry`` marker on failed paths - the point is to stop the model from
-re-running work it has already ruled out.
-
-Compaction is an optimisation, never a precondition for running. If the
-summarizer fails, the caller falls back to :func:`deterministic_summary`, which
-needs no model at all.
-"""
 from __future__ import annotations
 
 import json
 import logging
 from typing import Any
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 SUMMARY_SCHEMA_HINT = {
@@ -114,7 +101,66 @@ def deterministic_summary(
                 "evidence": "compacted transcript",
             }
         ]
+    for message in dropped:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            value = json.loads(content.split("\n", 1)[1]) if content.startswith("[compacted context summary]") else json.loads(content)
+        except (ValueError, IndexError):
+            continue
+        if isinstance(value, dict):
+            for key in _SUMMARY_KEYS:
+                if isinstance(value.get(key), list):
+                    summary[key].extend(value[key])
+            artifacts = (value.get("process") or {}).get("artifacts", {})
+            if isinstance(artifacts, dict):
+                summary["artifacts"].extend(item for item in artifacts.values() if isinstance(item, dict))
     return summary, [*head, *tail]
+
+
+def fit_history(messages: list[dict[str, Any]], *, max_bytes: int, max_tokens: int = 0,
+                calibration: float = 1.0) -> list[dict[str, Any]]:
+    """Bound a projection while removing orphaned results with their old batch."""
+    from backend.agent.context import estimate_tokens
+    from backend.sandbox.output import preview_text
+
+    limit = max(1024, min(16384, max_bytes // 4))
+    bounded = []
+    for original in messages:
+        message = dict(original)
+        for key in ("content", "output"):
+            content = message.get(key)
+            if isinstance(content, str):
+                message[key] = preview_text(content, limit)
+            elif isinstance(content, list):
+                blocks = []
+                for original_block in content:
+                    if not isinstance(original_block, dict):
+                        blocks.append(original_block)
+                        continue
+                    block = dict(original_block)
+                    for field in ("text", "content"):
+                        if isinstance(block.get(field), str):
+                            block[field] = preview_text(block[field], limit)
+                    blocks.append(block)
+                message[key] = blocks
+        bounded.append(message)
+    while bounded:
+        size = len(json.dumps(bounded, ensure_ascii=False).encode("utf-8"))
+        if size <= max_bytes and (not max_tokens or estimate_tokens(bounded, calibration=calibration) <= max_tokens):
+            return bounded
+        if len(bounded) > 1:
+            bounded = bounded[:1] + _balanced_tail(bounded[2:], len(bounded))
+            continue
+        content = bounded[0].get("content")
+        if isinstance(content, str) and len(content.encode("utf-8")) > 512:
+            bounded[0]["content"] = preview_text(content, max(512, len(content.encode("utf-8")) // 2))
+            continue
+        raise ValueError("opening context exceeds the configured projection budget")
+    return []
 
 
 def _balanced_tail(
@@ -162,6 +208,7 @@ def summarize(
     *,
     request,
     keep_recent: int = 8,
+    on_degraded=None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Produce a structured summary plus the retained tail.
 
@@ -179,10 +226,14 @@ def summarize(
     try:
         raw = request(_PROMPT, dropped)
         summary = normalize_summary(_parse_json(raw))
-    except Exception:
+    except Exception as exc:
         _recovery_logger.debug('Error handled in summarize', exc_info=True)
+        if on_degraded is not None:
+            on_degraded(f"{type(exc).__name__}: {exc}"[:1000])
         return fallback_summary, retained
     if is_empty(summary):
+        if on_degraded is not None:
+            on_degraded("semantic summarizer returned no usable structured facts")
         return fallback_summary, retained
     return summary, retained
 

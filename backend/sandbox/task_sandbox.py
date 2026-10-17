@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import shlex
 import tarfile
 import threading
+import time
+import uuid
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
@@ -16,10 +19,14 @@ from backend.sandbox.errors import (
     SandboxStartupError,
     classify_docker_startup_error,
 )
+from backend.sandbox.output import (
+    DEFAULT_OUTPUT_BYTES,
+    OUTPUT_FINALIZER,
+    OUTPUT_PAGE_READER,
+)
 from backend.sandbox.sandbox import ExecResult
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 WORKSPACE = "/workspace"
@@ -393,6 +400,40 @@ class TaskSandbox:
         timed_out = res.exit_code in (124, 137)
         return ExecResult(res.exit_code if res.exit_code is not None else -1, stdout, stderr, timed_out)
 
+    def exec_bounded(self, command: str, workdir: str, timeout: int = 60) -> ExecResult:
+        if self._container is None:
+            self.start()
+        identifier = uuid.uuid4().hex
+        directory = f"{SHARED_DIR}/.ipc-output"
+        stdout, stderr = (f"{directory}/{identifier}.{stream}" for stream in ("stdout", "stderr"))
+        limit = max(1024, int(getattr(self, "output_limit", DEFAULT_OUTPUT_BYTES)))
+        script = "\n".join([
+            f"mkdir -p {shlex.quote(directory)}",
+            f"timeout -k 5s {timeout}s bash -lc {shlex.quote(command)} >{shlex.quote(stdout)} 2>{shlex.quote(stderr)}",
+            "ipc_output_status=$?",
+            (f"python3 -c {shlex.quote(OUTPUT_FINALIZER)} {shlex.quote(stdout)} {shlex.quote(stderr)} "
+             f'"$ipc_output_status" {limit // 2}'),
+        ])
+        started = time.monotonic()
+        envelope = self._raw_exec(script, workdir=workdir, timeout=timeout + 15)
+        if not envelope.ok:
+            return envelope
+        try:
+            payload = json.loads(envelope.stdout)
+            code = int(payload["exit_code"])
+            return ExecResult(code, payload["stdout"], payload["stderr"], code in (124, 137),
+                              payload["artifacts"], round(time.monotonic() - started, 6))
+        except (ValueError, KeyError, TypeError):
+            raise RuntimeError("sandbox output finalizer returned an invalid envelope") from None
+
+
+    def read_page(self, path: str, *, workdir: str, offset: int = 0, limit: int = 8192) -> dict:
+        target = str(PurePosixPath(workdir) / path) if not PurePosixPath(path).is_absolute() else path
+        result = self._raw_exec(f"python3 -c {shlex.quote(OUTPUT_PAGE_READER)} {shlex.quote(target)} {int(offset)} {int(limit)}",
+                                workdir=workdir, timeout=10)
+        if not result.ok:
+            raise ValueError("artifact is unavailable or outside this workspace")
+        return json.loads(result.stdout)
 
     def exec_detached(self, job_id: str, command: str, workdir: str) -> int:
         """Start ``command`` with no timeout and return its process-group PID.
@@ -508,7 +549,13 @@ class MemberSandbox:
         self._task.start()
 
     def exec(self, command: str, timeout: int = 60) -> ExecResult:
-        return self._task.exec(command, workdir=self.workdir, timeout=timeout)
+        return self._task.exec_bounded(command, workdir=self.workdir, timeout=timeout)
+
+    def configure_output(self, limit: int) -> None:
+        self._task.output_limit = max(1024, int(limit))
+
+    def read_page(self, path: str, *, offset: int = 0, limit: int = 8192) -> dict:
+        return self._task.read_page(path, workdir=self.workdir, offset=offset, limit=limit)
 
 
     def exec_detached(self, job_id: str, command: str) -> int:

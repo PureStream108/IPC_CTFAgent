@@ -60,7 +60,6 @@ from backend.tools.tool_inventory import (
 from backend.tools.tool_mcp import build_category_tools_mcp, build_tool_search_mcp
 from backend.tools.tool_registry import LANGUAGES, PUBLIC_MCPS, ToolRegistry
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _LOCAL_WEBUI_URL_RE = re.compile(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})\b")
@@ -117,6 +116,8 @@ class MemberDeps:
     competition_recon_advance: Callable[[str, int], int] | None = None
     runtime: Any | None = None
     job_store: Any | None = None
+    on_fact: Callable[[str, str, str], None] | None = None
+    on_message: Callable[[str, str, str, dict], dict] | None = None
 
 
 @dataclass
@@ -137,6 +138,7 @@ class DispatchResult:
     invalid_action: bool = False
     invalid_knowledge: list[str] | None = None
     observation: str | None = None
+    process: dict[str, Any] | None = None
 
 
 class _IntentLeaseLost(RuntimeError):
@@ -165,6 +167,9 @@ class BaseMember:
         self._recon_subscriber: ReconSubscriber | None = None
         self._session_recording_failed = False
         self._job_service: Any | None = None
+        configure_output = getattr(getattr(deps, "sandbox", None), "configure_output", None)
+        if callable(configure_output):
+            configure_output(getattr(getattr(deps, "runtime", None), "tool_output_bytes", 16384))
 
     def _jobs(self):
         """Return the detached-job service, or None when it cannot be backed.
@@ -298,6 +303,16 @@ class BaseMember:
                 )
             messages.append(message)
             subscriber.ack(sequence)
+            if runner is not None:
+                pending = getattr(runner, "recon_sequences", [])
+                runner.recon_sequences = [*pending, sequence][-100:]
+            if (self.deps.competition_store is not None and envelope.get("run_id")
+                    and callable(getattr(self.deps.competition_store, "append_run_event", None))):
+                self.deps.competition_store.append_run_event(
+                    envelope["run_id"], "competition.message_read",
+                    {"sequence": sequence, "request_id": envelope.get("request_id"),
+                     "session_id": envelope.get("receiver_session_id"), "challenge_id": envelope.get("challenge_id")},
+                )
         return messages
 
     def solve(self, project_id: str, intent_id: str, category: str, is_initial: bool = False) -> SolveResult:
@@ -757,17 +772,28 @@ class BaseMember:
         """
         from backend.agent.compaction import summarize
 
+        runtime = getattr(self.deps, "runtime", None)
+        timeout = getattr(runtime, "compaction_timeout", 30)
+
         def request(prompt: str, dropped: list[dict[str, Any]]) -> str:
-            rendered = json.dumps(dropped, ensure_ascii=False)[:400_000]
-            return self.adapter.chat(
-                [{"role": "user", "content": rendered}],
-                system_prompt=prompt,
-                temperature=0.0,
+            from backend.agent.compaction import fit_history
+
+            rendered = json.dumps(fit_history(dropped, max_bytes=100_000), ensure_ascii=False)
+            config = self.adapter.config.model_copy(update={"reasoning_effort": "low"})
+            adapter = ConversationAdapter(
+                config, max_output_tokens=getattr(runtime, "compaction_max_output_tokens", 2048),
+                read_timeout=timeout, turn_timeout=timeout, progress_timeout=timeout,
             )
+            result = adapter.turn([{"role": "user", "content": rendered}], prompt, [], lambda _text: None, self._stop)
+            compress.last_metadata["usage"] = result.usage
+            return result.text
 
         def compress(messages: list[dict[str, Any]]):
-            return summarize(messages, request=request)
+            compress.last_metadata = {"budget_seconds": timeout, "attempts": 1}
+            return summarize(messages, request=request,
+                             on_degraded=lambda reason: compress.last_metadata.update(degraded_reason=reason))
 
+        compress.last_metadata = {}
         return compress
 
     def _make_native_runner(
@@ -786,6 +812,8 @@ class BaseMember:
                 self.adapter.config,
                 max_output_tokens=getattr(runtime_config, "max_output_tokens", 32768),
                 read_timeout=getattr(runtime_config, "provider_read_timeout", 300),
+                turn_timeout=getattr(runtime_config, "provider_turn_timeout", 900),
+                progress_timeout=getattr(runtime_config, "provider_progress_timeout", 300),
             )
         kwargs = {
             "system": (
@@ -793,7 +821,12 @@ class BaseMember:
                 "Each action is its own tool; call the one that matches what "
                 "you want to do. Read-only tools may be called together in one "
                 "turn. Continue until the challenge is solved, a real flag is "
-                "verified, or evidence is genuinely exhausted."
+                "verified, or evidence is genuinely exhausted. Publish verified intermediate facts with publish_fact "
+                "without concluding your intent; put artifacts under /workspace/shared/<member>/<task>/ and include "
+                "their hash and run command. Use send_message to hand off work to an active teammate, not at every step. "
+                "Read received facts before redoing analysis. After a sustained stretch without new evidence, report "
+                "the failed approaches and switch hypothesis. Use job_start/job_wait for long work and artifact_read "
+                "to page large outputs. A verified flag must be submitted with submit_flag."
             ),
             "tools": tools,
             "cancel": self._stop,
@@ -803,6 +836,7 @@ class BaseMember:
             ),
             "before_turn": self._drain_competition_recon,
             "compressor": self._semantic_compressor(),
+            "context_bytes": getattr(runtime_config, "context_bytes", 1_000_000),
             "context_token_limit": getattr(runtime_config, "context_token_limit", 0),
             "compaction_trigger_ratio": getattr(
                 runtime_config, "compaction_trigger_ratio", 0.75
@@ -1034,6 +1068,8 @@ class BaseMember:
                 }
                 if dispatched.observation:
                     payload["observation"] = dispatched.observation
+                if dispatched.process is not None:
+                    payload["process"] = dispatched.process
                 return payload
 
         runner.executor = Executor()
@@ -1188,7 +1224,18 @@ class BaseMember:
                     observation=text,
                 )
             res = d.sandbox.exec(cmd, timeout=60)
-            text = f"$ {cmd}\n{res.stdout}\n{res.stderr}".strip()
+            from backend.sandbox.output import preview_text
+
+            budget = getattr(d.runtime, "tool_output_bytes", 16384)
+            text = preview_text(f"$ {preview_text(cmd, 2048)}\n{res.stdout}\n{res.stderr}".strip(), budget)
+            artifacts = getattr(res, "artifacts", {})
+            process = {"exit_code": res.exit_code, "timed_out": res.timed_out,
+                       "duration_seconds": getattr(res, "duration_seconds", None),
+                       "output_truncated": bool(artifacts), "artifacts": artifacts}
+            if artifacts:
+                text += "\n[output artifacts] " + json.dumps(artifacts, ensure_ascii=False)
+            if res.timed_out:
+                text += "\nCommand timed out. Use job_start for work that requires more than 60 seconds."
             self._observe(text)
             self._observe_webui_links(project_id, cmd, res.stdout, res.stderr)
             d.logger.tool(
@@ -1199,6 +1246,7 @@ class BaseMember:
                 exit_code=res.exit_code,
                 stdout=res.stdout[:4000],
                 stderr=res.stderr[:4000],
+                process=process,
             )
             missing_command = self._missing_command_from_result(cmd, res.stderr)
             if missing_command:
@@ -1206,7 +1254,23 @@ class BaseMember:
                 return DispatchResult(
                     invalid_action=True, invalid_knowledge=knowledge, observation=text
                 )
-            return DispatchResult(observation=text)
+            return DispatchResult(observation=text, process=process)
+        if kind == "job_wait":
+            service = self._jobs()
+            if service is None:
+                return DispatchResult(invalid_action=True, observation="job service unavailable")
+            job_id = self._string_arg(action.args.get("job_id", ""))
+            timeout = max(1, min(15, int(action.args.get("timeout", 5))))
+            result = await asyncio.to_thread(service.wait, job_id, timeout=timeout, cancel=self._stop)
+            return DispatchResult(observation="[job_wait] " + json.dumps(result, ensure_ascii=False, default=str))
+        if kind == "artifact_read":
+            reader = getattr(d.sandbox, "read_page", None)
+            if not callable(reader):
+                return DispatchResult(invalid_action=True, observation="artifact paging unavailable")
+            result = await asyncio.to_thread(reader, self._string_arg(action.args.get("path", "")),
+                                            offset=max(0, int(action.args.get("offset", 0))),
+                                            limit=max(1, min(8192, int(action.args.get("limit", 8192)))))
+            return DispatchResult(observation=json.dumps(result, ensure_ascii=False))
         if kind in ("job_start", "job_status", "job_logs", "job_cancel"):
             return self._dispatch_job(project_id, intent_id, action)
         if kind == "install":
@@ -1275,6 +1339,50 @@ class BaseMember:
         if kind == "report":
             report = self._submit_report(project_id, intent_id, action)
             return DispatchResult(graph_action="report" if report is not None else None)
+        if kind == "fact":
+            description = self._string_arg(action.args.get("description", "")).strip()
+            evidence = self._string_arg(action.args.get("evidence", "")).strip()
+            artifacts = action.args.get("artifacts", [])
+            if not description or not evidence or len(description) > 1800 or len(evidence) > 1800:
+                return DispatchResult(invalid_action=True, observation="publish_fact requires a bounded claim and concrete evidence")
+            if not isinstance(artifacts, list) or len(artifacts) > 8 or len(json.dumps(artifacts)) > 4096:
+                return DispatchResult(invalid_action=True, observation="invalid artifact handoff")
+            for artifact in artifacts:
+                if (not isinstance(artifact, dict) or not str(artifact.get("path", "")).startswith("/workspace/shared/")
+                        or not re.fullmatch(r"[a-fA-F0-9]{64}", str(artifact.get("sha256", "")))):
+                    return DispatchResult(invalid_action=True, observation="shared artifacts need a /workspace/shared/ path and SHA-256")
+            text = description + "\nEvidence: " + evidence
+            if artifacts:
+                text += "\nArtifacts: " + json.dumps(artifacts, ensure_ascii=False)
+            with d.db.connect() as connection:
+                connection.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
+                owned = connection.execute(
+                    """SELECT id FROM intents WHERE project_id=%s AND id=%s AND worker=%s AND lease_owner=%s
+                       AND lease_token=%s AND lease_expires_at>now() AND to_fact_id IS NULL FOR UPDATE""",
+                    (project_id, intent_id, self.name, d.lease_owner, d.lease_token),
+                ).fetchone()
+                if owned is None:
+                    raise _IntentLeaseLost("intent lease lost before fact publication")
+                old = connection.execute("SELECT id FROM facts WHERE project_id=%s AND description=%s LIMIT 1", (project_id, text)).fetchone()
+                if old:
+                    fact_id = old["id"]
+                else:
+                    fact = node_store.reserve_fact(connection, project_id, text)
+                    node_store.insert_fact(connection, project_id, fact.id, fact.description)
+                    fact_id = fact.id
+                    graph_store.add_link(connection, project_id, self.name, f"fact:{fact_id}", "explore")
+            if not old and d.on_fact:
+                d.on_fact(project_id, fact_id, self.name)
+            d.logger.project("member_fact_published", project_id, member=self.name, fact_id=fact_id, artifacts=artifacts)
+            return DispatchResult(graph_action="fact", observation=f"Published fact {fact_id}; your intent remains active.")
+        if kind == "message":
+            receiver = self._string_arg(action.args.get("receiver", "")).strip()
+            content = self._string_arg(action.args.get("content", "")).strip()
+            if not receiver or receiver == self.name or not content or len(content) > 1800 or d.on_message is None:
+                return DispatchResult(invalid_action=True, observation="message needs one active teammate and bounded content")
+            result = d.on_message(project_id, self.name, receiver,
+                                  {"kind": "member_message", "content": content, "reply_to": action.args.get("reply_to", "")})
+            return DispatchResult(graph_action="message", observation=json.dumps(result, ensure_ascii=False))
         if kind == "intent":
             if not allow_intent:
                 d.logger.project(

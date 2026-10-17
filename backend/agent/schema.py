@@ -1,13 +1,3 @@
-"""Storage contract for the unified agent runtime. Keep migration-stable.
-
-The central invariant: ``agent_events`` is append-only. Nothing in this
-contract modifies or deletes an event, so the evidence chain of a task
-survives compaction, member handoff, and worker restarts. Context
-reconstruction is a projection over these events (see
-``backend.agent.context``), and a compaction is a *derived* summary recorded
-in ``agent_compactions`` rather than a destructive rewrite of the transcript.
-"""
-
 AGENT_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS agent_sessions (
         id TEXT PRIMARY KEY,
@@ -136,24 +126,26 @@ AGENT_SCHEMA = (
               -- any kind. A long provider turn and a long tool both count as
               -- progress; only genuine silence accumulates here.
               GREATEST(
-                COALESCE(e.last_event_at, s.created_at),
+                COALESCE(e.last_progress_event_at, s.created_at),
                 COALESCE(t.current_turn_started_at, s.created_at),
                 COALESCE(t.last_finished_turn_at, s.created_at),
-                COALESCE(j.last_job_progress_at, s.created_at),
-                COALESCE(w.last_renewed_at, s.created_at)
+                COALESCE(j.last_job_progress_at, s.created_at)
               ) AS last_progress_at,
               EXTRACT(EPOCH FROM now() - GREATEST(
-                COALESCE(e.last_event_at, s.created_at),
+                COALESCE(e.last_progress_event_at, s.created_at),
                 COALESCE(t.current_turn_started_at, s.created_at),
                 COALESCE(t.last_finished_turn_at, s.created_at),
-                COALESCE(j.last_job_progress_at, s.created_at),
-                COALESCE(w.last_renewed_at, s.created_at)
+                COALESCE(j.last_job_progress_at, s.created_at)
               ))::bigint AS quiet_seconds
        FROM agent_sessions s
        LEFT JOIN agent_session_writers w ON w.session_id = s.id
        LEFT JOIN (
          SELECT session_id,
                 max(created_at) AS last_event_at,
+                max(created_at) FILTER (WHERE kind IN ('tool_call','tool_result','context_compacted')
+                    OR (kind='status' AND payload->>'status' IN
+                        ('provider.started','provider.first_content','provider.progress','provider.completed',
+                         'compaction.started','compaction.completed'))) AS last_progress_event_at,
                 count(*) AS event_count,
                 (array_agg(kind ORDER BY sequence DESC))[1] AS last_event_kind
          FROM agent_events GROUP BY session_id

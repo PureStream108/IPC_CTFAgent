@@ -6,11 +6,18 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
+import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from backend.sandbox.output import (
+    DEFAULT_OUTPUT_BYTES,
+    read_output_file,
+    read_page_file,
+)
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
 
@@ -91,6 +98,8 @@ class ExecResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    artifacts: dict = field(default_factory=dict)
+    duration_seconds: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -123,6 +132,10 @@ class LocalSandbox:
         self._started = False
         self._webui_keys: set[tuple[str, str]] = set()
         self._jobs: dict[str, subprocess.Popen] = {}
+        self.output_limit = DEFAULT_OUTPUT_BYTES
+
+    def configure_output(self, limit: int) -> None:
+        self.output_limit = max(1024, int(limit))
 
     def start(self) -> None:
         with self._lock:
@@ -146,28 +159,36 @@ class LocalSandbox:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             popen_kwargs["start_new_session"] = True
-        proc = subprocess.Popen(
-            args,
-            shell=use_shell,
-            cwd=str(self.workspace),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=full_env,
-            **popen_kwargs,
-        )
-        try:
-            out, err = proc.communicate(timeout=timeout)
-            return ExecResult(int(proc.returncode or 0), out or "", err or "")
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(proc)
+        directory = self.workspace / ".ipc" / "output"
+        directory.mkdir(parents=True, exist_ok=True)
+        identifier = uuid.uuid4().hex
+        paths = [directory / f"{identifier}.{stream}" for stream in ("stdout", "stderr")]
+        started = time.monotonic()
+        timed_out = False
+        with paths[0].open("wb") as stdout, paths[1].open("wb") as stderr:
+            proc = subprocess.Popen(
+                args, shell=use_shell, cwd=str(self.workspace), stdout=stdout, stderr=stderr,
+                env=full_env, **popen_kwargs,
+            )
             try:
-                out, err = proc.communicate(timeout=10)
+                proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                out, err = "", ""
-            return ExecResult(124, out or "", err or "", timed_out=True)
+                timed_out = True
+                _kill_process_tree(proc)
+                with suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=10)
+        previews = []
+        artifacts = {}
+        for stream, path in zip(("stdout", "stderr"), paths):
+            preview, artifact = read_output_file(path, self.output_limit // 2)
+            previews.append(preview)
+            if artifact:
+                artifacts[stream] = artifact
+            else:
+                path.unlink(missing_ok=True)
+        return ExecResult(124 if timed_out else int(proc.returncode or 0), *previews,
+                          timed_out=timed_out, artifacts=artifacts,
+                          duration_seconds=round(time.monotonic() - started, 6))
 
     def write_file(self, rel_path: str, content: str) -> None:
         target = self._safe_path(rel_path)
@@ -316,6 +337,9 @@ class LocalSandbox:
         if not target.exists():
             return None
         return target.read_text(encoding="utf-8", errors="replace")
+
+    def read_page(self, path: str, *, offset: int = 0, limit: int = 8192) -> dict:
+        return read_page_file(self._safe_path(path), offset=offset, limit=limit)
 
     def stop(self) -> None:
         for project_id, member in list(self._webui_keys):
