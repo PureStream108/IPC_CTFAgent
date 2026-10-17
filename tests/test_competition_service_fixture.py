@@ -1,11 +1,3 @@
-"""A database-backed competition coordinator acceptance flow.
-
-The platform is deterministic, but the run, assignments, leases, submissions,
-and writeups all use the production PostgreSQL paths.  This catches regressions
-that isolated store tests cannot see, especially around the coordinator's
-ordering of platform calls and durable state transitions.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -526,7 +518,7 @@ def test_paused_run_reconciles_pending_submission_and_renews_without_new_submit(
         db.close()
 
 
-def test_instance_renewal_failure_rebuilds_and_fences_new_generation(tmp_path):
+def test_transient_instance_renewal_failure_preserves_target_and_generation(tmp_path):
     platform = FixturePlatform(
         [PlatformChallenge(
             external_id="rebuild-remote", title="Rebuild remote", category="web",
@@ -552,13 +544,12 @@ def test_instance_renewal_failure_rebuilds_and_fences_new_generation(tmp_path):
             )
         service.tick()
         current = service.store.challenges(run_id)[0]
-        assert current["instance_generation"] == challenge["instance_generation"] + 1
-        assert platform.rebuilds == ["rebuild-remote"]
-        assert any(
-            kind == "instance.rebuilt"
-            for kind, _fields in _state.logger.events
-        )
-        assert platform.instances()[0]["generation"] == 2
+        assert current["instance_generation"] == challenge["instance_generation"]
+        assert platform.rebuilds == []
+        assert platform.instances()[0]["generation"] == 1
+        events = service.store.run_events(run_id)
+        assert any(event["kind"] == "instance.renew_failed" for event in events)
+        assert not any(event["kind"] == "instance.rebuild_requested" for event in events)
     finally:
         service.shutdown()
         db.close()

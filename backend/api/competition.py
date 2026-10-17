@@ -44,6 +44,7 @@ class StartRequest(BaseModel):
 class ControlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     revision: int = Field(ge=1)
+    operation_id: str | None = Field(default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class LimitsRequest(BaseModel):
@@ -65,7 +66,6 @@ class CandidateRequest(BaseModel):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 def get_competition(state: AppState = _GET_STATE_DEPENDENCY) -> CompetitionService:
@@ -95,7 +95,6 @@ def _call(function, *args, **kwargs):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_COMPETITION_DEPENDENCY = Depends(get_competition)
 
 @router.post("/workflows/{workflow_id}/preflight")
@@ -140,7 +139,14 @@ def control_run(
     body: ControlRequest,
     service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
+    if body.operation_id:
+        return _call(service.control, run_id, action, body.revision, operation_id=body.operation_id)
     return _call(service.control, run_id, action, body.revision)
+
+
+@router.get("/runs/{run_id}/operations/{operation_id}")
+def control_operation(run_id: str, operation_id: str, service: CompetitionService = _GET_COMPETITION_DEPENDENCY):
+    return _call(service.store.control_operation, run_id, operation_id)
 
 
 @router.patch("/runs/{run_id}/limits")

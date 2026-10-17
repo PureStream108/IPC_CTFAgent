@@ -60,6 +60,66 @@ class CompetitionStore:
     def __init__(self, db):
         self.db = db
 
+    def queue_control(self, run_id: str, action: str, revision: int, operation_id: str | None = None) -> dict:
+        if action not in {"pause", "resume", "stop", "refresh"}:
+            raise ValueError("unsupported run action")
+        operation_id = operation_id or new_id()
+        with self.db.connect() as connection:
+            previous = connection.execute("SELECT * FROM competition_control_operations WHERE id=%s", (operation_id,)).fetchone()
+            if previous:
+                if (previous["run_id"], previous["action"], previous["requested_revision"]) != (run_id, action, revision):
+                    raise CompetitionConflict("control operation id reused with different content")
+                return previous
+            run = connection.execute("SELECT revision FROM competition_runs WHERE id=%s", (run_id,)).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            if run["revision"] != revision:
+                raise CompetitionConflict("stale run revision")
+            connection.execute(
+                """INSERT INTO competition_control_operations(id,run_id,action,requested_revision)
+                   VALUES (%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING""", (operation_id, run_id, action, revision),
+            )
+            operation = connection.execute("SELECT * FROM competition_control_operations WHERE id=%s", (operation_id,)).fetchone()
+            if (operation["run_id"], operation["action"], operation["requested_revision"]) != (run_id, action, revision):
+                raise CompetitionConflict("control operation id reused with different content")
+            return operation
+
+    def claim_control(self, owner: str) -> dict | None:
+        with self.db.connect() as connection:
+            operation = connection.execute(
+                """UPDATE competition_control_operations SET status='running',owner=%s,epoch=epoch+1,
+                       lease_expires_at=now()+interval '90 seconds'
+                   WHERE id=(SELECT o.id FROM competition_control_operations o JOIN competition_runs r ON r.id=o.run_id
+                             WHERE (o.status='queued' OR (o.status='running' AND o.lease_expires_at<=now()))
+                               AND (r.status IN ('stopped','finished') OR r.lease_owner=%s
+                                    OR r.lease_expires_at IS NULL OR r.lease_expires_at<=now())
+                             ORDER BY o.created_at,o.id FOR UPDATE OF o SKIP LOCKED LIMIT 1)
+                   RETURNING *""", (owner, owner),
+            ).fetchone()
+            if operation:
+                connection.execute(
+                    """UPDATE competition_runs SET lease_owner=%s,lease_expires_at=now()+interval '90 seconds'
+                       WHERE id=%s AND status NOT IN ('finished','stopped')""", (owner, operation["run_id"]),
+                )
+            return operation
+
+    def finish_control(self, operation: dict, *, error: str | None = None) -> bool:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """UPDATE competition_control_operations SET status=%s,error=%s,finished_at=now(),lease_expires_at=NULL
+                   WHERE id=%s AND owner=%s AND epoch=%s AND status='running' RETURNING id""",
+                ("failed" if error else "completed", error, operation["id"], operation["owner"], operation["epoch"]),
+            ).fetchone() is not None
+
+    def control_operation(self, run_id: str, operation_id: str) -> dict:
+        with self.db.connect() as connection:
+            result = connection.execute(
+                "SELECT * FROM competition_control_operations WHERE id=%s AND run_id=%s", (operation_id, run_id),
+            ).fetchone()
+        if result is None:
+            raise KeyError(operation_id)
+        return result
+
     def claim_engine_lease(
         self, project_id: str, kind: str, owner: str, *, seconds: int = 60
     ) -> dict | None:
@@ -1195,12 +1255,19 @@ class CompetitionStore:
             self._expire_assignment_writers(
                 connection, [row["session_id"] for row in rows]
             )
-            connection.execute(
+            expired = connection.execute(
                 """UPDATE competition_challenges SET state='expired'
                    WHERE id IN (SELECT challenge_id FROM competition_run_challenges WHERE run_id=%s)
-                   AND deadline_at IS NOT NULL AND deadline_at<=now() AND state NOT IN ('solved','cancelled')""",
+                   AND deadline_at IS NOT NULL AND deadline_at<=now()
+                   AND state NOT IN ('solved','cancelled','expired') RETURNING id""",
                 (run_id,),
-            )
+            ).fetchall()
+            for challenge in expired:
+                connection.execute(
+                    """INSERT INTO competition_run_events(run_id,kind,payload)
+                       VALUES (%s,'challenge.expired',%s)""",
+                    (run_id, Jsonb({"challenge_id": challenge["id"]})),
+                )
             return rows
 
     def recover_expired_assignments(self, run_id: str, owner: str) -> list[dict]:

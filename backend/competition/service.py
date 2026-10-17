@@ -36,7 +36,6 @@ from backend.members.adapters import make_adapter
 from backend.ops.models import PlatformWorkflowSpec
 from backend.ops.service import OpsAgentService
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATES = {"finished", "stopped"}
@@ -150,6 +149,17 @@ class CompetitionService:
         self._receiver_cursors: dict[str, int] = {}
         self._stale_job_seconds = 1800
         self._resource_capacity: dict[str, dict] = {}
+        self.phase_metrics: dict[str, dict] = {}
+
+    def _phase(self, name: str, operation, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            previous = self.phase_metrics.get(name, {})
+            duration = round(time.monotonic()-started, 6)
+            self.phase_metrics[name] = {"last_seconds": duration, "max_seconds": max(duration, previous.get("max_seconds", 0)),
+                                        "calls": previous.get("calls", 0)+1}
 
     @property
     def ops(self) -> OpsAgentService:
@@ -496,36 +506,65 @@ class CompetitionService:
             metadata["score"] = score
         return metadata
 
-    def control(self, run_id: str, action: str, revision: int) -> dict:
-        if not self._tick_lock.acquire(timeout=20):
-            error = CompetitionConflict("another competition operation is in progress; retry after 20 seconds")
-            error.retry_after = 20
-            raise error
+    def control(self, run_id: str, action: str, revision: int, operation_id: str | None = None) -> dict:
+        if not self._tick_lock.acquire(blocking=False):
+            if not callable(getattr(self.store, "queue_control", None)):
+                error = CompetitionConflict("another competition operation is in progress; retry after 20 seconds")
+                error.retry_after = 20
+                raise error
+            operation = self.store.queue_control(run_id, action, revision, operation_id)
+            self.wake()
+            return {**self.store.run_snapshot(run_id), "control_operation": operation}
         try:
-            run = self.store.get_run(run_id)
-            if run["revision"] != revision:
-                raise CompetitionConflict("stale run revision")
-            if action == "refresh":
-                self._refresh_unlocked(run_id)
-                return self.store.run_snapshot(run_id)
-            target = {"pause": "paused", "resume": "running", "stop": "stopped"}.get(action)
-            if target is None:
-                raise ValueError("unsupported run action")
-            changed = self.store.transition_run(
-                run_id, target, revision=revision,
-                permit_active=action == "stop",
-            )
-            if action == "stop":
-                self._teardown_stopped_run(run_id, run)
-            elif action == "pause":
-                self._stop_run_projects(run_id)
-                self.store.release_run_assignments(run_id)
-            self.store.append_run_event(run_id, f"run.{target}", {})
-            if action == "resume":
+            if operation_id:
+                operation = self.store.queue_control(run_id, action, revision, operation_id)
                 self.wake()
-            return self.store.run_snapshot(changed["id"])
+                return {**self.store.run_snapshot(run_id), "control_operation": operation}
+            return self._control_unlocked(run_id, action, revision)
         finally:
             self._tick_lock.release()
+
+    def _control_unlocked(self, run_id: str, action: str, revision: int) -> dict:
+        run = self.store.get_run(run_id)
+        if run["revision"] != revision:
+            raise CompetitionConflict("stale run revision")
+        if action == "refresh":
+            self._refresh_unlocked(run_id)
+            return self.store.run_snapshot(run_id)
+        target = {"pause": "paused", "resume": "running", "stop": "stopped"}.get(action)
+        if target is None:
+            raise ValueError("unsupported run action")
+        if run["status"] != target:
+            self.store.transition_run(run_id, target, revision=revision, permit_active=action == "stop")
+        if action == "stop":
+            self._teardown_stopped_run(run_id, run)
+        elif action == "pause":
+            self._stop_run_projects(run_id)
+            self.store.release_run_assignments(run_id)
+        self.store.append_run_event(run_id, f"run.{target}", {})
+        if action == "resume":
+            self.wake()
+        return self.store.run_snapshot(run_id)
+
+    def _process_controls(self) -> bool:
+        if not callable(getattr(self.store, "claim_control", None)):
+            return False
+        processed = False
+        for _ in range(10):
+            operation = self.store.claim_control(self.owner)
+            if operation is None:
+                break
+            error = None
+            try:
+                run = self.store.get_run(operation["run_id"])
+                self._control_unlocked(run["id"], operation["action"], run["revision"])
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"[:2000]
+            if self.store.finish_control(operation, error=error):
+                self.store.append_run_event(operation["run_id"], "run.control_failed" if error else "run.control_completed",
+                                            {"operation_id": operation["id"], "action": operation["action"], "error": error})
+            processed = True
+        return processed
 
     def update_limits(self, run_id: str, limits: dict, revision: int) -> dict:
         if not self._tick_lock.acquire(timeout=20):
@@ -909,13 +948,12 @@ class CompetitionService:
         if not self._tick_lock.acquire(blocking=False):
             return
         try:
+            self._process_controls()
             self._retry_pending_instance_stops()
             run = self.store.active_run()
             if run is None or not self.store.claim_run_lease(run["id"], self.owner):
                 return
             if run["status"] == "blocked":
-                # A process restart must reclaim an expired run lease and
-                # re-run the inexpensive platform preflight before resuming.
                 due = _timestamp(run.get("next_sync_at"))
                 if due is None or due <= datetime.now(timezone.utc):
                     try:
@@ -973,12 +1011,16 @@ class CompetitionService:
             self._check_message_delivery(run)
             self._sweep_stale_jobs(run)
             self._renew_project_engines(run)
+            if self._process_controls():
+                return
             if run["status"] == "running":
                 self._sync_orchestrator_assignments(run)
-            self._renew_instances(run)
-            self._repair_assigned_instances(run)
+            self._phase("instance_renewal", self._renew_instances, run)
+            self._phase("instance_repair", self._repair_assigned_instances, run)
             self._publish_instance_entries(run)
-            self._process_submissions(
+            if self._process_controls():
+                return
+            self._phase("submissions", self._process_submissions,
                 run,
                 allow_new=run["status"] == "running",
             )
@@ -1428,27 +1470,43 @@ class CompetitionService:
             )
 
     def _stop_expired_challenges(self, run: dict) -> None:
-        expired_ids = {
-            item["id"] for item in self.store.challenges(run["id"])
-            if item["state"] == "expired"
-        }
-        if not expired_ids:
-            return
         orchestrator = self.state.orchestrator
         platform = self._platform_for_run(run)
         for challenge in self.store.challenges(run["id"]):
-            if challenge["id"] not in expired_ids:
+            if challenge["state"] != "expired":
                 continue
-            if challenge.get("project_id"):
-                if orchestrator is not None:
-                    with suppress(Exception):
+            with self.state.db.connect() as connection:
+                claimed = connection.execute(
+                    """UPDATE competition_challenges SET metadata=metadata || %s
+                       WHERE id=%s AND state='expired'
+                       AND COALESCE(metadata->>'expiry_cleanup_state','')<>'done'
+                       AND (metadata->>'expiry_cleanup_after' IS NULL
+                            OR (metadata->>'expiry_cleanup_after')::timestamptz<=now())
+                       RETURNING id""",
+                    (Jsonb({"expiry_cleanup_state": "running", "expiry_cleanup_after": (
+                        datetime.now(timezone.utc) + timedelta(seconds=60)
+                    ).isoformat()}), challenge["id"]),
+                ).fetchone()
+            if claimed is None:
+                continue
+            try:
+                if challenge.get("project_id"):
+                    if orchestrator is not None:
                         orchestrator.stop_project(challenge["project_id"])
-                self._release_project_engine(challenge["project_id"])
-            if self._instance_ready(challenge["id"]):
-                self._stop_instance(run, challenge, platform=platform)
-            self.store.append_run_event(
-                run["id"], "challenge.expired", {"challenge_id": challenge["id"]}
-            )
+                    self._release_project_engine(challenge["project_id"])
+                if self._instance_ready(challenge["id"]):
+                    self._stop_instance(run, challenge, platform=platform)
+            except Exception as exc:
+                self.store.append_run_event(
+                    run["id"], "challenge.cleanup_failed",
+                    {"challenge_id": challenge["id"], "error": str(exc), "retry_after": 60},
+                )
+                continue
+            with self.state.db.connect() as connection:
+                connection.execute(
+                    "UPDATE competition_challenges SET metadata=metadata || %s WHERE id=%s",
+                    (Jsonb({"expiry_cleanup_state": "done"}), challenge["id"]),
+                )
 
     def _release_external_solved(self, run: dict, challenge: dict) -> None:
         """Release local resources for a challenge solved outside this run."""
@@ -1839,10 +1897,14 @@ class CompetitionService:
                         start_node = latest.node_id
                 if not direction:
                     direction = (
-                        "Cross-check the primary solver's findings on this challenge: "
-                        "read the blackboard facts and the latest report first, then "
-                        "independently verify the current hypothesis and explore a "
-                        "different approach instead of repeating the main line."
+                        "Helper contract: the primary owns the main exploit/solver. "
+                        "Read the blackboard and /workspace/shared handoffs first. "
+                        "Own one complementary subtask: verify a claimed property or test a distinct fallback hypothesis. "
+                        "Do not independently redo the full primary analysis. Deliver concrete evidence and a runnable "
+                        "artifact under /workspace/shared/<member>/<task>/ with its SHA-256 and run command. "
+                        "Use publish_fact for verified milestones and send_message to notify the primary of the "
+                        "handoff or a blocker; reply_to identifies the request being addressed. "
+                        "Finish when that subtask is verified or its failure is evidenced."
                     )
                 existing = edge_store.find_similar_open_intent(
                     connection, project_id, [start_node], direction
@@ -2025,6 +2087,9 @@ class CompetitionService:
                         expiry = None
                     if expiry is not None:
                         remaining = max(5, int((expiry - now).total_seconds()))
+                        margin = value.get("renew_before_seconds")
+                        if isinstance(margin, (int, float)) and margin > 0:
+                            return now + timedelta(seconds=max(5, remaining - margin))
                         return now + timedelta(
                             seconds=max(5, min(3600, remaining // 2))
                         )
@@ -2130,10 +2195,10 @@ class CompetitionService:
             except Exception as exc:
                 _recovery_logger.debug('Error handled in _renew_instances', exc_info=True)
                 message = str(exc).casefold()
-                # An expired/missing container is a state transition.  Defer
-                # repair to the scheduler so every tick does not destroy and
-                # recreate the target (which causes entry drift and 429s).
-                if any(token in message for token in ("not created", "does not exist", "expired", "not found")):
+                reason = getattr(exc, "reason", "")
+                if reason in {"expired", "missing"} or (not reason and any(
+                    token in message for token in ("not created", "does not exist", "expired", "not found")
+                )):
                     with self.state.db.connect() as connection:
                         connection.execute(
                             """UPDATE competition_instances SET state='expired',next_renew_at=NULL,
@@ -2143,70 +2208,25 @@ class CompetitionService:
                         )
                     self.store.append_run_event(
                         run["id"], "instance.expired",
-                        {"challenge_id": instance["challenge_id"], "reason": str(exc)},
+                        {"challenge_id": instance["challenge_id"], "reason": reason or "unavailable",
+                         "renew_error": str(exc), "external_id": instance["external_id"]},
                     )
                     continue
-                rebuilt = getattr(platform, "rebuild_instance", None)
-                if callable(rebuilt):
-                    try:
-                        self.store.append_run_event(run["id"], "instance.rebuild_requested", {"challenge_id": instance["challenge_id"]})
-                        replacement = rebuilt(instance["external_id"])
-                    except Exception as rebuild_exc:
-                        _recovery_logger.debug('Error handled in _renew_instances', exc_info=True)
-                        replacement = None
-                        self.store.append_run_event(
-                            run["id"], "instance.rebuild_failed",
-                            {
-                                "challenge_id": instance["challenge_id"],
-                                "error": str(rebuild_exc),
-                            },
-                        )
-                    if replacement is not None:
-                        if not isinstance(replacement, dict):
-                            replacement = {"state": "ready"}
-                        with self.state.db.connect() as connection:
-                            connection.execute(
-                                """UPDATE competition_instances
-                                   SET state='ready',metadata=%s,next_renew_at=%s,updated_at=now()
-                                   WHERE challenge_id=%s""",
-                                (
-                                    Jsonb(replacement),
-                                    self._instance_next_renewal(replacement),
-                                    instance["challenge_id"],
-                                ),
-                            )
-                            connection.execute(
-                                """UPDATE competition_challenges
-                                   SET instance_generation=instance_generation+1
-                                   WHERE id=%s""",
-                                (instance["challenge_id"],),
-                            )
-                        self.store.append_run_event(
-                            run["id"], "instance.rebuilt",
-                            {
-                                "challenge_id": instance["challenge_id"],
-                                "external_id": instance["external_id"],
-                            },
-                        )
-                        logger = getattr(self.state, "logger", None)
-                        log_project = getattr(logger, "project", None)
-                        if callable(log_project):
-                            log_project(
-                                "instance.rebuilt",
-                                str(instance["challenge_id"]),
-                                run_id=run["id"],
-                                external_id=instance["external_id"],
-                            )
-                        continue
+                try:
+                    retry_after = max(5, min(3600, int(getattr(exc, "retry_after", 60))))
+                except (TypeError, ValueError):
+                    retry_after = 60
                 with self.state.db.connect() as connection:
                     connection.execute(
-                        """UPDATE competition_instances SET next_renew_at=now()+interval '60 seconds',
-                           updated_at=now() WHERE challenge_id=%s""",
-                        (instance["challenge_id"],),
+                        """UPDATE competition_instances SET next_renew_at=now()+(%s*interval '1 second'),
+                           metadata=metadata || %s,updated_at=now() WHERE challenge_id=%s""",
+                        (retry_after, Jsonb({"renew_error": str(exc), "renew_error_kind": reason or "transient"}),
+                         instance["challenge_id"]),
                     )
                 self.store.append_run_event(
                     run["id"], "instance.renew_failed",
-                    {"challenge_id": instance["challenge_id"], "error": str(exc)},
+                    {"challenge_id": instance["challenge_id"], "external_id": instance["external_id"],
+                     "error": str(exc), "reason": reason or "transient", "retry_after": retry_after},
                 )
                 continue
             next_renewal = self._instance_next_renewal(renewed)
@@ -2331,9 +2351,6 @@ class CompetitionService:
     def _process_submissions(self, run: dict, *, allow_new: bool = True) -> None:
         platform = self._platform_for_run(run)
         self._ingest_project_candidates(run)
-        # A platform verdict can be correct while local closeout is
-        # temporarily unavailable.  Retry that durable fact until the project
-        # is actually solved and its seats are released.
         with self.state.db.connect() as connection:
             closeout_rows = connection.execute(
                 """SELECT s.*,c.external_id,c.project_id FROM competition_submissions s
@@ -2462,9 +2479,6 @@ class CompetitionService:
         if project_id:
             try:
                 with self.state.db.connect() as connection:
-                    # Operator/API submissions can bypass the Member tool.  Add
-                    # the same idempotent completion edge before accepting the
-                    # verdict so closeout never leaves a solved seat stranded.
                     self.store._lock(connection, run["id"])
                     connection.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
                     goal = connection.execute(

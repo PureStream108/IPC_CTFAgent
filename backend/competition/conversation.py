@@ -1,13 +1,10 @@
-"""Native streamed tool conversations. Persist returned provider messages intact.
-
-The runtime owns replay and side-effect fencing; this adapter performs one
-model turn and never silently retries after receiving part of a response.
-"""
 from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,11 +14,11 @@ import requests
 
 from backend.members.adapters import (
     _anthropic_endpoint,
+    _is_reasoning_model,
     _openai_endpoint,
     opencode_provider_headers,
 )
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 @dataclass
@@ -162,18 +159,24 @@ class ConversationAdapter:
         request=requests.post,
         max_output_tokens: int = 32768,
         read_timeout: int = 300,
+        turn_timeout: float = 900,
+        progress_timeout: float = 300,
         provider_session_id: str | None = None,
     ) -> None:
         self.config = config
         self.request = request
         self.max_output_tokens = max_output_tokens
-        self.read_timeout = max(30, read_timeout)
+        self.read_timeout = max(.1, float(read_timeout))
+        self.turn_timeout = max(.1, float(turn_timeout))
+        self.progress_timeout = max(.1, float(progress_timeout))
         self.surface = "anthropic" if config.api_format == "anthropic" else (
             "responses" if config.api_surface == "responses" else "chat_completions"
         )
         self._provider_session = provider_session_id or f"ipc-session-{uuid.uuid4().hex[:16]}"
         self._stream_usage_supported = True
         self.on_first_response: Callable[[], None] | None = None
+        self.on_first_content: Callable[[], None] | None = None
+        self.on_progress: Callable[[], None] | None = None
 
     @property
     def provider_session_id(self) -> str:
@@ -191,6 +194,7 @@ class ConversationAdapter:
              emit: Callable[[str], None], cancel: threading.Event,
              emit_reasoning: Callable[[str], None] | None = None) -> Turn:
         config = self.config
+        self._request_started_at = time.monotonic()
         if config.api_format == "mock":
             latest = ""
             for message in reversed(messages):
@@ -214,6 +218,7 @@ class ConversationAdapter:
         elif self.surface == "responses":
             endpoint = _openai_endpoint(config.base_url, "responses")
             body.update(input=messages, instructions=system, store=False,
+                        max_output_tokens=self.max_output_tokens,
                         include=["reasoning.encrypted_content"],
                         tools=[{"type": "function", **t, "strict": False} for t in tools])
             if config.reasoning_effort not in {"auto", "none", "minimal"}:
@@ -222,6 +227,8 @@ class ConversationAdapter:
             endpoint = _openai_endpoint(config.base_url, "chat_completions")
             body.update(messages=[{"role": "system", "content": system}, *messages],
                         tools=[{"type": "function", "function": t} for t in tools])
+            token_key = "max_completion_tokens" if config.api_format != "deepseek" and _is_reasoning_model(config.model) else "max_tokens"
+            body[token_key] = self.max_output_tokens
             if config.reasoning_effort not in {"auto", "none", "minimal"} and config.api_format != "deepseek":
                 body["reasoning_effort"] = config.reasoning_effort
             if self._stream_usage_supported:
@@ -232,7 +239,7 @@ class ConversationAdapter:
         try:
             with self.request(
                 endpoint, headers=headers, json=body, stream=True,
-                timeout=(15, self.read_timeout),
+                timeout=(min(15, self.turn_timeout), min(self.read_timeout, self.turn_timeout, self.progress_timeout)),
             ) as response:
                 response.raise_for_status()
                 return self._read(response, emit, cancel, think)
@@ -243,7 +250,7 @@ class ConversationAdapter:
             body.pop("stream_options", None)
             with self.request(
                 endpoint, headers=headers, json=body, stream=True,
-                timeout=(15, self.read_timeout),
+                timeout=(min(15, self.turn_timeout), min(self.read_timeout, self.turn_timeout, self.progress_timeout)),
             ) as response:
                 response.raise_for_status()
                 return self._read(response, emit, cancel, think)
@@ -264,6 +271,82 @@ class ConversationAdapter:
         return "stream_options" in detail or "include_usage" in detail
 
     def _read(self, response, emit, cancel, emit_reasoning=None):
+        finished = threading.Event()
+        started = getattr(self, "_request_started_at", time.monotonic())
+        progress = [started]
+        interrupted = []
+
+        def abort():
+            raw = getattr(response, "raw", None)
+            connection = getattr(raw, "_connection", None)
+            sock = getattr(connection, "sock", None)
+            if sock is None:
+                sock = getattr(getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None), "_sock", None)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+        def watch():
+            while not finished.wait(.05):
+                now = time.monotonic()
+                reason = ("cancelled" if cancel.is_set() else "turn deadline" if now-started >= self.turn_timeout
+                          else "no effective progress" if now-progress[0] >= self.progress_timeout else None)
+                if reason:
+                    interrupted.append(reason)
+                    try:
+                        abort()
+                    except Exception:
+                        _recovery_logger.debug("stream abort failed", exc_info=True)
+                    return
+
+        first_content = [False]
+        last_noted = [started]
+        def progressed(value):
+            progress[0] = time.monotonic()
+            if not first_content[0]:
+                first_content[0] = True
+                if self.on_first_content is not None:
+                    self.on_first_content()
+            if progress[0] - last_noted[0] >= 15:
+                last_noted[0] = progress[0]
+                if self.on_progress is not None:
+                    self.on_progress()
+            return value
+
+        def text(value):
+            if value:
+                progressed(value)
+            emit(value)
+
+        def thinking(value):
+            if value:
+                progressed(value)
+            if emit_reasoning:
+                emit_reasoning(value)
+
+        watcher = threading.Thread(target=watch, name="ipc-provider-deadline", daemon=True)
+        watcher.start()
+        try:
+            result = self._read_stream(response, text, cancel, thinking, progressed)
+            if interrupted:
+                raise TimeoutError(interrupted[0])
+            return result
+        except Exception:
+            if cancel.is_set():
+                raise InterruptedError("session cancelled") from None
+            if interrupted:
+                raise TimeoutError(f"provider exceeded {interrupted[0]}") from None
+            raise
+        finally:
+            finished.set()
+            watcher.join(timeout=1)
+
+    def _read_stream(self, response, emit, cancel, emit_reasoning=None, progressed=None):
         think = emit_reasoning or (lambda _text: None)
         text = ""
         calls: dict[int, dict] = {}
@@ -305,6 +388,9 @@ class ConversationAdapter:
                             raise RuntimeError(
                                 "provider stream did not complete successfully"
                             )
+                elif (kind in {"response.function_call_arguments.delta", "response.output_item.added"}
+                      and progressed and (event.get("delta") or (event.get("item") or {}).get("type") == "function_call")):
+                    progressed(event)
             elif self.surface == "anthropic":
                 index = event.get("index", 0)
                 if kind == "content_block_start":
@@ -318,6 +404,8 @@ class ConversationAdapter:
                         blocks[index]["text"] = blocks[index].get("text", "") + delta_text
                     elif delta.get("type") == "input_json_delta":
                         blocks[index]["_json"] += delta.get("partial_json", "")
+                        if delta.get("partial_json") and progressed:
+                            progressed(event)
                     elif delta.get("type") == "thinking_delta":
                         reasoning_text = delta.get("thinking", "")
                         blocks[index]["thinking"] = blocks[index].get("thinking", "") + reasoning_text
@@ -349,6 +437,8 @@ class ConversationAdapter:
                         if isinstance(value, str):
                             reasoning_text += value
                     for item in delta.get("tool_calls") or []:
+                        if progressed:
+                            progressed(item)
                         item = item or {}
                         entry = calls.setdefault(item.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                         if item.get("id"):
