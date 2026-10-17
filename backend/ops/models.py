@@ -83,7 +83,7 @@ class SecretHeader(BaseModel):
 class ChallengeMappingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["http_json", "ret2shell", "gzctf"] = "http_json"
+    platform: Literal["http_json", "ret2shell", "gzctf", "tsecbench"] = "http_json"
     game_id: int | None = None
     list_url: str = ""
     list_path: str = "data"
@@ -118,6 +118,8 @@ class ChallengeMappingSpec(BaseModel):
             raise ValueError("list_url is required for the http_json platform")
         if self.platform == "gzctf" and self.game_id is None:
             raise ValueError("game_id is required for the gzctf platform")
+        if self.platform == "tsecbench" and not self.list_url.strip():
+            raise ValueError("list_url is required for the tsecbench platform")
         return self
 
     @field_validator("attachment_base_url")
@@ -243,11 +245,11 @@ class PlatformWorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120)
+    template_id: Literal["", "gzctf", "tsecbench"] = ""
+    template_version: int = Field(default=1, ge=1, le=1)
     competition_id: str = Field(default="", max_length=256)
     team_id: str = Field(default="", max_length=256)
     ends_at: str = ""
-    # Maximum number of container challenges this run may execute in parallel.
-    # ``remote_instance_limit`` remains accepted for older workflow drafts.
     remote_concurrency: int = Field(default=0, ge=0, le=100)
     remote_instance_limit: int = Field(default=0, ge=0, le=100)
     challenges: ChallengeMappingSpec
@@ -304,6 +306,8 @@ class PlatformWorkflowSpec(BaseModel):
                     "platform_token",
                 }
             )
+        if self.challenges.platform == "tsecbench":
+            names.update({"benchmark_token", "platform_token"})
         return names
 
 

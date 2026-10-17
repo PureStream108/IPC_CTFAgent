@@ -22,6 +22,7 @@ from backend.core.config import ApiFormat, ApiSurface, SelectedReasoningEffort
 from backend.core.state import AppState
 from backend.ops.attachments import MAX_UPLOAD_BYTES, OpsAttachmentStore
 from backend.ops.network import NetworkPolicyError
+from backend.ops.presets import GZCTFWorkflowInput, TSECBenchWorkflowInput, workflow_templates
 from backend.ops.service import (
     OpsAgentNotConfigured,
     OpsAgentService,
@@ -108,7 +109,6 @@ class WorkflowExecuteRequest(BaseModel):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 def get_ops_service(state: AppState = _GET_STATE_DEPENDENCY) -> OpsAgentService:
@@ -124,7 +124,6 @@ def get_ops_service(state: AppState = _GET_STATE_DEPENDENCY) -> OpsAgentService:
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_OPS_SERVICE_DEPENDENCY = Depends(get_ops_service)
 
 @router.get("/config")
@@ -200,7 +199,6 @@ def chat_stream(body: ChatRequest, service: OpsAgentService = _GET_OPS_SERVICE_D
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _REQUIRED_UPLOAD_FILE = File(...)
 
 @router.post("/uploads")
@@ -233,6 +231,33 @@ def interrupt_chat(body: ChatInterruptRequest, service: OpsAgentService = _GET_O
 @router.get("/workflows")
 def list_workflows(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return {"workflows": service.list_workflows()}
+
+
+@router.get("/workflow-templates")
+def list_workflow_templates():
+    return {"default": "gzctf", "templates": workflow_templates()}
+
+
+@router.post("/workflows/gzctf", status_code=status.HTTP_201_CREATED)
+def create_gzctf_workflow(body: GZCTFWorkflowInput, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
+    return _call(service.configure_gzctf_workflow, {**body.model_dump(), "secrets": body.secrets})
+
+
+@router.put("/workflows/{workflow_id}/gzctf")
+def update_gzctf_workflow(workflow_id: str, body: GZCTFWorkflowInput,
+                         service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
+    return _call(service.configure_gzctf_workflow, {**body.model_dump(), "secrets": body.secrets}, workflow_id=workflow_id)
+
+
+@router.post("/workflows/tsecbench", status_code=status.HTTP_201_CREATED)
+def create_tsecbench_workflow(body: TSECBenchWorkflowInput, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
+    return _call(service.configure_tsecbench_workflow, {**body.model_dump(), "secrets": body.secrets})
+
+
+@router.put("/workflows/{workflow_id}/tsecbench")
+def update_tsecbench_workflow(workflow_id: str, body: TSECBenchWorkflowInput,
+                              service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
+    return _call(service.configure_tsecbench_workflow, {**body.model_dump(), "secrets": body.secrets}, workflow_id=workflow_id)
 
 
 @router.post("/workflows", status_code=status.HTTP_201_CREATED)

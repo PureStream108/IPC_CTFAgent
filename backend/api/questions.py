@@ -14,13 +14,24 @@ class Answer(BaseModel):
     value: str = Field(min_length=1, max_length=16384)
 
 
+class Dismiss(BaseModel):
+    session_id: str
 
-# FastAPI resolves request values from these reusable declaration markers.
+
+
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("")
 def pending_questions(session_id: str, state=_GET_STATE_DEPENDENCY):
     return {"questions": QuestionStore(state).list(session_id)}
+
+
+@router.post("/{question_id}/dismiss")
+def dismiss_question(question_id: str, body: Dismiss, state=_GET_STATE_DEPENDENCY):
+    try:
+        return QuestionStore(state).dismiss(question_id, body.session_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Question not found") from exc
 
 
 @router.post("/{question_id}/answer")

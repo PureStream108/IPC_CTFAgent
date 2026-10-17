@@ -23,6 +23,9 @@ class QuestionStore:
             secret_name = validate_secret_name(secret_name)
             if not workflow_id:
                 raise ValueError("sensitive questions require a target workflow")
+            workflow = OpsStore(self.state.root, database=self.state.db).get_workflow(workflow_id)
+            if secret_name not in workflow["spec"].allowed_secret_names():
+                raise ValueError("question secret_name is not allowed by the workflow")
         scoped_key = f"{session_id}:{operation_key}"
         with self.state.db.connect() as connection:
             if not connection.execute("SELECT id FROM sessions WHERE id=%s", (session_id,)).fetchone():
@@ -85,5 +88,20 @@ class QuestionStore:
                 (question_id, session_id),
             ).fetchone()
             if not row:
+                raise KeyError(question_id)
+            return row
+
+    def dismiss(self, question_id: str, session_id: str) -> dict:
+        with self.state.db.connect() as connection:
+            row = connection.execute(
+                """UPDATE competition_questions SET state='cancelled',answered_at=now()
+                   WHERE id=%s AND ops_session_id=%s AND state='pending' RETURNING id,state""",
+                (question_id, session_id),
+            ).fetchone()
+            if row:
+                return row
+            row = connection.execute("SELECT id,state FROM competition_questions WHERE id=%s AND ops_session_id=%s",
+                                     (question_id, session_id)).fetchone()
+            if row is None:
                 raise KeyError(question_id)
             return row

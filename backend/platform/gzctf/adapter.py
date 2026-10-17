@@ -17,7 +17,6 @@ from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, saf
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 class GZCTFError(RuntimeError):
@@ -25,7 +24,16 @@ class GZCTFError(RuntimeError):
 
 
 class GZCTFLoginError(GZCTFError):
-    pass
+    reason = "auth_required"
+
+
+class GZCTFInstanceError(GZCTFError):
+    """A classified lifecycle failure; a failed renewal never implies destruction."""
+
+    def __init__(self, message: str, *, reason: str, retry_after: int = 60):
+        super().__init__(message)
+        self.reason = reason
+        self.retry_after = max(5, min(3600, retry_after))
 
 
 class GZCTFPreflightError(GZCTFError):
@@ -85,11 +93,18 @@ def _find_level(track: dict[str, Any], level: int) -> dict[str, Any] | None:
 
 
 def _parse_time(value: Any) -> datetime | None:
-    if not value or not isinstance(value, str):
+    if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if isinstance(value, (int, float)) or str(value).strip().replace(".", "", 1).isdigit():
+            seconds = float(value)
+            if seconds > 100_000_000_000:
+                seconds /= 1000
+            return datetime.fromtimestamp(seconds, UTC)
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError, OverflowError, OSError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
@@ -799,8 +814,10 @@ def _gz_instance_view(payload: Any) -> dict[str, Any]:
     if entry:
         view["entry"] = str(entry)
         view["url"] = str(entry)
-    if expires:
-        view["expires_at"] = str(expires)
+    expiry = _parse_time(expires)
+    if expiry is not None:
+        view["expires_at"] = expiry.isoformat().replace("+00:00", "Z")
+        view["renew_before_seconds"] = 300
     return view
 
 
@@ -818,22 +835,38 @@ def _gz_container_error(exc: requests.HTTPError, external_id: str) -> Exception:
         return GZCTFLoginError(
             "GZCTF container request was not authorized; provide a new token"
         )
-    if status == 429:
-        return GZCTFError(
-            f"GZCTF rate limited the container request for challenge {external_id}"
-        )
-    if status == 404:
-        return GZCTFError(f"GZCTF container challenge {external_id} does not exist")
     detail = ""
     try:
         detail = (response.text or "").strip()[:300] if response is not None else ""
     except Exception:
         _recovery_logger.debug('Error handled in _gz_container_error', exc_info=True)
         detail = ""
+    headers = getattr(response, "headers", {}) or {}
+    try:
+        retry_after = int(headers.get("Retry-After", "60"))
+    except (ValueError, TypeError):
+        retry_after = 60
+    reason = "transient"
+    if status == 429:
+        reason = "rate_limited"
+    elif status == 404:
+        reason = "missing"
+    elif status == 400 and any(token in detail.casefold() for token in (
+        "尚不可延长", "尚不能延长", "不可续期", "未到续期", "too early", "not yet", "cannot be extended yet",
+    )):
+        reason = "too_early"
+    elif any(token in detail.casefold() for token in ("expired", "not found", "not created", "已过期", "不存在")):
+        reason = "expired"
     suffix = f": {detail}" if detail else ""
-    return GZCTFError(
-        f"GZCTF container request for challenge {external_id} failed "
-        f"with status {status or 'unknown'}{suffix}"
+    if status == 429:
+        description = f"GZCTF rate limited the container request for challenge {external_id}"
+    elif status == 404:
+        description = f"GZCTF container challenge {external_id} does not exist"
+    else:
+        description = f"GZCTF container request for challenge {external_id} failed with status {status or 'unknown'}"
+    return GZCTFInstanceError(
+        f"{description}{suffix}",
+        reason=reason, retry_after=retry_after,
     )
 
 

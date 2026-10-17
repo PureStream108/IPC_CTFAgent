@@ -37,7 +37,6 @@ from backend.ops.tools import OpsToolError, OpsToolExecutor
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.factory import build_adapter
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{8,128}$")
@@ -174,8 +173,6 @@ class OpsAgentService:
         self._run_condition = threading.Condition()
         self._run_threads: dict[str, threading.Thread] = {}
         self._run_threads_lock = threading.Lock()
-        # Remove only unreferenced historical drafts; session-bound and
-        # run-referenced workflows remain available for audit/replay.
         self.store.cleanup_duplicate_workflows()
         self._recover_stale_runs()
 
@@ -830,6 +827,30 @@ class OpsAgentService:
         )
         return self.workflow_view(workflow)
 
+    def configure_gzctf_workflow(self, data: dict[str, Any], *, workflow_id: str | None = None) -> dict[str, Any]:
+        from backend.ops.presets import GZCTFWorkflowInput
+
+        settings = GZCTFWorkflowInput.model_validate(data)
+        spec = settings.workflow_spec()
+        if workflow_id:
+            existing = self.store.get_workflow(workflow_id)
+            if existing["spec"].challenges.platform != "gzctf":
+                raise ValueError("only a GZCTF workflow can be updated with the GZCTF template")
+            return self.update_workflow(workflow_id, spec.model_dump(), secrets_values=settings.secrets)
+        return self.create_workflow(spec.model_dump(), secrets_values=settings.secrets)
+
+    def configure_tsecbench_workflow(self, data: dict[str, Any], *, workflow_id: str | None = None) -> dict[str, Any]:
+        from backend.ops.presets import TSECBenchWorkflowInput
+
+        settings = TSECBenchWorkflowInput.model_validate(data)
+        spec = settings.workflow_spec()
+        if workflow_id:
+            existing = self.store.get_workflow(workflow_id)
+            if existing["spec"].challenges.platform != "tsecbench":
+                raise ValueError("only a TSecBench workflow can be updated with the TSecBench template")
+            return self.update_workflow(workflow_id, spec.model_dump(), secrets_values=settings.secrets)
+        return self.create_workflow(spec.model_dump(), secrets_values=settings.secrets)
+
     def update_workflow(
         self,
         workflow_id: str,
@@ -984,6 +1005,8 @@ class OpsAgentService:
             "updated_at": workflow["updated_at"],
             "spec": {
                 "name": spec.name,
+                "template_id": spec.template_id,
+                "template_version": spec.template_version,
                 "competition_id": spec.competition_id,
                 "team_id": spec.team_id,
                 "ends_at": spec.ends_at,

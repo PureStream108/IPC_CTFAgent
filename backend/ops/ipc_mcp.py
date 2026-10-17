@@ -26,7 +26,6 @@ from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.ops.store import OpsStore
 from backend.ops.tools import OpsToolError, OpsToolExecutor
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _SESSION_ID_RE = re.compile(r"^ops_[a-f0-9]{16}$")
@@ -61,7 +60,40 @@ operator request.""",
     )
     tools = _Tools(state_provider)
 
-    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store; for native GZCTF use secret_name=gzctf_token (or gzctf_username/gzctf_password).")
+    @server.tool(name="ipc_gzctf_workflow", description=(
+        "Create or update the built-in default GZCTF workflow. Supply only platform base_url, "
+        "game_id and optional name/team_id/ends_at/remote_concurrency/attachment_base_url. "
+        "No HTTP mappings or platform probing are needed. Credentials must already be in the "
+        "workflow secret store or deployment environment; ask ipc_question for gzctf_token "
+        "after creating the draft when needed. Return the draft for normal confirmation."
+    ))
+    def gzctf_workflow(settings: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
+        from backend.ops.service import OpsAgentService
+
+        if "secrets" in settings:
+            raise ValueError("use the structured workflow secret store for credentials")
+        state = state_provider()
+        service = getattr(state, "ops_agent_service", None) or OpsAgentService(state)
+        return service.configure_gzctf_workflow(settings, workflow_id=workflow_id)
+
+    @server.tool(name="ipc_tsecbench_workflow", description=(
+        "Create or update the built-in default TSecBench benchmark workflow. Supply only "
+        "the platform base_url and optional name/team_id/remote_concurrency. No HTTP "
+        "mappings or platform probing are needed. The benchmark token goes into the "
+        "workflow secret store as benchmark_token; ask ipc_question with "
+        "secret_name=benchmark_token after creating the draft when it is missing. "
+        "Return the draft for normal confirmation."
+    ))
+    def tsecbench_workflow(settings: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
+        from backend.ops.service import OpsAgentService
+
+        if "secrets" in settings:
+            raise ValueError("use the structured workflow secret store for credentials")
+        state = state_provider()
+        service = getattr(state, "ops_agent_service", None) or OpsAgentService(state)
+        return service.configure_tsecbench_workflow(settings, workflow_id=workflow_id)
+
+    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store; use secret_name=benchmark_token for a native TSecBench workflow, or secret_name=gzctf_token (or gzctf_username/gzctf_password) for native GZCTF.")
     def question(operation_key: str, title: str, options: list[str] | None = None,
                  workflow_id: str | None = None, secret_name: str | None = None,
                  ctx: Context | None = None) -> dict:

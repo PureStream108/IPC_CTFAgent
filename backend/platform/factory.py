@@ -1,4 +1,3 @@
-"""Construct platform adapters without leaking platform branches into IPC."""
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -11,6 +10,7 @@ from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
 from backend.platform.gzctf import GZCTFAdapter, GZCTFClient
 from backend.platform.mapping import FieldMapping
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient
+from backend.platform.tsecbench import TSECBenchAdapter, TSECBenchClient
 
 
 def build_adapter(
@@ -33,6 +33,22 @@ def build_adapter(
             game_id=mapping.game_id,
             category_map=mapping.category_map,
             max_attachment_bytes=max_attachment_bytes,
+        )
+    if mapping.platform == "tsecbench":
+        resolved_base_url = base_url or mapping.list_url
+        if resolved_base_url:
+            parsed = urlsplit(resolved_base_url)
+            if parsed.scheme and parsed.netloc:
+                resolved_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        return TSECBenchAdapter(
+            TSECBenchClient(
+                base_url=resolved_base_url,
+                token=(credentials.get("benchmark_token") or credentials.get("platform_token") or credentials.get("token") or ""),
+            ),
+            mapping,
+            max_attachment_bytes=max_attachment_bytes,
+            competition_id=competition_id,
+            team_id=team_id,
         )
     if mapping.platform == "gzctf":
         resolved_base_url = base_url or ""

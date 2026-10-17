@@ -5,6 +5,36 @@ from typing import ClassVar
 
 import pytest
 
+
+@pytest.mark.parametrize("value", [1792069200000, "1792069200000", 1792069200, "1792069200"])
+def test_gzctf_instance_epoch_expiry_is_normalized(value):
+    from backend.platform.gzctf.adapter import _gz_instance_view
+
+    view = _gz_instance_view({"context": {"instanceEntry": "target:31337", "closeTime": value}})
+    assert view["expires_at"] == "2026-10-15T13:00:00Z"
+    assert view["renew_before_seconds"] == 300
+
+
+@pytest.mark.parametrize("status,detail,reason", [
+    (400, "容器时间尚不可延长", "too_early"),
+    (429, "rate limited", "rate_limited"),
+    (404, "container missing", "missing"),
+    (503, "upstream unavailable", "transient"),
+])
+def test_gzctf_instance_errors_preserve_classification(status, detail, reason):
+    import requests
+
+    from backend.platform.gzctf.adapter import _gz_container_error
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = detail.encode("utf-8")
+    response.encoding = "utf-8"
+    response.headers["Retry-After"] = "90"
+    error = _gz_container_error(requests.HTTPError(response=response), "21")
+    assert error.reason == reason
+    assert error.retry_after == 90
+
 from backend.competition.platform import CompetitionPlatform
 from backend.ops.models import PlatformWorkflowSpec
 from backend.platform.gzctf import GZCTFAdapter, GZCTFPreflightError
@@ -385,6 +415,7 @@ def test_instances_report_only_live_container_entries():
         "entry": "10.0.0.5:30001",
         "url": "10.0.0.5:30001",
         "expires_at": "2026-10-10T12:00:00Z",
+        "renew_before_seconds": 300,
     }]
 
     client.entry = ""

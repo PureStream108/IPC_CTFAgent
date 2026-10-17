@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class FieldMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["http_json", "ret2shell", "gzctf"] = "http_json"
+    platform: Literal["http_json", "ret2shell", "gzctf", "tsecbench"] = "http_json"
     game_id: int | None = None
     list_url: str = ""
     list_path: str = "data"
@@ -46,6 +46,8 @@ class FieldMapping(BaseModel):
             raise ValueError("list_url is required for the http_json platform")
         if self.platform == "gzctf" and self.game_id is None:
             raise ValueError("game_id is required for the gzctf platform")
+        if self.platform == "tsecbench" and not self.list_url:
+            raise ValueError("list_url is required for the tsecbench platform")
         return self
 
     @field_validator("level")
