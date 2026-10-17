@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from backend.api.deps import get_state
@@ -24,7 +24,6 @@ class LogToggle(BaseModel):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/logs/status")
@@ -147,8 +146,13 @@ def derive_project_logs(state: AppState = _GET_STATE_DEPENDENCY):
 
 
 @router.get("/logs/{project_id}")
-def read_logs(project_id: str, kind: str = "project", limit: int = 500, state: AppState = _GET_STATE_DEPENDENCY):
+def read_logs(project_id: str, kind: str = "project", limit: int = Query(default=500, ge=1, le=1000),
+              after: int | None = Query(default=None, ge=0), file_id: str = "", state: AppState = _GET_STATE_DEPENDENCY):
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
     secret = row["flag"] if row else None
+    if after is not None:
+        page = state.logger.read_since(kind, project_id, after=after, limit=limit, file_id=file_id)
+        page["entries"] = [redact_object(entry, secret) for entry in page["entries"]]
+        return page
     return {"entries": [redact_object(entry, secret) for entry in state.logger.read_log(kind, project_id, limit)]}

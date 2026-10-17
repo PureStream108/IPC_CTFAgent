@@ -27,10 +27,10 @@ from backend.api import wp as wp_router
 from backend.auth import AuthManager
 from backend.auth.middleware import AuthenticationMiddleware
 from backend.core.state import AppState
+from backend.core.telemetry import RuntimeTelemetry
 from backend.ops.ipc_mcp import build_ipc_mcp
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 def _resolve_frontend_dir(app_root: Path) -> Path:
@@ -67,6 +67,9 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         state = AppState(root=app_root)
         app.state.ipc = state
+        telemetry = RuntimeTelemetry(state.artifact_root)
+        app.state.telemetry = telemetry
+        telemetry.start()
         try:
             from backend.core.orchestrator import Orchestrator
 
@@ -87,6 +90,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
             async with ipc_mcp_app.router.lifespan_context(ipc_mcp_app):
                 yield
         finally:
+            await telemetry.close()
             try:
                 competition = getattr(state, "competition", None)
                 if competition is not None:
@@ -139,8 +143,13 @@ def create_app(root: str | Path | None = None) -> FastAPI:
         return FileResponse(frontend_dir / "index.html")
 
     @app.get("/health", include_in_schema=False)
-    def health():
+    async def health():
         return {"status": "ok", "setup_required": False}
+
+    @app.get("/health/details", include_in_schema=False)
+    async def health_details():
+        telemetry = getattr(app.state, "telemetry", None)
+        return {"status": "ok", "runtime": telemetry.snapshot(getattr(app.state, "ipc", None)) if telemetry else {}}
 
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")

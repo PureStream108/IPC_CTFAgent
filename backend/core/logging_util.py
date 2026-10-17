@@ -135,8 +135,57 @@ class IPCLogger:
 
     @staticmethod
     def _tail(path: Path, limit: int | None) -> list[dict]:
-        entries = IPCLogger._read_array(path)
-        return entries if limit is None else entries[-limit:]
+        if not path.is_file():
+            return []
+        if limit is None or path.suffix == ".json":
+            entries = IPCLogger._read_array(path)
+            return entries if limit is None else entries[-limit:]
+        if limit <= 0:
+            return []
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            position = handle.tell()
+            chunks = []
+            newlines = 0
+            while position and newlines <= limit:
+                size = min(position, 16384)
+                position -= size
+                handle.seek(position)
+                chunk = handle.read(size)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+        data = b"".join(reversed(chunks))
+        if position:
+            data = data.partition(b"\n")[2]
+        return IPCLogger._read_jsonl(data.decode("utf-8", "replace"))[-limit:]
+
+    def read_since(self, kind: str, project_id: str, *, after: int = 0,
+                   limit: int = 500, file_id: str = "") -> dict:
+        path = self._file(kind, project_id)
+        if not path.is_file():
+            return {"entries": [], "next_offset": 0, "file_id": "", "has_more": False}
+        stat = path.stat()
+        identity = f"{stat.st_dev}:{stat.st_ino}"
+        if file_id and file_id != identity or after > stat.st_size:
+            after = 0
+        records = []
+        with path.open("rb") as handle:
+            handle.seek(max(0, after))
+            while len(records) < max(1, min(1000, limit)):
+                position = handle.tell()
+                line = handle.readline()
+                if not line or not line.endswith(b"\n"):
+                    handle.seek(position)
+                    break
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+            offset = handle.tell()
+        return {"entries": records, "next_offset": offset, "file_id": identity,
+                "has_more": offset < path.stat().st_size}
 
     @staticmethod
     def jsonl_text(entries: list[dict]) -> str:
