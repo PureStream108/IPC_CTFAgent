@@ -1,8 +1,3 @@
-"""Observe competition execution, anomalies and autonomous recovery.
-
-After an explicitly requested Start, this process only reads APIs, logs and
-PostgreSQL. It never stops, retries, resumes or otherwise repairs a live run.
-"""
 from __future__ import annotations
 
 import argparse
@@ -55,7 +50,6 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact(item, secrets) for item in value]
     if isinstance(value, str):
-        # Native tool messages often contain JSON inside a content string.
         if value.strip().startswith(("{", "[")):
             try:
                 encoded = json.loads(value)
@@ -172,13 +166,19 @@ def db_snapshot(connection, run_id: str, *, after_event=0, after_agent_event=0) 
             "agent_sessions": health}
 
 
-def log_rows(session, base: str, project_ids: list[str], secrets: tuple[str, ...]) -> list[dict]:
+def log_rows(session, base: str, project_ids: list[str], secrets: tuple[str, ...], cursors: dict | None = None) -> list[dict]:
     records = []
     for project_id in project_ids:
         for kind in ("project", "tool", "llm", "memory"):
-            response = session.get(f"{base}/logs/{project_id}", params={"kind": kind, "limit": 500}, timeout=30)
+            params = {"kind": kind, "limit": 500}
+            if cursors is not None:
+                cursor = cursors.get((project_id, kind), {})
+                params.update(after=cursor.get("next_offset", 0), file_id=cursor.get("file_id", ""))
+            response = session.get(f"{base}/logs/{project_id}", params=params, timeout=30)
             response.raise_for_status()
             payload = response.json()
+            if cursors is not None and isinstance(payload, dict) and "next_offset" in payload:
+                cursors[(project_id, kind)] = {k: payload[k] for k in ("next_offset", "file_id", "has_more") if k in payload}
             entries = payload if isinstance(payload, list) else payload.get("entries", [])
             for item in entries:
                 records.append(redact({**item, "project_id": project_id, "log_kind": kind}, secrets))
@@ -226,6 +226,11 @@ def tool_outcome(payload: dict) -> str:
         return str(status)
     if output.get("error") or output.get("ok") is False or output.get("invalid_action") or status in {"failed", "rejected", "invalid_action"}:
         return "error"
+    process = output.get("process") or {}
+    if process.get("timed_out"):
+        return "timeout"
+    if process.get("exit_code") not in (None, 0):
+        return "nonzero_exit"
     observation = str(output.get("observation") or "")
     if re.search(r"[\{'\"]error['\"]?\s*:", observation):
         return "error"
@@ -262,6 +267,7 @@ def metrics(snapshot: dict, run_events: list[dict], agent_events: list[dict], lo
     allocated = {}
     member_started = {}
     submission_verdicts = {}
+    submission_acks = {}
     for event in run_events:
         payload = event.get("payload") or {}
         key = (payload.get("challenge_id"), payload.get("session_id"))
@@ -270,7 +276,11 @@ def metrics(snapshot: dict, run_events: list[dict], agent_events: list[dict], lo
         if event["kind"] == "member.started":
             member_started.setdefault(key, event["created_at"])
         if event["kind"] == "submission.verdict":
-            submission_verdicts.setdefault(payload.get("submission_id"), event["created_at"])
+            submission_id = payload.get("submission_id")
+            submission_acks.setdefault(submission_id, event["created_at"])
+            verdict = payload.get("verdict", payload.get("status"))
+            if verdict in {"correct", "wrong", "rejected"} or verdict is None:
+                submission_verdicts.setdefault(submission_id, event["created_at"])
     for challenge in snapshot["challenges"]:
         duration = elapsed((challenge.get("metadata") or {}).get("ready_at"), challenge.get("first_assigned_at"))
         if duration is not None:
@@ -297,13 +307,24 @@ def metrics(snapshot: dict, run_events: list[dict], agent_events: list[dict], lo
         duration = elapsed(submission.get("submitted_at"), submission_verdicts.get(submission["id"]))
         if duration is not None:
             latency["flag_submit_to_verdict"].append(duration)
-    for row in logs:
-        if row.get("event") == "member_start":
-            challenge = next((item for item in snapshot["challenges"] if item.get("project_id") == row.get("project_id")), None)
-            if challenge:
-                duration = elapsed(challenge.get("first_assigned_at"), row.get("ts"))
-                if duration is not None:
-                    latency["assignment_to_logged_member_start"].append(duration)
+        ack = elapsed(submission.get("submitted_at"), submission_acks.get(submission["id"]))
+        if ack is not None:
+            latency["flag_submit_to_ack"].append(ack)
+        queued = elapsed(submission.get("created_at"), submission.get("submitted_at"))
+        if queued is not None:
+            latency["flag_queue_to_submit"].append(queued)
+    for key, start in allocated.items():
+        rows = [row for row in logs if row.get("event") == "member_start"
+                and row.get("session_id") == key[1] and elapsed(start, row.get("ts")) is not None]
+        if rows:
+            latency["assignment_to_logged_member_start"].append(min(elapsed(start, row["ts"]) for row in rows))
+    for event in agent_events:
+        payload = event.get("payload") or {}
+        phase = payload.get("status")
+        if event["kind"] == "status" and phase in {"provider.completed", "provider.first_content", "compaction.completed"}:
+            value = payload.get("latency_seconds", payload.get("duration_seconds"))
+            if isinstance(value, (int, float)):
+                latency[phase.replace(".", "_")].append(value)
 
     assignments = snapshot["assignment_rows"]
     active = [row for row in assignments if row.get("released_at") is None]
@@ -317,7 +338,8 @@ def metrics(snapshot: dict, run_events: list[dict], agent_events: list[dict], lo
         "latency": {name: distribution(latency.get(name, [])) for name in (
             "import_to_primary_assignment", "assignment_to_member_start",
             "assignment_to_logged_member_start", "assignment_to_first_provider_response",
-            "provider_time_to_first_response", "tool_call_to_result", "mcp_call_to_result",
+            "provider_time_to_first_response", "provider_completed", "provider_first_content", "compaction_completed",
+            "flag_submit_to_ack", "flag_queue_to_submit", "tool_call_to_result", "mcp_call_to_result",
             "flag_submit_to_verdict", "remote_queue",
         )},
         "tool_calls": durations,
@@ -355,8 +377,8 @@ def acceptance_checks(snapshot: dict, measured: dict, status: str, observations:
                        and "target_instance" in json.dumps(row["payload"])), None)
         if first_tool is not None and (target is None or target >= first_tool):
             target_missing.append(session_id)
-    quiet = [row for row in observations if row["kind"] == "agent.no_events_for_five_minutes"]
-    capacity_failures = [row for row in observations if row["kind"] == "remote.capacity_exceeded"]
+    quiet = [row for row in observations if row.get("kind") == "agent.no_events_for_five_minutes"]
+    capacity_failures = [row for row in observations if row.get("kind") == "remote.capacity_exceeded"]
     active_jobs = sum(row["status"] not in {"done", "failed"} for row in snapshot["wp_jobs"])
     lifecycle_issues = []
     active_instances = set()
@@ -422,10 +444,9 @@ def markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def export_report(report: dict, export: Path, secrets=()) -> tuple[Path, Path]:
+def export_report(report: dict, export: Path, secrets=(), *, compatibility=True) -> tuple[Path, Path]:
     export.mkdir(parents=True, exist_ok=True)
     safe = redact(report, secrets)
-    # run_id comes from a server/CLI; do not permit arbitrary output paths.
     run_id = str(report["run_id"])
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", run_id):
         raise ValueError("invalid run id for export")
@@ -433,10 +454,8 @@ def export_report(report: dict, export: Path, secrets=()) -> tuple[Path, Path]:
     json_path, markdown_path = base.with_suffix(".json"), base.with_suffix(".md")
     contents = {".json": json.dumps(safe, ensure_ascii=False, indent=2, default=str), ".md": markdown_report(safe)}
     for suffix, content in contents.items():
-        # Preserve the original plan's acceptance filenames as well as the
-        # explicit monitor filenames. Replace each export atomically so a
-        # crash during sampling leaves the preceding report readable.
-        for target in (base.with_suffix(suffix), export / f"real_competition_{run_id}{suffix}"):
+        targets = (base.with_suffix(suffix), export / f"real_competition_{run_id}{suffix}") if compatibility else (base.with_suffix(suffix),)
+        for target in targets:
             temporary = target.with_suffix(target.suffix + ".tmp")
             temporary.write_text(content, encoding="utf-8")
             temporary.replace(target)
@@ -444,7 +463,8 @@ def export_report(report: dict, export: Path, secrets=()) -> tuple[Path, Path]:
 
 
 def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, export=Path("data/exports"),
-            secrets=(), poll_interval=5.0, session=None, selection=None, drain_timeout=600.0) -> dict[str, Any]:
+            secrets=(), poll_interval=5.0, session=None, selection=None, drain_timeout=600.0,
+            snapshot_interval=60.0) -> dict[str, Any]:
     session = session or requests.Session()
     base = base_url.rstrip("/")
     started = time.monotonic()
@@ -455,14 +475,16 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
     report = None
     status = "unknown"
     observed_until = None
+    log_cursors, seen_projects = {}, set()
+    last_busy = set()
+    last_exported = started - snapshot_interval
     export.mkdir(parents=True, exist_ok=True)
     while True:
         try:
+            collected_at = time.monotonic()
             response = session.get(f"{base}/api/runs/{run_id}", timeout=30)
             response.raise_for_status()
             run_view = response.json()
-            # Each sample gets a fresh read-only connection, so a PostgreSQL
-            # restart can recover observation without restarting any Agent.
             with psycopg.connect(database_url, row_factory=psycopg.rows.dict_row, autocommit=True) as connection:
                 connection.execute("SET default_transaction_read_only TO on")
                 connection.execute("SET default_transaction_isolation TO 'repeatable read'")
@@ -479,7 +501,14 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
             if duration <= 0 and ends_at is None:
                 raise ValueError("workflow has no deadline; specify --max-duration")
             observed_until = (ends_at + timedelta(seconds=drain_timeout)) if ends_at and duration <= 0 else None
-            current_logs = log_rows(session, base, [row["project_id"] for row in snapshot["challenges"] if row.get("project_id")], secrets)
+            busy = {row["challenge_id"] for row in snapshot["assignment_rows"] if row.get("released_at") is None}
+            projects = [row["project_id"] for row in snapshot["challenges"] if row.get("project_id") and (
+                row["project_id"] not in seen_projects or row["id"] in busy | last_busy or status in TERMINAL
+                or any(log_cursors.get((row["project_id"], kind), {}).get("has_more") for kind in ("project", "tool", "llm", "memory"))
+            )]
+            current_logs = log_rows(session, base, projects, secrets, log_cursors)
+            seen_projects.update(projects)
+            last_busy = busy
             for row in current_logs:
                 key = json.dumps(row, sort_keys=True, default=str)
                 if key not in seen_logs:
@@ -487,12 +516,13 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
                     logs.append(row)
             sample = {"at": datetime.now(timezone.utc).isoformat(), "status": status,
                       "resource_capacity": run_view.get("resource_capacity", {}),
-                      "agent_sessions": snapshot["agent_sessions"]}
+                      "agent_sessions": snapshot["agent_sessions"], "monitor": {
+                          "collection_seconds": round(time.monotonic() - collected_at, 6),
+                          "log_requests": 4 * len(projects), "new_log_entries": len(current_logs),
+                      }}
             samples.append(sample)
             remote_capacity = sample["resource_capacity"].get("remote") or {}
             if remote_capacity.get("source") not in {None, "unreported"} and remote_capacity.get("used", 0) > remote_capacity.get("limit", 0):
-                # A lower hot-updated cap may intentionally grandfather
-                # existing tasks. Record the observation for review.
                 anomalies.append({"kind": "remote.usage_above_current_limit", "created_at": sample["at"],
                                   "capacity": remote_capacity, "requires_admission_review": True})
             initial_limit = (run_view["run"].get("config_snapshot") or {}).get("limits_snapshot", {}).get("remote_concurrency")
@@ -504,7 +534,7 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
                         anomalies.append(violation)
             occupied = {row["session_id"] for row in snapshot["assignment_rows"] if row.get("released_at") is None}
             for row in snapshot["agent_sessions"]:
-                silence = elapsed(row.get("last_event_at") or row.get("last_progress_at"), sample["at"])
+                silence = elapsed(row.get("last_progress_at") or row.get("last_event_at"), sample["at"])
                 if row["session_id"] in occupied and silence is not None and silence >= 300:
                     key = ("agent.no_events_for_five_minutes", row["session_id"])
                     if key not in seen_anomalies:
@@ -558,14 +588,22 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
             report["model_mode"] = (run_view["run"].get("config_snapshot") or {}).get("member_config", {}).get("api_format", "unknown")
             if selection:
                 categories = {row.get("metadata", {}).get("category") for row in snapshot["challenges"]}
-                report["checks"]["twenty_challenge_selection"] = {
-                    "status": "pass" if len(selection) == len(snapshot["challenges"]) == 20 and set(REQUIRED_CATEGORIES).issubset(categories) else "fail",
+                expected = len(selection)
+                balanced_pair = expected == 2 and {bool(row.get("metadata", {}).get("remote")) for row in snapshot["challenges"]} == {False, True}
+                report["checks"]["twenty_challenge_selection" if expected == 20 else "requested_challenge_selection"] = {
+                    "status": "pass" if expected == len(snapshot["challenges"]) and (balanced_pair if expected == 2 else set(REQUIRED_CATEGORIES).issubset(categories) if expected == 20 else True) else "fail",
                     "evidence": {"selected": len(selection), "imported": len(snapshot["challenges"]), "categories": sorted(categories)},
                 }
             now = datetime.now(timezone.utc)
             reason = "terminal_run" if status in TERMINAL else "max_duration" if duration > 0 and time.monotonic() - started >= duration else "deadline_drain_timeout" if observed_until and now >= observed_until else None
             report["termination_reason"] = reason or "observing"
-            export_report(report, export, secrets)
+            if reason or time.monotonic() - last_exported >= snapshot_interval:
+                exported_at = time.monotonic()
+                export_report(report, export, secrets, compatibility=bool(reason))
+                sample["monitor"]["export_seconds"] = round(time.monotonic() - exported_at, 6)
+                last_exported = time.monotonic()
+            with (export / f"real_competition_{run_id}_samples.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(redact(sample, secrets), ensure_ascii=False, default=str) + "\n")
             print(json.dumps({"run_id": run_id, "status": status, "samples": len(samples),
                               "active_assignments": measured["assignments"]["active"],
                               "anomalies": len(anomalies), "recoveries": len(confirmed_recoveries)}), flush=True)
@@ -578,7 +616,9 @@ def monitor(base_url: str, run_id: str, duration: float, database_url: str, *, e
             partial = {**(report or {}), "run_id": run_id, "status": status, "anomalies": anomalies,
                        "termination_reason": "monitor_error", "read_only_observation": True,
                        "duration_seconds": round(time.monotonic() - started, 3)}
-            export_report(partial, export, secrets)
+            if time.monotonic() - last_exported >= snapshot_interval:
+                export_report(partial, export, secrets, compatibility=False)
+                last_exported = time.monotonic()
             if duration > 0 and time.monotonic() - started >= duration:
                 raise
         wait = min(poll_interval, max(0.01, duration - (time.monotonic() - started))) if duration > 0 else poll_interval
@@ -618,8 +658,6 @@ def main() -> int:
         response = session.post(f"{base}/api/workflows/{workflow['id']}/preflight", timeout=60)
         response.raise_for_status()
         selection = choose_challenges(response.json().get("challenges", []))
-        # Verify durable observation before initiating real work. A wrong DSN
-        # must fail before Start, not leave a live run without its monitor.
         with psycopg.connect(args.database_url, row_factory=psycopg.rows.dict_row, autocommit=True) as connection:
             connection.execute("SET default_transaction_read_only TO on")
             stored = connection.execute("SELECT status FROM workflows WHERE id=%s", (workflow["id"],)).fetchone()
