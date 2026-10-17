@@ -2,6 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Debian's docker.io package provides the daemon; the app needs the docker.io
+# client command, supplied by the split docker-cli package below.
+
 RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
         'Acquire::Retries "5";' \
@@ -12,7 +15,8 @@ RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/
         'Acquire::BrokenProxy "true";' \
         > /etc/apt/apt.conf.d/80-ipc-retries \
     && apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates docker.io \
+        ca-certificates docker-cli \
+    && command -v docker \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml /app/pyproject.toml
