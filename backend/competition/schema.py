@@ -1,4 +1,3 @@
-"""Version 1 additive storage contract. Keep these statements migration-stable."""
 
 COMPETITION_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS workflow_challenges (

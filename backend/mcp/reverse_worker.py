@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 def _remaining(deadline: float) -> int:

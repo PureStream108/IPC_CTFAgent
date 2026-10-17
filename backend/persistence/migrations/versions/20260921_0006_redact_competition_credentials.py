@@ -1,4 +1,3 @@
-"""Remove provider credentials accidentally persisted in early run snapshots."""
 
 from alembic import op
 

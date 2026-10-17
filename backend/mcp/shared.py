@@ -19,7 +19,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _SENSITIVE_KEY_RE = re.compile(

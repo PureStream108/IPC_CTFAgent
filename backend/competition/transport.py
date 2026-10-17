@@ -1,9 +1,3 @@
-"""Single-host gRPC/UDS control and ZeroMQ reconnaissance transport.
-
-The coordinator is hosted by a Linux worker, never by a challenge sandbox.
-Protobuf is the gRPC source-of-truth contract. JSON remains the persisted and
-ZeroMQ representation, with explicit conversion through ``Envelope``.
-"""
 from __future__ import annotations
 
 import json
@@ -25,7 +19,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.competition.proto import pair_pb2
 from backend.core.validation import InputValidationError
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 class Envelope(BaseModel):

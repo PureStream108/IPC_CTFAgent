@@ -1,4 +1,3 @@
-"""Integration invariants; run only with an isolated IPC_TEST_DATABASE_URL."""
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -18,7 +17,6 @@ from backend.competition.workspace import SharedWorkspace
 from backend.core.orchestrator import Orchestrator
 from backend.persistence.database import Database
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.postgres

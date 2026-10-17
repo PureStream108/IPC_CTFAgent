@@ -14,7 +14,6 @@ from typing import Any
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 from backend.mcp.shared import _tool_unavailable
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 _JVM_STARTED = False

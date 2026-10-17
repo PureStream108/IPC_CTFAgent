@@ -10,7 +10,6 @@ from backend.core.logging_util import IPCLogger
 from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, generate_wp_content, write_wp
 from backend.members.adapters import make_adapter
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 BOOTSTRAP_DESC = "Bootstrap: Starting"

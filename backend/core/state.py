@@ -25,7 +25,6 @@ from backend.tools.catalog import ToolCatalog
 from backend.tools.tool_mcp import build_tool_search_mcp
 from backend.tools.tool_registry import ToolRegistry
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 def _env_flag(name: str) -> bool:

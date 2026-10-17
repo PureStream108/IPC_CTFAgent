@@ -1,10 +1,3 @@
-"""IPC action-agent behaviour that needs no database.
-
-Covers the Workflow-panel selection contract (a selected platform is described
-to IPC so it asks only for the remaining personalisation) and the containment
-guard on the task-sandbox tool.
-"""
-
 from __future__ import annotations
 
 import pytest

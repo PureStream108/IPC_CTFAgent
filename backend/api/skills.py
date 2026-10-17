@@ -45,7 +45,6 @@ def _view(state):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("")
@@ -77,7 +76,6 @@ def add_skill(body: AddSkill, state=_GET_STATE_DEPENDENCY):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _REQUIRED_UPLOAD_FILE = File(...)
 
 @router.post("/upload")

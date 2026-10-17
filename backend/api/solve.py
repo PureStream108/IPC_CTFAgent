@@ -20,7 +20,6 @@ router = APIRouter(tags=["solve"])
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.post("/projects/{project_id}/start")

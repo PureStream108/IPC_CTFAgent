@@ -1,4 +1,3 @@
-"""Platform verdicts are explicit application evidence, never HTTP success."""
 from __future__ import annotations
 
 from dataclasses import dataclass

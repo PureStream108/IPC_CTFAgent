@@ -1,10 +1,3 @@
-"""Deterministic IPC competition browser acceptance test.
-
-The E2E compose stack supplies a fake platform and mock models.  The script is
-also useful locally: set IPC_E2E_BASE_URL and it will drive the running app,
-capturing a trace, screenshot, and browser console on failure.
-"""
-
 from __future__ import annotations
 
 import json
@@ -15,7 +8,6 @@ from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 def main() -> int:
@@ -73,9 +65,6 @@ def main() -> int:
             )
             if not confirmed.ok:
                 raise RuntimeError(confirmed.text())
-            # Fixture setup creates a confirmed workflow; selection, preflight
-            # and Start are performed through the same visible controls as an
-            # operator, so JavaScript or request-wiring failures fail E2E.
             page.get_by_role("button", name="Competition", exact=True).click()
             competition = page.locator('[x-show="showCompetition"]')
             selector = competition.locator('select[x-model="competitionWorkflowId"]')
@@ -105,10 +94,6 @@ def main() -> int:
             if assignment is None:
                 raise RuntimeError("deterministic Member assignment was not created")
 
-            # Let the scripted Member perform the sandbox and MCP actions and
-            # submit the flag through its normal submit_flag tool.  Polling the
-            # durable evidence endpoint makes this browser test cover the
-            # execution path instead of merely posting a candidate over HTTP.
             evidence = {}
             for _ in range(120):
                 evidence_response = page.request.get(f"{base}/e2e/runs/{run_id}/evidence")

@@ -22,7 +22,6 @@ class AddMemoryRequest(BaseModel):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/memory", response_model=list[Memory])

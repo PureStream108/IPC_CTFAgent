@@ -1,4 +1,3 @@
-"""deduplicate terminal goal intents and enforce one per project"""
 
 from alembic import op
 

@@ -1,4 +1,3 @@
-"""Validation errors for data received from APIs, providers, and checkpoints."""
 
 
 class InputValidationError(ValueError):

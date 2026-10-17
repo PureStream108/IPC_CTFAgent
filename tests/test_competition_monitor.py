@@ -1,4 +1,3 @@
-"""Monitor correlation, export secrecy and observation-only operation."""
 from __future__ import annotations
 
 import copy

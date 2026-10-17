@@ -13,7 +13,6 @@ router = APIRouter(tags=["graph"])
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/projects/{project_id}/export")

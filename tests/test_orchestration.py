@@ -58,8 +58,6 @@ def test_postprocess_claim_skips_a_project_locked_by_completion(state, other_pro
         completion.execute("SELECT id FROM projects WHERE id=%s FOR UPDATE", (project_id,))
         claimed = executor.submit(claim).result(timeout=5)
         assert (claimed.project_id if claimed else None) == other_id
-        # Repeating completion must not wait on a job row held by a worker
-        # that is itself waiting for this transaction's project row.
         completion.execute("SET LOCAL lock_timeout='2s'")
         enqueue_postprocess(completion, project_id)
     with state.db.connect() as connection:

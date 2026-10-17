@@ -1,4 +1,3 @@
-"""CPU inference checks run inside the task image, without downloading models."""
 import tempfile
 from pathlib import Path
 

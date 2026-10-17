@@ -1,6 +1,3 @@
-"""Reject member commands that reach outside the task container.
-"""
-
 from __future__ import annotations
 
 import re

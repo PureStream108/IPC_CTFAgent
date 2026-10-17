@@ -70,7 +70,6 @@ def preview_challenges(body: ChallengeRequest):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.post("/import", status_code=201)

@@ -1,6 +1,3 @@
-"""Platform-verdict gate: ret2shell-linked projects are solved only after the
-platform judge confirms the candidate flag."""
-
 from __future__ import annotations
 
 import time

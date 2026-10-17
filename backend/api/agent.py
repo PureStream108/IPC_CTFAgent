@@ -1,14 +1,3 @@
-"""Agent session observability: tell "alive" apart from "making progress".
-
-The UI used to render four different facts as one green dot -- the API is up,
-the coordinator is ticking, a worker holds the seat, and the task is actually
-advancing. A run could look perfectly healthy while a Member had been silent
-for twenty minutes.
-
-These endpoints expose each fact separately, straight from
-``agent_session_health``, plus a merged event stream so a Member card can show
-what its session is doing right now rather than only that it exists.
-"""
 from __future__ import annotations
 
 import json
@@ -27,7 +16,6 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 def get_sessions(state: AppState = _GET_STATE_DEPENDENCY) -> AgentSessionStore:
@@ -53,7 +41,6 @@ def _view(row: dict) -> dict:
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_SESSIONS_DEPENDENCY = Depends(get_sessions)
 
 @router.get("/sessions")
@@ -76,7 +63,6 @@ def list_sessions(
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_JOBS_DEPENDENCY = Depends(get_jobs)
 
 @router.get("/sessions/{session_id}")

@@ -1,16 +1,3 @@
-"""P3.3 collaboration fallbacks: recon-consumption safety net (建議3).
-
-The trunk fix (建議1) gives every seat an intent so its session runs and drains
-recon normally.  These tests cover the附属 safety net: when a message addressed
-to a *live* receiver seat stays ahead of that seat's cursor past the grace
-window, its payload must be degraded into the receiver project's durable
-blackboard and reported, and a later cursor advance must be reported as
-consumed.
-
-The database paths are exercised directly; the model loop is not, so these run
-fast and deterministically against an isolated IPC_TEST_DATABASE_URL.
-"""
-
 from __future__ import annotations
 
 from types import SimpleNamespace

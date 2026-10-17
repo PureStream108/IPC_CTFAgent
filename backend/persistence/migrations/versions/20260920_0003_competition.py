@@ -1,4 +1,3 @@
-"""Competition identity, immutable deadlines, global slots and session events."""
 from alembic import op
 
 revision = "20260920_0003"

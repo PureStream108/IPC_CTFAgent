@@ -64,7 +64,6 @@ def _public_detail(detail):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/projects", response_model=list[ProjectSummary])
@@ -130,7 +129,6 @@ def delete_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _REQUIRED_UPLOAD_FILE = File(...)
 
 @router.post("/projects/{project_id}/attachments")

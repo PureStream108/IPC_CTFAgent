@@ -8,7 +8,6 @@ from backend.ops.service import _resolve_headers
 from backend.platform.adapter import PlatformAdapter
 from backend.platform.verdict import interpret_response
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 class CompetitionPlatform:

@@ -12,7 +12,6 @@ from backend.sandbox.errors import (
     classify_docker_startup_error,
 )
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 @dataclass

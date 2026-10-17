@@ -1,4 +1,3 @@
-"""Cleanup must hold when migration or the test body fails."""
 from __future__ import annotations
 
 from types import SimpleNamespace

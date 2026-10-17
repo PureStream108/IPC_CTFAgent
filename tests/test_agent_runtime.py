@@ -1,10 +1,3 @@
-"""The shared action loop, independent of who owns the session.
-
-These cases exercise ``AgentRuntime`` through an in-memory writer: no step
-budget, durable repair of interrupted side effects, real loop detection,
-truncation continuation, and a projection that keeps a compaction summary in
-front of the retained tail.
-"""
 from __future__ import annotations
 
 import asyncio

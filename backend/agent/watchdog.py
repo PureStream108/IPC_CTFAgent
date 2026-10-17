@@ -1,27 +1,3 @@
-"""Graded response to a session that has stopped making progress (P5c).
-
-The failure this exists for: a Member's seat lease was renewed by the
-coordinator's tick, so a worker that had silently stopped kept its challenge
-until the deadline. P5b made the worker certify itself; this decides what to do
-once a session goes quiet anyway.
-
-The response is graded rather than binary because the cost of being wrong is
-asymmetric. Killing a Member that is thirty seconds into a legitimate three
-minute provider turn destroys real work; waiting one extra interval on a
-genuinely dead one costs almost nothing. So escalation runs:
-
-    diagnose -> cancel the current turn -> hand the session to another Member
-
-Each step is recorded before it acts, which is what makes a later postmortem
-able to distinguish "we killed a working Member" from "the Member was gone".
-
-One subtlety worth stating plainly, because it is the easiest thing to get
-wrong here: competition writes are fenced by the **assignment** lease
-(``competition_assignments.lease_owner``/``epoch``), while a handoff moves the
-**writer** row. Advancing only one of them leaves the new Member unable to
-write a single event. ``handoff_assignment`` therefore moves both inside one
-transaction.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass

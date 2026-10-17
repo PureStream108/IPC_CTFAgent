@@ -1,11 +1,3 @@
-"""Resume a paused ISCTF2025/GZCTF run with its original Members and sessions.
-
-The paused run keeps its durable challenges, sessions, submissions and seat
-history.  This script resumes that run, monitors it until the declared end or
-completion, and pauses again on exit so the same sessions can resume later.
-It never prints secrets or candidate flag values.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +11,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

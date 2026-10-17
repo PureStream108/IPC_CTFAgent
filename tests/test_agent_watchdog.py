@@ -1,12 +1,3 @@
-"""Graded watchdog over stalled agent sessions (P5c).
-
-The behaviour under test is a judgement call, not a mechanism: the cost of
-being wrong is asymmetric. Killing a Member thirty seconds into a legitimate
-three-minute provider turn destroys real work, while waiting one extra interval
-on a dead one costs almost nothing. So these tests pin the *reluctance* as much
-as the escalation - especially that a running long job is never escalated,
-since that is exactly the work P4a exists to make possible.
-"""
 from __future__ import annotations
 
 from backend.agent.watchdog import (

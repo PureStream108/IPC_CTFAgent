@@ -1,10 +1,3 @@
-"""Invariants of the unified agent session store.
-
-Two properties matter most here and are hard to get right: the writer fence
-(only one owner may extend a transcript, and a handoff moves that right
-without breaking the transcript) and the append-only event log with
-idempotent replay.
-"""
 from __future__ import annotations
 
 import pytest

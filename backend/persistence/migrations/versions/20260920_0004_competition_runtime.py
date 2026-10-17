@@ -1,4 +1,3 @@
-"""Complete the competition runtime, recovery, verdict and replay schema."""
 
 from alembic import op
 

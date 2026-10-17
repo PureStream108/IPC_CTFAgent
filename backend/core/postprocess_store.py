@@ -17,8 +17,6 @@ class PostprocessJob:
 
 
 def _lock_project(connection: Any, project_id: str) -> None:
-    # API completion already owns this row. Every job writer must take it
-    # before job rows, otherwise enqueue and worker status refresh can deadlock.
     connection.execute(
         "SELECT id FROM projects WHERE id=%s FOR NO KEY UPDATE", (project_id,),
     ).fetchone()

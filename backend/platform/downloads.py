@@ -1,4 +1,3 @@
-"""Bounded parallel staging with a fresh adapter for each challenge."""
 from __future__ import annotations
 
 from collections.abc import Callable

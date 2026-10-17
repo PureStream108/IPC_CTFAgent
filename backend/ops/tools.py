@@ -12,7 +12,6 @@ from backend.blackboard import graph_store
 from backend.sandbox.command_policy import host_path_violation
 from backend.sandbox.docker_manager import _load_docker_sdk
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 class OpsToolError(RuntimeError):

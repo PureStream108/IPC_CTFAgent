@@ -1,29 +1,8 @@
-"""P4 docker E2E probe: run inside ipc-app against the compose Postgres.
-
-Proves the deployed image's P4 robustness behaviour deterministically, using
-only in-process construction so it never perturbs the live coordinator:
-
-  T7  event-key hardening: the resumed-session continuation key is stable and
-      epoch-scoped (not a drifting position key), replay is idempotent, and a
-      reused key with different content raises SessionNeedsRebuild.
-  T3  session self-heal: an invalid tool-order 400 is repaired in place; a 400
-      that repair cannot fix (and a second 400 on an already-repaired turn)
-      escalates to SessionNeedsRebuild(reason=invalid_tool_order), not a loop.
-  T4  stop/teardown: the orchestrator ownership partition treats a stopped-run
-      project as terminal (excluded from recovery) and an active-run project as
-      owned; the generic log throttle folds a burst to one line.
-  T12 migration/API hardening: env.py sets a committed lock_timeout; the API
-      deadlock-retry helper retries once then raises.
-
-Prints PASS/FAIL per check and exits non-zero if any fail. Touches no
-competition rows, so there is nothing to clean up.
-"""
 from __future__ import annotations
 
 import logging
 import sys
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 results: list[tuple[str, bool, str]] = []

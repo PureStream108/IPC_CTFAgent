@@ -1,4 +1,3 @@
-"""Fence legacy/competition schedulers and persist run observations."""
 
 from alembic import op
 

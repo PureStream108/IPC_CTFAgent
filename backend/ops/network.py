@@ -164,6 +164,5 @@ def _pinned_request(
     response.reason = raw.reason
     response.encoding = requests.utils.get_encoding_from_headers(response.headers)
     if not stream:
-        # Materialize the body before the connection is returned to the pool.
         _ = response.content
     return response

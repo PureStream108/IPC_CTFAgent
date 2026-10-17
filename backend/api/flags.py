@@ -39,7 +39,6 @@ def _record(row, *, reveal: bool = False) -> FlagRecord:
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("", response_model=list[FlagRecord])

@@ -1,4 +1,3 @@
-"""Durable, non-executable files attached to an IPC conversation."""
 from __future__ import annotations
 
 import json

@@ -52,8 +52,6 @@ def test_mcp_registry_opens_servers_lazily():
 
 @pytest.fixture(params=[False, True], ids=["streaming", "legacy"])
 def deps(tmp_path, request, monkeypatch):
-    # Both supported drivers must preserve the same flag, graph, validation,
-    # interruption, and observation contracts.
     monkeypatch.setattr("backend.members.base_member.MEMBER_LEGACY_DRIVER", request.param)
     db = Database().configure()
     mem = MemoryStore(db).configure()

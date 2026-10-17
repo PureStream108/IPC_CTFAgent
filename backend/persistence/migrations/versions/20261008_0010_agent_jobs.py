@@ -1,16 +1,3 @@
-"""Detached sandbox jobs, and a health projection over agent sessions.
-
-Everything a Member ran was previously wrapped in ``timeout -k 5s 60s``, so
-brute force, large file analysis and slow scans were killed rather than
-finished.  A job is started detached and polled instead, and its durable row is
-what lets a poll survive a worker restart.
-
-The health view answers separately what the UI used to show as a single green
-dot: API up, coordinator ticking, worker holding the seat, task progressing.
-
-Additive only: one new table, its indexes, and a view over existing columns.
-"""
-
 from alembic import op
 
 revision = "20261008_0010"

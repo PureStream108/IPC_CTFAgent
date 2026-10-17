@@ -1,14 +1,3 @@
-"""Driver selection for the unified solving loop (P5).
-
-Standalone projects and mock adapters now drive the provider-native streaming
-runtime (``AgentRuntime``) instead of the legacy ``decide()`` loop. These tests
-pin the three contracts:
-
-* a standalone scripted member runs the streaming driver and lands a durable
-  ``project`` agent session with its tool events;
-* the same script driven by both drivers leaves identical graph writes;
-* the legacy loop survives as an explicit, observable fallback.
-"""
 from __future__ import annotations
 
 import pytest

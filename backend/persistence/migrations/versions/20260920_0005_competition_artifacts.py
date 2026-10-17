@@ -1,4 +1,3 @@
-"""Version shared competition artifacts to prevent silent lost updates."""
 
 from alembic import op
 

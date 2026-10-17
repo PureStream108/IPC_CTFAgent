@@ -1,4 +1,3 @@
-"""Regression checks for the coverage gate's saved-baseline comparison."""
 import json
 
 from scripts import check_coverage
@@ -23,7 +22,6 @@ def test_gate_accepts_the_exact_run_used_to_save_a_rounded_baseline(tmp_path, mo
 
 def test_rounding_does_not_bypass_the_eighty_percent_floor(tmp_path, monkeypatch):
     reports(tmp_path, monkeypatch, 79999, 100000)
-    # Remove the stricter saved baseline to exercise the floor itself.
     (tmp_path / "coverage-baseline.json").unlink()
     assert check_coverage.main() == 1
 

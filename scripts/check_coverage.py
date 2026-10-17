@@ -1,4 +1,3 @@
-"""Enforce the repository's coverage floors by architectural module group."""
 
 from __future__ import annotations
 
@@ -33,8 +32,6 @@ def main() -> int:
         percent = 100.0 if total == 0 else 100.0 * covered / total
         print(f"{name}: {percent:.2f}% ({covered}/{total})")
         baseline_percent = float((baseline.get(name) or {}).get("line_percent", 0))
-        # The saved baseline is rounded to two decimals. Compare at the same
-        # precision so a stored 80.81% does not reject its exact 80.806% run.
         if baseline_percent and round(percent, 2) < baseline_percent:
             print(f"{name}: below saved baseline {baseline_percent:.2f}%", file=sys.stderr)
             failed = True

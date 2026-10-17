@@ -1,14 +1,3 @@
-"""Ops chat on the unified agent runtime, using native provider tool calls.
-
-Before this module, Ops asked the model to emit ``{"reply":...,"tool_call":...}``
-as JSON inside prose, then re-encoded each round as alternating user/assistant
-text. That is what lost the tool transcript: the durable conversation kept only
-the final reply, so the next turn could not see what the model had already run.
-
-Here tool calls go over the provider's own tool-call channel and every
-provider message, call and result becomes an ``agent_events`` row, so the next
-turn's context is rebuilt from the real transcript.
-"""
 from __future__ import annotations
 
 import json

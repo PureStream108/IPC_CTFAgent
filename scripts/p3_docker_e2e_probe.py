@@ -1,15 +1,3 @@
-"""P3 docker E2E probe: run inside ipc-app against the compose Postgres.
-
-Proves the deployed image's P3 behaviour deterministically:
-  1. GZCTF remote/container detection + concurrent limit.
-  2. policy ordering by solve_count then remote-first.
-  3. the recon-consumption fallback (建議3): stranded recon degrades into the
-     receiver project's blackboard with a competition.message_undelivered event,
-     and a later cursor advance emits competition.message_consumed.
-
-Creates everything under a throwaway workflow id and deletes it (cascade) at the
-end, so it leaves the competition DB as it found it.
-"""
 from __future__ import annotations
 
 import sys

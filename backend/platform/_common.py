@@ -1,9 +1,3 @@
-"""Small, dependency-free helpers shared by platform adapters.
-
-Platform implementations are deliberately self contained.  Keeping these
-helpers here avoids importing application configuration or attachment
-utilities into an adapter just to normalize a category or filename.
-"""
 from __future__ import annotations
 
 from collections.abc import Iterable

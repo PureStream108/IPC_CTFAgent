@@ -1,10 +1,3 @@
-"""Compatibility shim: the durable loop now lives in :mod:`backend.agent.runtime`.
-
-``SessionRunner`` keeps its assignment-shaped constructor so existing
-competition callers are unchanged, while the loop itself is the shared
-:class:`~backend.agent.runtime.AgentRuntime`. Removed once the Member bridge
-constructs the runtime directly.
-"""
 from __future__ import annotations
 
 import threading

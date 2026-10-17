@@ -60,7 +60,6 @@ def _client_key(request: Request) -> str:
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_AUTH_MANAGER_DEPENDENCY = Depends(get_auth_manager)
 
 @router.get("/status")

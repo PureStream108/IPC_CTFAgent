@@ -1,12 +1,3 @@
-"""Scripted streaming mock drives the unified runtime (P5).
-
-The MockAdapter's ``turn`` surface is what mock-configured deployments and the
-test suite run through now, so pin its contract here: each scripted action
-becomes exactly one provider-native tool call (the inverse of
-``action_payload``), the assistant message carries the ``tool_calls`` shape the
-runtime's dangling-call repair reads, and an exhausted or absent script ends
-the loop idle instead of inventing actions.
-"""
 from __future__ import annotations
 
 import asyncio

@@ -1,23 +1,3 @@
-"""P5 docker E2E probe: run inside ipc-app against the compose Postgres.
-
-Proves the deployed image's P5 driver unification deterministically, using only
-in-process construction so it never perturbs the live coordinator:
-
-  P5.1 standalone streaming: a scripted mock member on a standalone project is
-      driven by the provider-native AgentRuntime - a durable ``project`` agent
-      session exists, tool_call/tool_result events landed, the graph side
-      effects are identical to the legacy driver's, and no ``member_driver``
-      fallback event was logged.
-  P5.2 streaming mock: MockAdapter.turn emits exactly one native tool call per
-      scripted action, in the assistant ``tool_calls`` shape the runtime reads,
-      and goes idle (no invented actions) once the script runs out.
-  P5.3 legacy fallback: the MEMBER_LEGACY_DRIVER feature flag routes a scripted
-      member back to the legacy loop and logs member_driver=legacy_fallback
-      with the reason; a decide-only adapter falls back the same way.
-
-Cleans up the probe projects it created. Prints PASS/FAIL per check and exits
-non-zero if any fail.
-"""
 from __future__ import annotations
 
 import logging
@@ -25,7 +5,6 @@ import os
 import sys
 import tempfile
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 results: list[tuple[str, bool, str]] = []

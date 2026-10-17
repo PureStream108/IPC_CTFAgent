@@ -1,12 +1,3 @@
-"""Unified agent sessions: append-only transcript shared by every runtime.
-
-The competition tables are the only existing producer of durable agent
-history, so they are backfilled here.  Session ids are preserved verbatim:
-five tables reference ``competition_sessions(id)``, and reusing the id lets
-those foreign keys be re-pointed at ``agent_sessions`` without rewriting any
-child row.
-"""
-
 from alembic import op
 
 from backend.agent.schema import AGENT_SCHEMA

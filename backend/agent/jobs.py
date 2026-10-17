@@ -1,19 +1,3 @@
-"""Durable records for sandbox work that outlives the turn that started it.
-
-Every Member command used to run under ``timeout -k 5s 60s``, so a brute force
-pass, a large file analysis or a slow scan was killed rather than finished.
-A job is started detached and polled instead; this module is the durable half
-of that, and the reason a poll still works after the worker restarts.
-
-Two rules shape it:
-
-* A job's handle is its row plus the files in the workspace volume, never a
-  docker exec id.  Exec ids die with the container; the volume does not.
-* ``lost`` is a real state.  A job whose process is gone with no recorded exit
-  status is reported as ``lost``, never as ``exited 0`` -- "unknown" and
-  "succeeded" are completely different evidence to a model deciding what to do
-  next.
-"""
 from __future__ import annotations
 
 import uuid

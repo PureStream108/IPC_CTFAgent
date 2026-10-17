@@ -1,9 +1,3 @@
-"""Token budgeting, calibration and semantic compaction.
-
-The core claim under test: a byte threshold is the wrong unit. CJK and ASCII
-text differ by roughly a factor of two per token, so a byte-based trigger either
-overflows the window or discards evidence that still fit.
-"""
 from __future__ import annotations
 
 from backend.agent.compaction import (

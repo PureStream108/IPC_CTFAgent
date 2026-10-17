@@ -1,14 +1,3 @@
-"""Invariants of detached sandbox jobs (P4a).
-
-Two properties carry the feature and are the easy ones to get wrong:
-
-* A job that outran the 60s foreground ceiling is still readable after the
-  worker that started it has gone away, because the handle is a durable row
-  plus files in the workspace volume rather than a docker exec id.
-* ``lost`` is reported as ``lost``.  A process that vanished without recording
-  an exit status must never be presented as a success, because a model told
-  "exit 0" will build its next conclusion on work that may never have run.
-"""
 from __future__ import annotations
 
 import os

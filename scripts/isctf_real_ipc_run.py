@@ -1,9 +1,3 @@
-"""Bounded real ISCTF2025/GZCTF run through the IPC platform tools.
-
-The script reads credentials from the process environment and model keys from
-the local test key file. It never prints secrets or candidate flag values.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +22,6 @@ from backend.ops.questions import QuestionStore
 from backend.ops.service import OpsAgentService
 from backend.ops.store import OpsStore
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 BASE_URL = "https://gz.imxbt.cn"

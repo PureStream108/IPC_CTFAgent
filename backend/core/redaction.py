@@ -1,4 +1,3 @@
-"""Redaction helpers for user-facing competition data."""
 
 from __future__ import annotations
 

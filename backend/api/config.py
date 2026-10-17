@@ -115,7 +115,6 @@ def _config_view(state: AppState) -> dict:
 
 
 
-# FastAPI resolves request values from these reusable declaration markers.
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/config")

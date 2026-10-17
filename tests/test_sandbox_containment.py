@@ -1,12 +1,3 @@
-"""Containment: solver commands must stay inside the task container.
-
-A real run escaped the sandbox in two ways -- it read an exported
-``ISCTF2025-WriteUp.pdf`` out of the deployment's artifact tree, and it ran
-``/d/Language/Python314/python`` instead of the container's interpreter. Both
-shapes are regression-tested here, together with the configuration guard that
-stops the host-backed ``local`` backend from being selected by accident.
-"""
-
 from __future__ import annotations
 
 import shutil

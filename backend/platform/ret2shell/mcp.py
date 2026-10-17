@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 from backend.mcp.mcp_server import MCPServer, close_lifespan, create_mcp_server
 from backend.platform.ret2shell.adapter import Ret2ShellClient
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 WSRX_BINARY = os.getenv("IPC_R2S_WSRX_BINARY", "wsrx")

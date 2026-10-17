@@ -37,7 +37,6 @@ POSTGRES_TEST_MODULES = {
 def _native_pg_ctl() -> str | None:
     if importlib.util.find_spec("pytest_postgresql") is None:
         return None
-    # initdb deliberately rejects root. Docker verification runs as postgres.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return None
     configured = os.environ.get("IPC_TEST_POSTGRES_EXECUTABLE") or shutil.which("pg_ctl")
@@ -89,8 +88,6 @@ def allow_local_sandbox(monkeypatch):
     tests/test_sandbox_containment.py for that guard.
     """
     monkeypatch.setenv("IPC_ALLOW_LOCAL_SANDBOX", "1")
-    # A Docker deployment may set /app/data as its shared artifact root.
-    # Tests must resolve their artifacts under their own tmp_path roots.
     monkeypatch.delenv("IPC_ARTIFACT_ROOT", raising=False)
 
 
@@ -192,9 +189,6 @@ def _assert_no_connections(dsn: str, schema: str) -> None:
 def _with_search_path(dsn: str, schema: str) -> str:
     parts = urlsplit(dsn)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    # Including public lets CREATE TABLE IF NOT EXISTS resolve production
-    # tables there and skip creating the test's own tables. pg_catalog is
-    # implicit, so isolated migrations need only this schema.
     query["options"] = f"-csearch_path={schema}"
     query["application_name"] = schema
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))

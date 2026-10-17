@@ -1,4 +1,3 @@
-"""create PostgreSQL-only IPC schema"""
 
 from alembic import op
 

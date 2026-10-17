@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Offline importer for IPC's pre-PostgreSQL data.
-
-SQLite is intentionally used only as an input decoder in this standalone
-utility. The application runtime never imports this module and never opens a
-SQLite database.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -26,7 +19,6 @@ import yaml
 from alembic import command
 from alembic.config import Config
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]

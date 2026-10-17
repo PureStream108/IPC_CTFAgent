@@ -1,4 +1,3 @@
-"""Fence competition challenge execution state to a single run."""
 
 from alembic import op
 

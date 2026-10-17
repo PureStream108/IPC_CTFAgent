@@ -1,16 +1,3 @@
-"""Short-transaction access to the unified agent session tables.
-
-Two rules shape this module:
-
-* ``agent_events`` is append-only.  A compaction records a derived summary in
-  ``agent_compactions``; it never edits or deletes the events it summarizes, so
-  the evidence chain of a task outlives every projection decision.
-* Writing requires a live fence.  ``append_event`` validates
-  ``agent_session_writers`` inside the same transaction as the insert, which is
-  what makes a member handoff safe: ownership moves to a new worker and the
-  epoch advances, and the previous owner's next write is rejected instead of
-  interleaving into the same transcript.
-"""
 from __future__ import annotations
 
 import uuid

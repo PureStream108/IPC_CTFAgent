@@ -11,7 +11,6 @@ from typing import Any
 
 from backend.blackboard import graph_store
 
-# Error boundaries keep their recovery behavior and retain debug diagnostics.
 _recovery_logger = logging.getLogger(__name__)
 
 WRITEUP_REQUEST = (

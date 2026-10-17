@@ -1,11 +1,3 @@
-"""Run a bounded ISCTF2025 discovery and IPC allocation smoke test.
-
-The target is deliberately fixed to the public scoreboard endpoint for game
-32.  The smoke test never submits a flag and never follows links to another
-competition.  It uses IPC's MCP tools for project allocation and question
-handling so the same path is exercised as the runner integration.
-"""
-
 from __future__ import annotations
 
 import argparse

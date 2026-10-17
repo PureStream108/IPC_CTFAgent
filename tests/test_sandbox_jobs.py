@@ -1,12 +1,3 @@
-"""The detached-job shell text, verified against a real bash.
-
-These scripts only ever run inside the task container, so no unit test would
-otherwise execute them -- yet quoting is the main risk: the command is
-model-supplied and nested two levels deep (``bash -c 'bash -lc "<command>"'``).
-Running the exact strings through a POSIX shell here is what keeps a command
-containing quotes, ``$`` or ``;`` from either breaking the wrapper or escaping
-it.
-"""
 from __future__ import annotations
 
 import os
@@ -29,8 +20,6 @@ from backend.sandbox.task_sandbox import (
 
 def find_bash() -> str | None:
     if os.name == "nt":
-        # Windows' system bash.exe launches WSL; these tests share Windows
-        # temp paths and therefore need Git Bash's MSYS filesystem mapping.
         git = shutil.which("git")
         if git:
             root = Path(git).resolve().parent.parent

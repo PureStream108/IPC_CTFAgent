@@ -1,4 +1,3 @@
-"""Database-backed fencing between the legacy and competition engines."""
 
 from __future__ import annotations
 
