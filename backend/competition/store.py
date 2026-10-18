@@ -1686,6 +1686,13 @@ class CompetitionStore:
             previous.pop("sequence", None)
             candidate = dict(data)
             candidate.pop("sequence", None)
+            # Callers stamp created_at/deadline_at at publish time; a retry after
+            # a restart regenerates them. They are not part of the message's
+            # identity, so comparing them would turn every retry into a
+            # spurious "request id reused" conflict.
+            for field in ("created_at", "deadline_at"):
+                previous.pop(field, None)
+                candidate.pop(field, None)
             if previous != candidate:
                 raise CompetitionConflict("request id reused with a different message")
             if existing["status"] != "done":
