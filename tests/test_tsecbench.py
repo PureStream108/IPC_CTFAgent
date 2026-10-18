@@ -32,6 +32,19 @@ def test_duplicate_refreshes_progress_without_completing_partial_task():
     assert result["correct_flag_count"] == 1
 
 
+def test_multi_flag_challenges_classify_as_pentest():
+    client = _FakeClient(challenges=[
+        _challenge("b-01", "log audit target", flag_count=4),
+        _challenge("b-03", "web application", flag_count=4),
+        _challenge("single", "web application", flag_count=1),
+    ])
+    adapter = TSECBenchAdapter(client=client, mapping=_mapping())
+    by_id = {item.external_id: item.category for item in adapter.fetch_challenges()}
+    assert by_id["b-01"] == "pentest"
+    assert by_id["b-03"] == "pentest"
+    assert by_id["single"] == "web"
+
+
 def test_pentest_category_override_and_hint_opt_in():
     client = _FakeClient(challenges=[{"unique_code": "assessment", "description": "web test", "flag_count": 1}])
     mapping = FieldMapping(platform="tsecbench", list_url=client.base_url, category_map={"*": "pentest"})

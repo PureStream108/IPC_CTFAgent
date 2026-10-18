@@ -312,6 +312,8 @@ class TSECBenchAdapter(PlatformAdapter):
         override = self.mapping.category_map.get(str(raw.get("unique_code", ""))) or self.mapping.category_map.get("*")
         if override in PLATFORM_CATEGORIES:
             return override
+        if _positive_int(raw.get("flag_count"), 0) > 1:
+            return "pentest"
         field = str(self.mapping.category_field or "").strip()
         if field and raw.get(field) not in (None, ""):
             value = str(raw.get(field)).strip().lower()
