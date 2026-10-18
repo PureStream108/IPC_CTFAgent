@@ -2142,7 +2142,11 @@ class CompetitionService:
                     receiver_member_id=assignment["member"],
                     sender_session_id=assignment["session_id"],
                     receiver_session_id=assignment["session_id"],
-                    request_id=f"target-instance:{instance['challenge_id']}:{assignment['session_id']}:g{generation}:{hashlib.sha256(str(entry).encode()).hexdigest()[:12]}",
+                    request_id=(
+                        f"target-instance:{instance['challenge_id']}:{assignment['session_id']}"
+                        f":g{generation}:e{int(assignment['epoch'])}:"
+                        f"{hashlib.sha256(str(entry).encode()).hexdigest()[:12]}"
+                    ),
                     correlation_id=f"target-instance:{instance['challenge_id']}",
                     lease_epoch=int(assignment["epoch"]),
                     created_at=now,
