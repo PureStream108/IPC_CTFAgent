@@ -10,6 +10,10 @@ CHALLENGE_DURATION = timedelta(hours=5)
 WP_DURATION = timedelta(minutes=10)
 SYNC_INTERVAL_SECONDS = 120
 
+# Easy/medium work is cheaper per point, so it is drained before hard targets.
+# Unknown labels sort last instead of masquerading as "easy".
+_DIFFICULTY_RANK = {"easy": 0, "medium": 1, "hard": 2}
+
 
 @dataclass(frozen=True)
 class Challenge:
@@ -23,6 +27,7 @@ class Challenge:
     members: tuple[str, ...] = ()
     state: str = "ready"
     solve_count: int | None = None
+    difficulty: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ def plan_assignments(
     available_remote = max(0, remote_capacity - running_remote)
     candidates = [c for c in eligible if not c.members]
     candidates.sort(key=lambda c: (
+        _DIFFICULTY_RANK.get((c.difficulty or "").strip().lower(), 3),
         -(c.solve_count if c.solve_count is not None else -1),
         0 if c.remote else 1,
         c.ready_at,

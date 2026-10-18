@@ -102,6 +102,22 @@ def test_an_unreported_solve_count_sorts_after_every_reported_one():
     ]
 
 
+def test_difficulty_precedes_solve_count_and_container_preference():
+    """Easy and medium work is drained before hard targets."""
+    tasks = [
+        task("hard-popular", solve_count=100, difficulty="hard", remote=True),
+        task("medium", solve_count=1, difficulty="medium", remote=True),
+        task("easy-late", solve_count=0, difficulty="easy"),
+        task("unknown", solve_count=50),
+    ]
+    assignments = plan_assignments(
+        tasks, occupied_members=set(), remote_capacity=3, now=NOW, local_capacity=4,
+    )
+    assert [a.challenge_id for a in assignments] == [
+        "easy-late", "medium", "hard-popular", "unknown",
+    ]
+
+
 def test_container_challenges_are_serialised_inside_the_instance_quota():
     """With a quota of one, only one container challenge starts per pass."""
     tasks = [

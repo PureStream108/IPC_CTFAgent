@@ -496,6 +496,9 @@ class CompetitionService:
         }
         if solve_count is not None:
             metadata["solve_count"] = solve_count
+        difficulty = str(platform_data.get("difficulty") or "").strip().lower()
+        if difficulty:
+            metadata["difficulty"] = difficulty
         container_type = platform_data.get("container_type")
         if container_type:
             metadata["container_type"] = str(container_type)
@@ -1680,6 +1683,7 @@ class CompetitionService:
                 members=tuple(members_by_challenge.get(row["id"], [])),
                 state=row["state"],
                 solve_count=solve_count,
+                difficulty=(str(metadata.get("difficulty") or "").strip().lower() or None),
             ))
         remote_limit = self._remote_instance_limit(run, platform)
         with self.state.db.connect() as connection:
