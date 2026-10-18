@@ -800,6 +800,11 @@ class Orchestrator:
                 if hasattr(report, "model_dump") else str(report),
             },
         )
+        if self._competition_project(project_id):
+            # Competition seats are allocated by CompetitionService. A report
+            # must not mint unseated solvers: they would be recorded as active
+            # agents and then blocked by the seat check at launch.
+            return
         available_slots = max(
             0,
             self.state.config.runtime.max_members_per_report - self._project_running_future_count(project_id),
