@@ -98,11 +98,31 @@ def plan_assignments(
             available_remote -= 1
         else:
             available_local -= 1
-    if len(eligible) < 10:
-        helpers = [c for c in eligible if len(c.members) == 1 and c.id not in assigned]
-        helpers.sort(key=lambda c: (c.first_assigned_at or c.ready_at, c.id))
-        for challenge in helpers:
+    # A free Member has nothing useful to start when the platform has no
+    # capacity left: at that point helping a running challenge is the only
+    # work available. Short runs keep the original whole-run behaviour.
+    startable_left = any(
+        c.id not in assigned
+        and not c.members
+        and ((c.remote and available_remote > 0) or (not c.remote and available_local > 0))
+        for c in candidates
+    )
+    helpers = [c for c in eligible if len(c.members) == 1 and c.id not in assigned]
+    helpers.sort(key=lambda c: (c.first_assigned_at or c.ready_at, c.id))
+    pentest_helpers = [c for c in helpers if c.category == "pentest"]
+    other_helpers = [c for c in helpers if c.category != "pentest"]
+    helped: set[str] = set()
+    # A pentest board is designed for two solvers on distinct work items, so
+    # fill its second seat before ordinary helper work.
+    for challenge in pentest_helpers:
+        if not free:
+            break
+        result.append(Assignment(free.pop(0), challenge.id, "helper"))
+        helped.add(challenge.id)
+    if len(eligible) < 10 or not startable_left:
+        for challenge in other_helpers:
             if not free:
                 break
             result.append(Assignment(free.pop(0), challenge.id, "helper"))
+            helped.add(challenge.id)
     return result

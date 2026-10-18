@@ -118,6 +118,48 @@ def test_difficulty_precedes_solve_count_and_container_preference():
     ]
 
 
+def test_saturated_remote_capacity_turns_idle_members_into_helpers():
+    """When the platform has no free container slot, idle Members help instead."""
+    solving = [
+        task(f"s{index}", remote=True, state="solving",
+             members=(MEMBER_NAMES[index],),
+             first_assigned_at=NOW, deadline_at=NOW + timedelta(hours=1))
+        for index in range(3)
+    ]
+    ready = [task(f"r{index}", remote=True) for index in range(10)]
+    assignments = plan_assignments(
+        solving + ready, occupied_members=set(), remote_capacity=3, now=NOW,
+    )
+    helpers = [item for item in assignments if item.role == "helper"]
+    assert len(helpers) == 3
+    assert {item.challenge_id for item in helpers} == {"s0", "s1", "s2"}
+    assert len({item.member for item in helpers}) == 3
+
+
+def test_pentest_second_seat_is_filled_before_ordinary_helpers():
+    """A pentest board expects two solvers; give it a Member before plain helpers."""
+    solving = [
+        task(f"n{index}", remote=True, state="solving",
+             members=(MEMBER_NAMES[index],),
+             first_assigned_at=NOW, deadline_at=NOW + timedelta(hours=1))
+        for index in range(7)
+    ]
+    solving.append(
+        task("pentest", category="pentest", remote=True, state="solving",
+             members=(MEMBER_NAMES[7],),
+             first_assigned_at=NOW + timedelta(minutes=5), deadline_at=NOW + timedelta(hours=1))
+    )
+    ready = [task(f"r{index}", remote=True) for index in range(10)]
+    assignments = plan_assignments(
+        solving + ready, occupied_members=set(), remote_capacity=3, now=NOW,
+    )
+    helpers = [item for item in assignments if item.role == "helper"]
+    assert len(helpers) == 2
+    # Eight seats are occupied, so only two helpers fit; the pentest one leads.
+    assert helpers[0].challenge_id == "pentest"
+    assert len({item.challenge_id for item in helpers}) == 2
+
+
 def test_container_challenges_are_serialised_inside_the_instance_quota():
     """With a quota of one, only one container challenge starts per pass."""
     tasks = [
