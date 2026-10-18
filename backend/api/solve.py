@@ -28,7 +28,7 @@ def start_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] == "solved":
+        if row["status"] in {"solved", "completed"}:
             raise HTTPException(409, "Project already solved")
     errors = state.config.startup_errors()
     if errors:
@@ -47,7 +47,7 @@ def reopen_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] == "solved":
+        if row["status"] in {"solved", "completed"}:
             raise HTTPException(409, "Solved projects are immutable; create a new project to retry")
         raise HTTPException(409, "Only terminal failed projects can be resumed")
 
@@ -58,7 +58,7 @@ def stop_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
             raise HTTPException(404, "Project not found")
-        if row["status"] == "solved":
+        if row["status"] in {"solved", "completed"}:
             raise HTTPException(409, "Solved projects cannot be stopped")
         graph_store.set_status(conn, project_id, "stopped")
         conn.execute(
@@ -74,12 +74,20 @@ def stop_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     return {"status": "stopped", "project_id": project_id}
 
 
+@router.post("/projects/{project_id}/pause")
+def pause_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    result = stop_solving(project_id, state)
+    with state.db.connect() as conn:
+        graph_store.set_runtime_phase(conn, project_id, "paused")
+    return {**result, "phase": "paused"}
+
+
 @router.post("/projects/stop-all")
 def stop_all(state: AppState = _GET_STATE_DEPENDENCY):
     stopped = []
     with state.db.connect() as conn:
         rows = conn.execute(
-            "SELECT id FROM projects WHERE status NOT IN ('solved','stopped')"
+            "SELECT id FROM projects WHERE status NOT IN ('solved','completed','stopped')"
         ).fetchall()
         ids = [r["id"] for r in rows]
     for pid in ids:

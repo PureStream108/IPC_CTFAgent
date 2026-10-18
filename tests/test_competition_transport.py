@@ -309,6 +309,39 @@ def test_recon_subscriber_replays_orders_deduplicates_and_acknowledges():
         context.term()
 
 
+def test_recon_subscriber_ignores_peer_broadcasts():
+    """One challenge topic broadcasts every receiver's mail to every member."""
+    context = zmq.Context()
+    records = []
+
+    def persist(envelope):
+        record = {"sequence": len(records) + 1, "envelope": envelope.model_dump(mode="json")}
+        records.append(record)
+        return record
+
+    publisher = ReconPublisher("inproc://recon-peer-filter", persist, context=context)
+    subscriber = ReconSubscriber(
+        "inproc://recon-peer-filter", "challenge", session_id="receiver-session",
+        replay=lambda _session, **_kwargs: [],
+        advance=lambda _session, sequence: sequence,
+        context=context,
+    )
+    try:
+        time.sleep(0.05)
+        publisher.publish(message(request_id="peer", receiver_session_id="peer-session", message_type="recon"))
+        publisher.publish(message(request_id="mine", receiver_session_id="receiver-session", message_type="recon"))
+        received = subscriber.receive(timeout_ms=2000)
+        assert received is not None
+        assert received["sequence"] == 2
+        assert received["envelope"]["request_id"] == "mine"
+        assert subscriber.ack() == 2
+        assert subscriber.receive(timeout_ms=100) is None
+    finally:
+        subscriber.close()
+        publisher.close()
+        context.term()
+
+
 def test_recon_subscriber_rejects_unknown_protocol_version():
     record = message(message_type="recon").model_dump(mode="json")
     record["protocol_version"] = 99

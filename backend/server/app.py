@@ -18,6 +18,7 @@ from backend.api import graph as graph_router
 from backend.api import logs as logs_router
 from backend.api import memory as memory_router
 from backend.api import ops_agent as ops_agent_router
+from backend.api import pentest as pentest_router
 from backend.api import platform as platform_router
 from backend.api import project as project_router
 from backend.api import questions as questions_router
@@ -118,6 +119,7 @@ def create_app(root: str | Path | None = None) -> FastAPI:
 
     app.include_router(auth_router.router)
     app.include_router(project_router.router)
+    app.include_router(pentest_router.router)
     app.include_router(solve_router.router)
     app.include_router(graph_router.router)
     app.include_router(memory_router.router)

@@ -19,6 +19,40 @@ from backend.platform.mapping import PlatformChallenge
 pytestmark = pytest.mark.postgres
 
 
+def test_partial_correct_keeps_solver_and_survives_closeout_recovery(tmp_path, monkeypatch):
+    platform = FixturePlatform([
+        PlatformChallenge(external_id="multi-flag", title="Multi flag", category="pentest", description="Two objectives"),
+    ], flags={"multi-flag": "fixture-two"})
+    def submit(external_id, flag):
+        platform.calls.append((external_id, flag))
+        final = flag == "fixture-two"
+        return {"verdict": "correct", "challenge_complete": final, "correct_flag_count": 2 if final else 1,
+                "total_flag_count": 2, "matched_flag_index": 1 if final else 0}
+    monkeypatch.setattr(platform, "submit", submit)
+    db, service, _state, _ops, workflow_id = _new_fixture_service(tmp_path, platform, "multi-flag")
+    try:
+        run_id = service.start(workflow_id, "multi-flag-run")["run"]["id"]
+        service.tick()
+        challenge = service.store.challenges(run_id)[0]
+        seat = service.store.assignments(run_id, active_only=True)[0]
+        service.submit_candidate(run_id, challenge["id"], seat["session_id"], "fixture-one", "first objective evidence", 0)
+        service.tick()
+        service.tick()
+        current = service.store.challenges(run_id)[0]
+        assert current["state"] != "solved"
+        assert current["metadata"]["flag_progress"]["correct_flag_count"] == 1
+        assert service.store.assignments(run_id, active_only=True)
+        with db.connect() as connection:
+            assert graph_store.get_project_row(connection, current["project_id"])["status"] != "solved"
+        service.submit_candidate(run_id, challenge["id"], seat["session_id"], "fixture-two", "second objective evidence", 0)
+        service.tick()
+        assert service.store.challenges(run_id)[0]["state"] == "solved"
+        assert platform.calls == [("multi-flag", "fixture-one"), ("multi-flag", "fixture-two")]
+    finally:
+        service.shutdown()
+        db.close()
+
+
 def _spec() -> PlatformWorkflowSpec:
     return PlatformWorkflowSpec.model_validate(
         {

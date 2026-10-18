@@ -1190,3 +1190,36 @@ def test_stopped_run_projects_are_not_resurrected_by_recovery(state):
         assert plain_pid not in active and plain_pid not in terminal
     finally:
         orch.shutdown()
+
+
+def test_run_member_closes_member_resources_when_the_task_finishes(state):
+    """A finished member releases its ZeroMQ recon context on its own thread."""
+    from types import SimpleNamespace
+
+    from backend.core.orchestrator import Orchestrator
+    from backend.members.base_member import SolveResult
+
+    pid = _make_project(state, "misc")
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "running")
+
+    stopped: list[bool] = []
+
+    class FakeMember:
+        name = "amber"
+        deps = SimpleNamespace(competition_assignment=None)
+
+        def stop(self) -> None:
+            stopped.append(True)
+
+        async def solve_async(self, *_args, **_kwargs):
+            return SolveResult(status="done", steps=0)
+
+    orch = Orchestrator(state, max_workers=1)
+    try:
+        result = orch._run_member(pid, FakeMember(), "i001", "misc", False)
+    finally:
+        orch.shutdown()
+
+    assert result is not None and result.status == "done"
+    assert stopped == [True]

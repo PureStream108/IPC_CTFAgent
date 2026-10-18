@@ -44,10 +44,10 @@ from backend.members.adapters import (
     ProviderError,
 )
 from backend.members.member_tools import (
-    MEMBER_TOOLS,
     action_payload,
     is_parallel_safe,
     is_terminal,
+    tools_for_category,
 )
 from backend.memory.memory_search import search as mem_search
 from backend.memory.memory_store import MemoryStore
@@ -118,6 +118,7 @@ class MemberDeps:
     job_store: Any | None = None
     on_fact: Callable[[str, str, str], None] | None = None
     on_message: Callable[[str, str, str, dict], dict] | None = None
+    evidence_dir: Any | None = None
 
 
 @dataclass
@@ -924,7 +925,7 @@ class BaseMember:
             ),
         )
         try:
-            runner = self._make_native_runner(list(MEMBER_TOOLS), project_id, intent_id)
+            runner = self._make_native_runner(tools_for_category(category), project_id, intent_id)
         except Exception as exc:
             _recovery_logger.debug('Error handled in _solve_with_native_session', exc_info=True)
             self._release(project_id, intent_id)
@@ -1193,6 +1194,36 @@ class BaseMember:
     ) -> DispatchResult:
         d = self.deps
         kind = action.kind
+        if kind.startswith("pentest_"):
+            from backend.pentest import store as pentest_store
+            if category != "pentest":
+                return DispatchResult(invalid_action=True, observation="pentest tools require a pentest project")
+            try:
+                prepared_evidence = None
+                if kind == "pentest_record_evidence" and d.evidence_dir is not None:
+                    from backend.pentest.evidence import archive_pages
+                    prepared_evidence = await asyncio.to_thread(archive_pages, d.sandbox.read_page,
+                                                               action.args.get("path", ""), d.evidence_dir)
+                with d.db.connect() as conn:
+                    if kind == "pentest_board":
+                        board = pentest_store.snapshot(conn, project_id)
+                        result = {**board, "records": board["records"][-100:], "events": board["events"][-20:]}
+                    else:
+                        assignment = d.competition_assignment or {}
+                        actor = {"member": self.name, "intent_id": intent_id, "lease_owner": d.lease_owner,
+                                 "lease_token": d.lease_token, "assignment": assignment,
+                                 "session_id": assignment.get("session_id"), "epoch": assignment.get("epoch"),
+                                 "instance_generation": assignment.get("instance_generation")}
+                        result = pentest_store.apply(conn, project_id, kind.removeprefix("pentest_"), {k: v for k, v in action.args.items() if k != "thought"},
+                                                     actor=actor, read_artifact=(lambda _: prepared_evidence) if prepared_evidence is not None else d.sandbox.read_file)
+                    status = graph_store.get_project_row(conn, project_id)["status"]
+                text = json.dumps(result, ensure_ascii=False, default=str)
+                d.logger.project("pentest.action", project_id, member=self.name, operation=kind, record_id=result.get("id"))
+                if status == "completed":
+                    return DispatchResult(result=SolveResult(status="completed", steps=step), graph_action="pentest", observation=text)
+                return DispatchResult(graph_action="pentest", observation=text)
+            except (ValueError, KeyError, OSError) as exc:
+                return DispatchResult(invalid_action=True, observation=str(exc))
         if kind == "bash":
             cmd = self._string_arg(action.args.get("command", ""))
             if not cmd.strip():
@@ -2254,9 +2285,13 @@ class BaseMember:
                     from_fact = fact.id
                 else:
                     from_fact = row["to_fact_id"]
-                edge_store.complete_goal_intent(
-                    conn, project_id, [from_fact], desc, self.name, self.name
-                )
+                # Competition challenges finish through the platform verdict.
+                # A single accepted flag must not close the challenge's goal
+                # edge while the platform still expects more flags.
+                if getattr(d, "competition_assignment", None) is None:
+                    edge_store.complete_goal_intent(
+                        conn, project_id, [from_fact], desc, self.name, self.name
+                    )
                 candidate = submit_flag_candidate(
                     conn,
                     project_id,
@@ -2359,10 +2394,20 @@ class BaseMember:
                 )
         except Exception:
             _recovery_logger.debug('Error handled in _build_context', exc_info=True)
+        if category == "pentest":
+            runtime_notes = [note for note in runtime_notes if not note.startswith("Flag search priority")]
         return {
             "role": self.name,
             "role_blurb": self.role_blurb,
             "category": category,
+            "pentest_contract": (
+                "Use pentest_board first. Respect scope/constraints. Decompose explicit objectives with pentest_add_goal. "
+                "Record discovered assets and actual artifact evidence, register candidate findings, plan a separate validation "
+                "intent, then prove objectives with verified evidence. Use plan_work for dependent subtasks and publish negative "
+                "results; do not repeat failed routes. Existing jobs, bash, MCP and model configuration remain the execution harness. "
+                "Platform flags must still be submitted through submit_flag; a goal proof cannot substitute for platform completion."
+                if category == "pentest" else None
+            ),
             "step": step,
             "max_steps": None if d.continuous else min(d.max_steps, d.max_actions_per_task),
             "short_task": not d.continuous,

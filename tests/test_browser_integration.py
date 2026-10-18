@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.browser
+
 pytest.importorskip("playwright.async_api")
 
 from backend.mcp.mcp_client import MCPClient
@@ -142,6 +144,7 @@ def test_real_browser_phase_one_flow(tmp_path: Path, browser_test_origin: str):
             assert downloaded["artifact_id"].startswith("download:")
             screenshot = await client.call_tool("screenshot", {})
             assert screenshot["artifact_id"].startswith("screenshot:")
+        assert session._playwright is None, "MCP shutdown must release the browser driver before its event loop closes"
 
     asyncio.run(run())
     metadata = member / "browser-artifacts" / "metadata.jsonl"

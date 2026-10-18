@@ -127,6 +127,7 @@ def project_meta(row: Any) -> ProjectMeta:
         external_id=row["external_id"],
         title=row["title"],
         category=row["category"],
+        completion_policy=row.get("completion_policy", "verified_flag"),
         status=row["status"],
         postprocess_status=row.get("postprocess_status", "not_started"),
         terminal_reason=row.get("terminal_reason"),
@@ -155,6 +156,7 @@ def create_project(
     hints: list[tuple[str, str]] | None = None,
     external_id: str | None = None,
     platform: str | None = None,
+    pentest_setup=None,
 ) -> str:
     pid = next_project_id(conn)
     now = utcnow()
@@ -179,6 +181,12 @@ def create_project(
                 "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (%s, %s, %s, %s, %s)",
                 (hid, pid, content, creator, now),
             )
+    policy = "platform_flags" if platform else ("goals" if category == "pentest" else "verified_flag")
+    conn.execute("UPDATE projects SET completion_policy=%s WHERE id=%s", (policy, pid))
+    if category == "pentest":
+        from backend.pentest.models import Setup
+        from backend.pentest.store import initialize
+        initialize(conn, pid, goal, origin, Setup.model_validate(pentest_setup or {}))
     add_agent(conn, pid, "ipc", "ipc", state="active")
     add_agent(conn, pid, "diamond", "diamond", state="idle")
     return pid

@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import anyio
+
 from backend.mcp.mcp_server import MCPServer, create_mcp_server
 
 _recovery_logger = logging.getLogger(__name__)
@@ -340,7 +342,10 @@ class _BrowserSession:
     async def close(self) -> None:
         async with self._lock:
             if self._pending_tasks:
-                await asyncio.gather(*tuple(self._pending_tasks), return_exceptions=True)
+                pending = tuple(self._pending_tasks)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
             if self._context is not None:
                 await self._context.close()
             if self._browser is not None:
@@ -739,7 +744,8 @@ def build_browser_mcp(browser: _BrowserSession | None = None) -> MCPServer:
         finally:
             close = getattr(browser, "close", None)
             if callable(close):
-                await close()
+                with anyio.CancelScope(shield=True):
+                    await close()
 
     server = create_mcp_server(
         "browser", "Stateful Playwright browser tools", lifespan=lifespan

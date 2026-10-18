@@ -353,6 +353,7 @@ class CompetitionService:
         return {
             "workflow_id": workflow_id,
             "identity_key": platform.identity,
+            "network": platform.network_diagnostics() if callable(getattr(platform, "network_diagnostics", None)) else {},
             "challenge_count": len(challenges),
             "remote_count": sum(bool(item.remote) for item in challenges),
             "ordinary_count": sum(not bool(item.remote) for item in challenges),
@@ -559,6 +560,7 @@ class CompetitionService:
                 run = self.store.get_run(operation["run_id"])
                 self._control_unlocked(run["id"], operation["action"], run["revision"])
             except Exception as exc:
+                _recovery_logger.debug("Control operation failed", exc_info=True)
                 error = f"{type(exc).__name__}: {exc}"[:2000]
             if self.store.finish_control(operation, error=error):
                 self.store.append_run_event(operation["run_id"], "run.control_failed" if error else "run.control_completed",
@@ -1497,6 +1499,7 @@ class CompetitionService:
                 if self._instance_ready(challenge["id"]):
                     self._stop_instance(run, challenge, platform=platform)
             except Exception as exc:
+                _recovery_logger.debug("Challenge cleanup failed", exc_info=True)
                 self.store.append_run_event(
                     run["id"], "challenge.cleanup_failed",
                     {"challenge_id": challenge["id"], "error": str(exc), "retry_after": 60},
@@ -2357,6 +2360,7 @@ class CompetitionService:
                    JOIN competition_challenges c ON c.id=s.challenge_id
                    LEFT JOIN projects p ON p.id=c.project_id
                    WHERE s.run_id=%s AND s.status='correct' AND p.id IS NOT NULL
+                     AND COALESCE((s.verdict->>'challenge_complete')::boolean, true)
                      AND (p.status IS DISTINCT FROM 'solved'
                           OR EXISTS (SELECT 1 FROM competition_assignments a
                                      WHERE a.challenge_id=c.id AND a.released_at IS NULL))
@@ -2391,7 +2395,7 @@ class CompetitionService:
                 {"challenge_id": submission["challenge_id"], "submission_id": submission["id"],
                  "verdict": finished["status"], "source": "query"},
             )
-            if finished["status"] == "correct":
+            if finished["status"] == "correct" and (finished.get("verdict") or {}).get("challenge_complete", True):
                 challenge = next(
                     item for item in self.store.challenges(run["id"])
                     if item["id"] == submission["challenge_id"]
@@ -2418,11 +2422,19 @@ class CompetitionService:
                 {"challenge_id": challenge["id"], "submission_id": submission["id"],
                  "verdict": finished["status"]},
             )
-            if finished["status"] == "correct":
+            if finished["status"] == "correct" and (finished.get("verdict") or {}).get("challenge_complete", True):
                 self._on_correct(run, challenge, submission["candidate"])
                 self._mark_project_candidate(
                     challenge, submission["candidate"], "verified"
                 )
+            elif finished["status"] == "correct":
+                self._mark_project_candidate(challenge, submission["candidate"], "verified")
+                self.store.append_run_event(run["id"], "challenge.flag_progress",
+                                            {"challenge_id": challenge["id"], "progress": finished.get("verdict")})
+                orchestrator = self.state.orchestrator
+                if challenge.get("project_id") and orchestrator is not None:
+                    with suppress(Exception):
+                        orchestrator._resume_after_verdict(challenge["project_id"], reason="flag accepted; remaining platform objectives are incomplete")
             elif finished["status"] in {"wrong", "rejected"}:
                 self._mark_project_candidate(
                     challenge, submission["candidate"], "rejected"
@@ -2474,6 +2486,14 @@ class CompetitionService:
             )
 
     def _on_correct(self, run: dict, challenge: dict, flag: str) -> None:
+        with self.state.db.connect() as connection:
+            partial = connection.execute(
+                """SELECT verdict FROM competition_submissions WHERE run_id=%s AND challenge_id=%s
+                   AND candidate=%s AND status='correct' ORDER BY created_at DESC LIMIT 1""",
+                (run["id"], challenge["id"], flag),
+            ).fetchone()
+        if partial and (partial.get("verdict") or {}).get("challenge_complete") is False:
+            return
         project_id = challenge.get("project_id")
         orchestrator = self.state.orchestrator
         if project_id:

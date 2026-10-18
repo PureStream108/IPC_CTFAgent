@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -485,6 +486,22 @@ class ReconSubscriber:
         for record in records:
             self._queue(record)
 
+    def _addressed_elsewhere(self, value: Any) -> bool:
+        """Return True when a broadcast record belongs to a peer's session.
+
+        Recon is published on one challenge topic, so every subscriber sees
+        every receiver's mail. Only this session's records belong in this
+        transcript; rejecting a peer's record here would crash an ordinary
+        teammate's turn instead of simply ignoring traffic that is not ours.
+        """
+        if self.session_id is None or not isinstance(value, dict):
+            return False
+        envelope = value.get("envelope", value)
+        if not isinstance(envelope, dict):
+            return False
+        receiver = envelope.get("receiver_session_id")
+        return receiver is not None and receiver != self.session_id
+
     def ack(self, sequence: int | None = None) -> int:
         if not self.reliable or self.session_id is None or self.advance is None:
             raise RuntimeError("persistent acknowledgement is not configured")
@@ -511,25 +528,31 @@ class ReconSubscriber:
             if self._pending:
                 self._inflight = self._pending[min(self._pending)]
                 return self._inflight
-        if self.socket is None or not self.socket.poll(timeout_ms):
+        if self.socket is None:
             return None
-        topic, payload = self.socket.recv_multipart()
-        if topic.decode() != self.challenge_id:
-            return None
-        try:
-            value = json.loads(payload)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("recon payload is not valid JSON") from exc
-        if not self.reliable:
-            if isinstance(value, dict) and "envelope" in value:
-                self._normalize(value)
-            return value
-        self._queue(value)
-        self._catch_up()
-        if not self._pending:
-            return None
-        self._inflight = self._pending[min(self._pending)]
-        return self._inflight
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while True:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if not self.socket.poll(remaining_ms):
+                return None
+            topic, payload = self.socket.recv_multipart()
+            if topic.decode() != self.challenge_id:
+                continue
+            try:
+                value = json.loads(payload)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("recon payload is not valid JSON") from exc
+            if not self.reliable:
+                if isinstance(value, dict) and "envelope" in value:
+                    self._normalize(value)
+                return value
+            if self._addressed_elsewhere(value):
+                continue
+            self._queue(value)
+            self._catch_up()
+            if self._pending:
+                self._inflight = self._pending[min(self._pending)]
+                return self._inflight
 
     def close(self):
         if self.socket is not None:

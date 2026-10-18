@@ -37,13 +37,21 @@ def assert_flag_compatible(connection, project_id: str, flag: str) -> dict:
     if not normalized:
         raise ValueError("flag must not be empty")
     project = connection.execute(
-        "SELECT flag, status, flag_verified_at FROM projects WHERE id = %s FOR UPDATE",
+        "SELECT flag, status, flag_verified_at, completion_policy FROM projects WHERE id = %s FOR UPDATE",
         (project_id,),
     ).fetchone()
     if project is None:
         raise ValueError("project not found")
+    policy = str(project.get("completion_policy") or "verified_flag")
+    if policy == "goals":
+        raise FlagConflictError("independent pentest projects complete through evidence-backed goal proofs")
+    # A platform_flags project is judged per challenge: one challenge may carry
+    # several flags, and each accepted candidate is a distinct verified row.
+    # Only a settled project is locked to the flag that closed it.
+    platform_flags = policy == "platform_flags"
+    settled = str(project.get("status") or "") in {"solved", "completed"}
     existing_flag = str(project["flag"] or "").strip()
-    if existing_flag and existing_flag != normalized:
+    if existing_flag and existing_flag != normalized and (settled or not platform_flags):
         raise FlagConflictError("project already has a different flag")
     verified = connection.execute(
         """
@@ -53,7 +61,9 @@ def assert_flag_compatible(connection, project_id: str, flag: str) -> dict:
         """,
         (project_id,),
     ).fetchall()
-    if any(str(row["normalized_flag"] or "").strip() != normalized for row in verified):
+    if not platform_flags and any(
+        str(row["normalized_flag"] or "").strip() != normalized for row in verified
+    ):
         raise FlagConflictError("project already has a different verified flag submission")
     return project
 

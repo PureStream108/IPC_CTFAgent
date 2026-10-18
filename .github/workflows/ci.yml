@@ -11,10 +11,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16-alpine
@@ -46,10 +50,34 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,docker]"
+          python -m pip install -e ".[dev,docker,browser]"
+
+      - name: Set up Node for frontend behavior tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install explicit integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+
+      - name: Resolve Playwright cache version
+        id: playwright
+        run: python -c "import importlib.metadata; print('version='+importlib.metadata.version('playwright'))" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - name: Install Playwright browser and system dependencies
+        run: |
+          python -m playwright install --with-deps chromium
 
       - name: Run tests with branch coverage
-        run: python -m pytest -q --require-postgres --cov=backend --cov-branch --cov-report=term-missing --cov-report=json --junitxml=data/exports/pytest-ci.xml
+        run: python -m pytest -q --require-postgres --require-browser --cov=backend --cov-branch --cov-report=term-missing --cov-report=json --junitxml=data/exports/pytest-ci.xml
 
       - name: Enforce architectural coverage floors
         run: python scripts/check_coverage.py
@@ -67,6 +95,9 @@ jobs:
           python -m compileall -q backend scripts tests
           python -m alembic upgrade head --sql > /tmp/ipc-migration.sql
           docker compose config --quiet
+          docker compose -f docker-compose.e2e.yml config --quiet
+          node tests/js/ops_chat_checks.mjs .
+          node tests/js/pentest_checks.mjs .
 
       - name: Upload test and coverage diagnostics
         if: always()
@@ -76,6 +107,21 @@ jobs:
           path: |
             coverage.json
             data/exports/pytest-ci.xml
+            data/exports/pentest
+
+  package-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install package build dependencies
+        run: python -m pip install -e ".[docker]" build
+      - name: Verify installed platform workflows
+        run: python scripts/check_workflow_package.py
 
   task-image:
     runs-on: ubuntu-latest
@@ -84,8 +130,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build task image
-        run: docker build -f docker/member/Dockerfile -t ipc-task:ci .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/member/Dockerfile
+          tags: ipc-task:ci
+          load: true
+          cache-from: type=gha,scope=task-image
+          cache-to: type=gha,scope=task-image,mode=max
 
       - name: Run CTF tool acceptance
         run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci bash /acceptance/c5_task_acceptance.sh
@@ -120,8 +176,15 @@ jobs:
       - name: Run Playwright competition acceptance
         run: docker compose -f docker-compose.e2e.yml run --rm e2e-runner
 
+      - name: Collect E2E stack logs
+        if: always()
+        run: |
+          mkdir -p data/exports/e2e
+          docker compose -f docker-compose.e2e.yml ps -a > data/exports/e2e/compose-status.txt
+          docker compose -f docker-compose.e2e.yml logs --no-color > data/exports/e2e/compose.log
+
       - name: Upload E2E diagnostics
-        # All three CI jobs must be required by the repository's branch rules;
+        # All validation jobs must be required by the repository's branch rules;
         # declaring a job here alone does not configure branch protection.
         if: always()
         uses: actions/upload-artifact@v4
@@ -132,3 +195,13 @@ jobs:
       - name: Stop E2E stack
         if: always()
         run: docker compose -f docker-compose.e2e.yml down -v
+
+  required-checks:
+    if: always()
+    needs: [test, package-smoke, task-image, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: python -c "import json,os; results=json.loads(os.environ['JOB_RESULTS']); assert all(job['result']=='success' for job in results.values()), results"

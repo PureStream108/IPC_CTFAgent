@@ -28,6 +28,7 @@ class FieldMapping(BaseModel):
     pagination_path: str = ""
     max_pages: int = 100
     max_challenges: int = 0
+    allow_hints: bool = False
     category_map: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""

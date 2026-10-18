@@ -67,7 +67,9 @@ def _public_detail(detail):
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.get("/projects", response_model=list[ProjectSummary])
-def list_projects(state: AppState = _GET_STATE_DEPENDENCY):
+def list_projects(state: AppState = _GET_STATE_DEPENDENCY, category: str | None = None):
+    if category is not None and category not in CATEGORIES:
+        raise HTTPException(400, "unknown project category")
     def read() -> list[ProjectSummary]:
         with state.db.connect() as conn:
             _expire(state, conn)
@@ -77,19 +79,27 @@ def list_projects(state: AppState = _GET_STATE_DEPENDENCY):
         summaries = _with_deadlock_retry(read)
     except psycopg.errors.OperationalError:
         if "all" in _last_project_list:
-            return _last_project_list["all"]
+            return [p for p in _last_project_list["all"] if category is None or p.category == category]
         raise
     _last_project_list["all"] = summaries
-    return summaries
+    return [p for p in summaries if category is None or p.category == category]
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
 def create_project(body: CreateProjectRequest, state: AppState = _GET_STATE_DEPENDENCY):
     if body.category not in CATEGORIES:
         raise HTTPException(400, f"category must be one of {CATEGORIES}")
+    if body.pentest is not None:
+        from backend.pentest.models import Setup
+        try:
+            Setup.model_validate(body.pentest)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if body.category != "pentest":
+            raise HTTPException(400, "pentest setup requires pentest category")
     hints = [(h.content, h.creator) for h in (body.hints or [])]
     with state.db.connect() as conn:
-        pid = graph_store.create_project(conn, body.title, body.origin, body.goal, body.category, hints)
+        pid = graph_store.create_project(conn, body.title, body.origin, body.goal, body.category, hints, pentest_setup=body.pentest)
     state.logger.project("project_created", pid, title=body.title, category=body.category)
     with state.db.connect() as conn:
         return _public_detail(graph_store.project_detail(conn, pid))

@@ -122,7 +122,9 @@ await app.drainOpsNextCalls();
 check(started.join() === 'first,second', 'a removed message was still sent');
 
 
+const pentestFactory = new Function(fs.readFileSync(path.join(root, 'frontend/pentest.js'), 'utf8') + '\nreturn pentestWorkspace;')();
 const sidebar = {
+  ...pentestFactory(),
   projectStatusFilter: [],
   projects: [],
   projectStatusGroups: new Function(
@@ -143,7 +145,7 @@ for (const [name, signature] of [
 const groupKeys = sidebar.projectStatusGroups.map((group) => group.key);
 check(groupKeys.join() === 'solved,running,created,stopped', 'unexpected groups: ' + groupKeys);
 for (const [status, expected] of [
-  ['solved', 'solved'], ['flag_found', 'solved'], ['running', 'running'],
+  ['solved', 'solved'], ['completed', 'solved'], ['flag_found', 'solved'], ['running', 'running'],
   ['created', 'created'], ['stopped', 'stopped'], ['timeout', 'stopped'],
   ['infra_error', 'stopped'], ['failed', 'stopped'],
 ]) {
@@ -179,4 +181,10 @@ sidebar.toggleProjectStatusFilter('solved');
 check(sidebar.filteredProjects().map((p) => p.id).join() === 'proj_003', 'deselecting a group failed');
 check(sidebar.projectStatusGroupCount('stopped') === 2, 'stopped count should include failed');
 
+sidebar.projectStatusFilter = [];
+sidebar.projects.push({id: 'pentest-1', category: 'pentest', status: 'completed'});
+check(!sidebar.filteredProjects().some(p=>p.category==='pentest'), 'CTF workspace leaked pentest task');
+sidebar.workspaceMode = 'pentest';
+check(sidebar.filteredProjects().map(p=>p.id).join() === 'pentest-1', 'Pentest workspace leaked CTF task');
+check(sidebar.projectStatusGroupCount('solved') === 1, 'completed pentest not counted');
 console.log('ok');

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -307,6 +309,9 @@ class TSECBenchAdapter(PlatformAdapter):
         return ""
 
     def _category(self, raw: dict[str, Any]) -> str:
+        override = self.mapping.category_map.get(str(raw.get("unique_code", ""))) or self.mapping.category_map.get("*")
+        if override in PLATFORM_CATEGORIES:
+            return override
         field = str(self.mapping.category_field or "").strip()
         if field and raw.get(field) not in (None, ""):
             value = str(raw.get(field)).strip().lower()
@@ -386,6 +391,25 @@ class TSECBenchAdapter(PlatformAdapter):
                 "the benchmark task exposes no challenges; verify the benchmark token"
             )
         return self.fetch_challenges()
+
+    def network_diagnostics(self) -> dict:
+        """Check existing targets without starting an instance or buying a hint."""
+        checks = []
+        addresses = [str(addr) for item in self._by_id.values()
+                     for addr in item.platform_data.get("container_addr", [])][:6]
+        for address in addresses:
+            try:
+                parsed = urlsplit(address if "://" in address else "//" + address)
+                if not parsed.hostname or not parsed.port:
+                    raise ValueError("target address must include a host and port")
+                with socket.create_connection((parsed.hostname, parsed.port), timeout=0.5):
+                    pass
+                checks.append({"address": address, "reachable": True})
+            except (OSError, ValueError) as exc:
+                checks.append({"address": address, "reachable": False, "reason": str(exc)[:300]})
+        return {"api_reachable": True, "vpn_required": True, "checked_from": "application",
+                "targets": checks, "sandbox_connectivity": "must be checked from the task container",
+                "guidance": "Connect the benchmark VPN for both application and task containers. Targets can be checked once an instance address is available."}
 
     def _challenge(self, external_id: str) -> PlatformChallenge:
         if external_id not in self._by_id:
@@ -506,7 +530,13 @@ class TSECBenchAdapter(PlatformAdapter):
             if exc.reason == "auth":
                 return {"verdict": "auth_required"}
             if exc.reason == "duplicate":
-                return {"verdict": "correct", "reason": str(exc)}
+                # Duplicate is per flag index, never a proof that the whole task is solved.
+                progress = next((item for item in self.fetch_challenges() if item.external_id == str(external_id)), None)
+                metadata = progress.platform_data if progress else {}
+                return {"verdict": "correct", "reason": "duplicate", "duplicate": True,
+                        "challenge_complete": bool(progress and progress.solved),
+                        "correct_flag_count": metadata.get("correct_flag_count"),
+                        "total_flag_count": metadata.get("flag_count")}
             if exc.reason == "rate_limited":
                 return {
                     "verdict": "rate_limited",
@@ -525,6 +555,8 @@ class TSECBenchAdapter(PlatformAdapter):
         if correct is True:
             return {
                 "verdict": "correct",
+                "challenge_complete": (_positive_int(payload.get("total_flag_count"), 0) > 0
+                                       and _positive_int(payload.get("correct_flag_count"), 0) >= _positive_int(payload.get("total_flag_count"), 0)),
                 "awarded": payload.get("awarded"),
                 "cumulative_score": payload.get("cumulative_score"),
                 "correct_flag_count": payload.get("correct_flag_count"),
@@ -537,6 +569,8 @@ class TSECBenchAdapter(PlatformAdapter):
 
     def hint(self, external_id: str) -> dict[str, Any]:
         """Read the optional hint. Reading it discounts later flag scores."""
+        if not self.mapping.allow_hints:
+            return {"error": "Hints reduce the score; enable allow_hints explicitly to use them.", "reason": "hint_disabled"}
         try:
             return self.client.hint(external_id)
         except TSECBenchError as exc:

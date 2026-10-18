@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint")
+CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint", "pentest")
 
 ApiFormat = Literal["openai", "anthropic", "deepseek", "pi", "mock"]
 ApiSurface = Literal["auto", "chat_completions", "responses"]

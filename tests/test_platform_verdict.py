@@ -5,7 +5,7 @@ import time
 import pytest
 
 from backend.blackboard import edge_store, graph_store
-from backend.core.ipc import submit_flag_candidate
+from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.lifecycle import Lifecycle
 from backend.core.orchestrator import Orchestrator
 from backend.core.state import AppState
@@ -93,6 +93,27 @@ def test_candidate_is_queued_not_accepted_before_verdict(state):
     assert row["flag"] is None
     submissions = _submissions(state, pid)
     assert [s["status"] for s in submissions] == ["pending"]
+
+
+def test_platform_project_accepts_each_flag_of_a_multi_flag_challenge(state):
+    pid = _make_r2s_project(state)
+    _raise_candidate(state, pid, "flag{one}")
+
+    with state.db.connect() as conn:
+        conn.execute(
+            "UPDATE flag_submissions SET status='verified', verified_at=now() "
+            "WHERE project_id=%s AND normalized_flag=%s",
+            (pid, "flag{one}"),
+        )
+        queued = submit_flag_candidate(conn, pid, "flag{two}", source="test")
+    assert queued["mode"] == "pending"
+    assert queued["flag"] == "flag{two}"
+
+    with state.db.connect() as conn:
+        graph_store.set_status(conn, pid, "solved")
+        conn.execute("UPDATE projects SET flag=%s WHERE id=%s", ("flag{two}", pid))
+        with pytest.raises(FlagConflictError, match="different flag"):
+            submit_flag_candidate(conn, pid, "flag{three}", source="test")
 
 
 def test_platform_verdict_accepts_correct_flag(state):

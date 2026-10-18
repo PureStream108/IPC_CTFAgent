@@ -88,6 +88,10 @@ class CompetitionPlatform:
         result = native() if callable(native) else self.adapter.fetch_challenges()
         return result
 
+    def network_diagnostics(self):
+        method = getattr(self.adapter, "network_diagnostics", None)
+        return method() if callable(method) else {}
+
     def submit(self, external_id: str, flag: str):
         native = getattr(self.adapter, "submit", None)
         if callable(native):

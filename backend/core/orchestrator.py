@@ -181,7 +181,7 @@ class Orchestrator:
         status = self.lifecycle.status(project_id)
         if status is None:
             raise ValueError(f"project not found: {project_id}")
-        if status in ("flag_found", "solved"):
+        if status in ("flag_found", "solved", "completed"):
             return self.runtime_status(project_id)
         if status == "running" and not self._startup_in_progress(project_id):
             with self._lock:
@@ -450,7 +450,7 @@ class Orchestrator:
             row = graph_store.get_project_row(connection, project_id)
             if row is not None:
                 preserved_status = str(row["status"])
-                if preserved_status not in ("flag_found", "solved"):
+                if preserved_status not in ("flag_found", "solved", "completed"):
                     changed = (
                         preserved_status != target
                         or row["runtime_phase"] != phase
@@ -459,7 +459,7 @@ class Orchestrator:
                     connection.execute(
                         "UPDATE projects SET status = %s, terminal_reason = %s, "
                         "runtime_phase = %s, runtime_error = %s, updated_at = now() "
-                        "WHERE id = %s AND status NOT IN ('flag_found', 'solved')",
+                        "WHERE id = %s AND status NOT IN ('flag_found', 'solved', 'completed')",
                         (target, detail, phase, detail, project_id),
                     )
                 connection.execute(
@@ -497,7 +497,7 @@ class Orchestrator:
                 error_kind=kind,
                 error=detail,
             )
-        elif preserved_status in ("flag_found", "solved"):
+        elif preserved_status in ("flag_found", "solved", "completed"):
             self.state.logger.project(
                 f"{event}_flag_preserved",
                 project_id,
@@ -607,7 +607,7 @@ class Orchestrator:
             return
         if status == "running":
             return
-        if status in ("flag_found", "solved"):
+        if status in ("flag_found", "solved", "completed"):
             self._release_project_lease(project_id)
             return
         self._clear_project_member_retries(project_id)
@@ -1048,7 +1048,7 @@ class Orchestrator:
         try:
             with self.state.db.connect() as connection:
                 return connection.execute(
-                    """SELECT a.* FROM competition_assignments a
+                    """SELECT a.*,c.instance_generation FROM competition_assignments a
                        JOIN competition_challenges c ON c.id=a.challenge_id
                        JOIN competition_runs r ON r.id=a.run_id
                        WHERE c.project_id=%s AND a.member=%s AND a.role<>'wp'
@@ -1207,6 +1207,7 @@ class Orchestrator:
                 continuous=self._competition_project(project_id),
                 on_report=self.handle_report,
                 on_fact=self._broadcast_fact,
+                evidence_dir=self.state.projects_dir / project_id / "evidence",
                 on_message=self._send_member_message,
                 on_flag=self.on_flag_found,
                 lease_owner=lease_owner,
@@ -1400,6 +1401,13 @@ class Orchestrator:
             _recovery_logger.debug('Error handled in _run_member', exc_info=True)
             self.state.logger.project("member_crash", project_id, member=member.name, error=str(exc))
         finally:
+            # Release the member's resources on the thread that created them.
+            # In particular the competition recon subscriber owns a ZeroMQ
+            # context plus socket; dropping it to the cyclic GC instead lets a
+            # later collection block forever in zmq_ctx_term while the socket
+            # is still open, freezing the whole interpreter.
+            with suppress(Exception):
+                member.stop()
             with self._lock:
                 self._members.get(project_id, {}).pop(member.name, None)
             with self.state.db.connect() as conn:
@@ -1445,7 +1453,7 @@ class Orchestrator:
         if status in ("created", "running"):
             with suppress(LifecycleError):
                 self.lifecycle.transition(project_id, "stopped")
-        phase = "solved" if status == "solved" else "stopped"
+        phase = status if status in {"solved", "completed"} else "stopped"
         self._set_runtime_phase(project_id, phase)
         self._release_project_lease(project_id)
 
@@ -1991,6 +1999,12 @@ class Orchestrator:
             )
         self._initialize_reason_checkpoints(summaries)
         for summary in summaries:
+            if summary.status == "completed":
+                with self._lock:
+                    needs_cleanup = summary.runtime_phase != "completed" or summary.id in self._project_leases or any(not member._stop.is_set() for member in self._members.get(summary.id, {}).values())
+                if needs_cleanup:
+                    self.stop_project(summary.id)
+                continue
             if summary.id in competition_projects:
                 if summary.status == "running" and not self._startup_in_progress(summary.id):
                     try:
@@ -2110,7 +2124,7 @@ class Orchestrator:
             return
         with self.state.db.connect() as conn:
             detail = graph_store.project_detail(conn, project_id)
-        if detail is None:
+        if detail is None or detail.project.status in {"solved", "completed", "stopped", "timeout", "failed", "infra_error"}:
             return
         running = {intent_id for (pid, intent_id), fut in project_tasks.items() if pid == project_id and not fut.done()}
         open_intents = [i for i in detail.intents if i.to is None]
@@ -2426,6 +2440,8 @@ class Orchestrator:
             )
 
     def _reason_trigger(self, detail) -> str | None:
+        if detail.project.category == "pentest":
+            return "pentest_graph_changed"
         open_intent_count = self._project_open_intent_count(detail)
         checkpoint = self._reason_checkpoints.get(detail.project.id)
         if checkpoint is None:

@@ -18,6 +18,8 @@ from backend.core.validation import InputValidationError
 _recovery_logger = logging.getLogger(__name__)
 
 ACTION_KINDS = (
+    "pentest_board", "pentest_add_goal", "pentest_register_asset", "pentest_record_evidence",
+    "pentest_report_finding", "pentest_verify_finding", "pentest_prove_goal", "pentest_plan_work", "pentest_record_coverage",
     "fact",
     "message",
     "artifact_read",
@@ -53,7 +55,8 @@ class MemberAction:
         kind = raw_kind.strip() if isinstance(raw_kind, str) else raw_kind
         if kind not in ACTION_KINDS:
             raise ValueError(f"invalid action kind: {kind!r}")
-        args = {k: v for k, v in obj.items() if k not in ("action", "kind", "thought")}
+        excluded = {"action", "thought"} | ({"kind"} if not str(kind).startswith("pentest_") else set())
+        args = {k: v for k, v in obj.items() if k not in excluded}
         if kind == "bash":
             for alias in ("cmd", "shell", "script"):
                 if "command" not in args and alias in args:

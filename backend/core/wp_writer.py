@@ -263,7 +263,12 @@ def persist_validated_writeup(
         raise ValueError("writeup content must be non-empty")
     if len(content) > 1_000_000:
         raise ValueError("writeup content is limited to 1,000,000 characters")
-    errors = validate_writeup(content, expected_flag=expected_flag, require_complete=True)
+    project = graph_store.get_project_row(connection, project_id)
+    if project and project.get("completion_policy") == "goals":
+        from backend.pentest.report import validate_report
+        errors = validate_report(content)
+    else:
+        errors = validate_writeup(content, expected_flag=expected_flag, require_complete=True)
     if errors:
         raise ValueError("invalid writeup: " + "; ".join(errors))
 

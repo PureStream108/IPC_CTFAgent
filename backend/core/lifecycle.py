@@ -4,9 +4,10 @@ from backend.blackboard import graph_store
 
 TRANSITIONS = {
     "created": {"running", "stopped"},
-    "running": {"flag_found", "stopped", "timeout", "infra_error", "failed"},
+    "running": {"completed", "flag_found", "stopped", "timeout", "infra_error", "failed"},
     "flag_found": {"solved", "running", "failed"},
     "solved": set(),
+    "completed": set(),
     "timeout": {"running"},
     "infra_error": {"running", "stopped"},
     "failed": {"running", "stopped"},

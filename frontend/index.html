@@ -105,7 +105,7 @@
     <div class="hidden sm:flex items-center gap-3 text-[11px] text-slate-400">
       <span class="inline-flex items-center gap-1.5" title="All projects">
         <span class="font-medium uppercase tracking-[0.12em] text-slate-400">All</span>
-        <span class="font-semibold text-slate-600 tabular-nums" x-text="projects.length"></span>
+        <span class="font-semibold text-slate-600 tabular-nums" x-text="workspaceProjects().length"></span>
       </span>
       <span class="inline-flex items-center gap-1.5" title="Running projects">
         <span class="h-1.5 w-1.5 rounded-full bg-teal-500"></span>
@@ -122,6 +122,8 @@
     </div>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalLogs()">Logs</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalWP()">WP</button>
+    <button class="h-7 px-2.5 rounded-lg border text-xs transition" :class="workspaceMode==='ctf' ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500'" @click="switchWorkspace('ctf')">CTF</button>
+    <button data-testid="pentest-workspace" class="h-7 px-2.5 rounded-lg border text-xs transition" :class="workspaceMode==='pentest' ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500'" @click="switchWorkspace('pentest')">Pentest</button>
     <button class="h-7 px-2.5 rounded-lg border border-teal-200 bg-teal-50 text-xs text-teal-700 hover:bg-teal-100 transition inline-flex items-center" @click="openCompetition()">Competition</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition items-center" @click="openOpsAgent()">IPC</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openIPCConfig()">Config</button>
@@ -129,7 +131,7 @@
 
   <div class="bg-white/70 border-b border-slate-200/60 px-4 py-2 flex items-center gap-2 shrink-0">
     <button class="h-7 px-2.5 rounded-lg border border-amber-200 text-xs text-amber-700 hover:bg-amber-50 transition inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-      :disabled="!hasActive" @click="stopAll()" title="Stop all active projects">
+      :disabled="!hasActive" @click="stopAll()" title="Stop active projects in this workspace">
       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
       Stop Active
     </button>
@@ -137,7 +139,7 @@
       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 6.5c-2-1.5-4-2-6-1.5v13c2-.5 4 0 6 1.5 2-1.5 4-2 6-1.5v-13c-2-.5-4 0-6 1.5Z"/><path d="M12 6.5v13"/></svg>
       Memory
     </button>
-    <button class="btn h-7 px-2.5 rounded-lg text-xs inline-flex items-center gap-1.5" @click="showNewProject=true">
+    <button class="btn h-7 px-2.5 rounded-lg text-xs inline-flex items-center gap-1.5" @click="beginProject()">
       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.9" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
       New Project
     </button>
@@ -214,8 +216,8 @@
               class="mt-1.5 truncate font-mono text-[10px] text-sky-600" x-text="p.runtime_phase"></div>
           </button>
         </template>
-        <div x-show="projects.length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
-        <div x-show="projects.length>0 && filteredProjects().length===0" x-cloak class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No project matches this filter.</div>
+        <div x-show="workspaceProjects().length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
+        <div x-show="workspaceProjects().length>0 && filteredProjects().length===0" x-cloak class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No project matches this filter.</div>
       </div>
     </aside>
 
@@ -260,6 +262,26 @@
             </div>
           </div>
         </template>
+        <div x-show="workspaceMode==='pentest' && selectedId" x-cloak class="absolute bottom-4 left-4 z-20 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 bg-white/95 p-3 shadow-sm">
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <button class="btn-ghost rounded px-2 py-1" :class="pentestView==='exploration' && 'text-brand-600'" @click="switchPentestView('exploration')">Exploration</button>
+            <button class="btn-ghost rounded px-2 py-1" :class="pentestView==='assets' && 'text-brand-600'" @click="switchPentestView('assets')">Asset coverage</button>
+            <button class="btn-ghost rounded px-2 py-1" @click="sideTab='pentest';pentestRecordTab='finding'">Findings</button>
+            <button class="btn-ghost rounded px-2 py-1" @click="openPentestReport()">Report</button>
+            <button x-show="pentestView==='exploration'" class="btn-ghost rounded px-2 py-1" @click="toggleCompletedSteps()" x-text="pentestFoldCompleted?'Expand completed':'Fold completed'"></button>
+            <button x-show="current?.project?.status==='running'" class="btn-ghost rounded px-2 py-1" @click="api('POST','/projects/'+selectedId+'/pause').then(()=>loadProject(selectedId))">Pause</button>
+            <button x-show="current?.project?.status==='stopped'" class="btn-ghost rounded px-2 py-1" @click="resumeSolve()">Resume</button>
+            <button class="btn-ghost rounded px-2 py-1" @click="fit()">Fit</button>
+            <button x-show="pentestGraph?.has_more" class="btn-ghost rounded px-2 py-1" @click="loadMorePentestNodes()" x-text="'Load more ('+(pentestGraph?.nodes?.length||0)+'/'+(pentestGraph?.total_nodes||0)+')'"></button>
+            <button x-show="pentestView==='assets' && pentestSelected" class="btn-ghost rounded px-2 py-1" @click="togglePentestFold()">Fold / expand</button>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-2 text-[10px]">
+            <template x-for="kind in pentestLegend()" :key="kind"><span><span :style="'color:'+pentestColors[kind]">&#9679;</span> <span x-text="kind"></span></span></template>
+            <span x-show="pentestView==='assets'" x-text="'In scope '+(pentestGraph?.coverage?.in_scope||0)+' / tested '+(pentestGraph?.coverage?.tested||0)"></span>
+          </div>
+          <input aria-label="Filter pentest graph" class="mt-2 w-full rounded border border-slate-200 px-2 py-1 text-xs" placeholder="Filter nodes" x-model="pentestFilter" @input.debounce.200ms="loadPentest(selectedId)">
+          <p x-show="pentestError" x-text="pentestError" class="mt-2 text-xs text-rose-600"></p>
+        </div>
         <div id="cy" class="relative z-0"></div>
         <div x-show="!selectedId" class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
           Select or create a project to view its flow graph.
@@ -268,6 +290,7 @@
 
       <aside class="w-[360px] max-w-[42vw] border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0" x-show="selectedId">
         <div class="flex border-b border-slate-100 shrink-0">
+          <button x-show="workspaceMode==='pentest'" @click="sideTab='pentest'" class="flex-1 px-3 py-2.5 text-xs font-medium" :class="sideTab==='pentest' && 'text-brand-600'">Pentest</button>
           <button @click="sideTab='detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
             :class="sideTab==='detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Detail</button>
           <button @click="sideTab='hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
@@ -277,6 +300,29 @@
           <button @click="sideTab='log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
             :class="sideTab==='log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
         </div>
+        <div x-show="sideTab==='pentest'" class="flex-1 overflow-y-auto p-4 space-y-3">
+          <div class="flex flex-wrap gap-1 text-xs">
+            <template x-for="kind in ['goal','finding','asset','evidence','work','coverage']" :key="kind">
+              <button class="rounded border px-2 py-1" :class="pentestRecordTab===kind && 'bg-brand-50 text-brand-700'" @click="pentestRecordTab=kind;pentestSelected=null" x-text="kind+' '+(pentestBoard?.record_counts?.[kind]??pentestRecords(kind).length)"></button>
+            </template>
+          </div>
+          <template x-for="record in pentestRecords(pentestRecordTab)" :key="record.id">
+            <div class="rounded-xl border border-slate-200 p-3 text-xs">
+              <button class="w-full text-left font-medium text-slate-700" @click="pentestSelected={data:{record}}" x-text="record.data.title||record.data.description||record.data.value||record.data.summary||record.data.test"></button>
+              <div class="mt-1 text-slate-400" x-text="record.state"></div>
+              <button x-show="record.kind==='finding' && current?.project?.status==='running'" @click="retestFinding(record)" class="mt-2 text-brand-600">Queue independent review</button>
+            </div>
+          </template>
+          <button x-show="pentestBoard?.records_more" class="text-xs text-brand-600" @click="loadMorePentestRecords()">Load more records</button>
+          <p x-show="pentestRecords(pentestRecordTab).length===0" class="text-xs text-slate-400">No records yet.</p>
+          <template x-if="pentestSelected"><div class="rounded-xl bg-slate-50 p-3 space-y-3">
+            <p class="text-sm font-semibold text-slate-700" x-text="pentestDetail().title"></p>
+            <template x-for="field in pentestDetail().fields" :key="field[0]"><div><p class="text-[10px] uppercase tracking-wide text-slate-400" x-text="field[0]"></p><p class="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600" x-text="field[1]"></p></div></template>
+            <button x-show="pentestDetail().evidenceId" class="text-xs text-brand-600" @click="readPentestEvidence()">Read archived evidence</button>
+            <pre x-show="pentestEvidencePreview" class="max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] text-slate-600" x-text="pentestEvidencePreview"></pre>
+          </div></template>
+        </div>
+
 
         <div x-show="sideTab==='detail'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/40">
           <template x-if="!selectedNode">
@@ -523,6 +569,8 @@
         </select>
         <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="preflightCompetition()">Preflight</button>
         <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup()">New GZCTF</button>
+        <button class="btn-ghost h-8 rounded-lg px-2 text-xs" :disabled="competitionBusy||!!competitionRun" @click="openTsecbenchSetup()">New TSecBench</button>
+        <button x-show="opsWorkflows.find(w=>w.id===competitionWorkflowId)?.spec?.template_id==='tsecbench'" class="btn-ghost h-8 rounded-lg px-2 text-xs" @click="openTsecbenchSetup(opsWorkflows.find(w=>w.id===competitionWorkflowId))">Edit TSecBench</button>
         <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" x-show="opsWorkflows.find(w=>w.id===competitionWorkflowId)?.spec?.challenges?.platform==='gzctf'" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup(opsWorkflows.find(w=>w.id===competitionWorkflowId))">Settings</button>
         <button class="btn h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="startCompetition()">Start</button>
       </div>
@@ -533,6 +581,7 @@
       <span class="rounded-lg px-2 py-1 text-xs font-semibold uppercase" :class="competitionStatusClass()" x-text="competitionRun?.run?.status"></span>
       <span class="text-xs text-slate-400">Revision <b class="text-slate-600 tabular-nums" x-text="competitionRun?.run?.revision"></b></span>
       <span class="text-xs text-rose-600 truncate" x-show="competitionRun?.run?.last_error" x-text="competitionRun?.run?.last_error"></span>
+      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" x-show="['finished','stopped'].includes(competitionRun?.run?.status)" @click="prepareCompetitionRun()">New run</button>
       <div class="flex-1"></div>
       <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" :disabled="competitionBusy" @click="controlCompetition('refresh')">Refresh</button>
       <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" x-show="competitionRun?.run?.status==='running'" :disabled="competitionBusy" @click="controlCompetition('pause')">Pause</button>
@@ -542,8 +591,26 @@
 
     <main class="flex-1 min-h-0 overflow-auto">
       <div class="mx-auto max-w-[1500px] px-4 py-4 space-y-4">
+        <form x-show="showTsecbenchSetup" x-cloak @submit.prevent="saveTsecbenchWorkflow()" class="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+          <div class="font-semibold text-sm">TSecBench setup</div>
+          <div class="grid gap-3 text-xs sm:grid-cols-2">
+            <label>Platform address<input class="mt-1 w-full rounded-lg px-3 py-2" type="url" required x-model="tsecbenchDraft.base_url" placeholder="https://benchmark.example"></label>
+            <label>Name<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="tsecbenchDraft.name"></label>
+            <label>Benchmark token<input class="mt-1 w-full rounded-lg px-3 py-2" type="password" autocomplete="new-password" :required="!tsecbenchEditingId" x-model="tsecbenchToken" placeholder="Leave empty to keep saved token"></label>
+            <label>Concurrent instances (0 = platform default, max 3)<input class="mt-1 w-full rounded-lg px-3 py-2" type="number" min="0" max="3" x-model.number="tsecbenchDraft.remote_concurrency"></label>
+          </div>
+          <div class="flex flex-wrap gap-3 text-xs">
+            <label><input type="checkbox" x-model="tsecbenchPentest"> Classify imported tasks as Pentest</label>
+            <label><input type="checkbox" x-model="tsecbenchDraft.allow_private_networks"> Allow configured private platform network</label>
+            <label><input type="checkbox" x-model="tsecbenchDraft.allow_hints"> Allow hints that reduce the score</label>
+          </div>
+          <p class="text-xs text-slate-500">Connect the benchmark VPN for the application and task containers. The token identifies your benchmark task.</p>
+          <button class="btn rounded-lg px-3 py-2 text-xs" :disabled="competitionBusy">Save workflow</button>
+          <button class="btn-ghost rounded-lg px-3 py-2 text-xs" type="button" @click="showTsecbenchSetup=false;tsecbenchToken=''">Close</button>
+        </form>
         <form x-show="showGzctfSetup" x-cloak @submit.prevent="saveGzctfWorkflow()" class="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
           <div class="font-semibold text-sm">GZCTF setup</div>
+          <label class="text-xs"><input type="checkbox" x-model="gzctfPentest"> Classify imported tasks as Pentest</label>
           <p class="text-xs text-slate-500">Save your platform and competition once. Reuse the saved workflow for future runs.</p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <label>Platform URL<input type="url" required class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.base_url" placeholder="https://ctf.example" /></label>
@@ -674,13 +741,19 @@
       <label class="text-xs text-slate-400">Project title</label>
       <input class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" x-model="np.title" />
       <label class="text-xs text-slate-400">Category</label>
-      <select class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" x-model="np.category">
+      <select class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" x-model="np.category" :disabled="workspaceMode==='pentest'">
         <template x-for="c in categories" :key="c"><option :value="c" x-text="c"></option></template>
       </select>
       <label class="text-xs text-slate-400">Origin</label>
       <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="np.origin"></textarea>
       <label class="text-xs text-slate-400">Goal</label>
       <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="np.goal"></textarea>
+      <div x-show="np.category==='pentest'">
+        <label class="text-xs text-slate-500">Objectives (one per line; optional)</label>
+        <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="pentestGoals"></textarea>
+        <label class="text-xs text-slate-500">Operation constraints (one per line)</label>
+        <textarea class="w-full rounded-lg px-2.5 py-1.5 mb-3 mt-1 text-sm" rows="2" x-model="pentestConstraints"></textarea>
+      </div>
       <label class="text-xs text-slate-400">Hints (optional)</label>
       <template x-for="(h,i) in np.hints" :key="i">
         <div class="flex gap-1 mb-1 mt-1">
@@ -1262,11 +1335,13 @@
     <div class="panel rounded-xl px-4 py-2 text-sm text-slate-700" x-text="toast"></div>
   </div>
 
+  <script src="/static/pentest.js"></script>
   <script>
   function ipcApp() {
     return {
+      ...pentestWorkspace(),
       projects: [], selectedId: null, current: null, broadcasts: [],
-      categories: ["pwn","reverse","crypto","web","misc","ai","osint"],
+      categories: ["pwn","reverse","crypto","web","misc","ai","osint","pentest"],
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logSearch: "", logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
       showGlobalLogs: false, showGlobalWP: false, showOps: false, showCompetition: false,
@@ -1297,6 +1372,7 @@
 
       async init() {
         window._ipc = this;
+        this.workspaceMode = localStorage.getItem("ipc.workspace") === "pentest" ? "pentest" : "ctf";
         await this.startApp();
       },
       clearAppData(){
@@ -1318,7 +1394,7 @@
           await this.loadProjects();
           await this.loadBroadcasts();
           const status=await this.api("GET","/logs/status"); this.logEnabled=status.enabled;
-          if(this.projects.length) await this.openProject(this.projects[0].id);
+          if(this.workspaceProjects().length) await this.openProject(this.workspaceProjects()[0].id);
           this._clock=setInterval(()=>{ this.nowMs=Date.now(); },1000);
           this._poll=setInterval(()=>this.tick(),2500);
         }catch(error){
@@ -1358,13 +1434,13 @@
         return data;
       },
       flash(m){ this.toast=m; setTimeout(()=>this.toast="",2500); },
-      countBy(s){ return this.projects.filter(p=>p.status===s).length; },
-      get hasActive(){ return this.projects.some(p=>!["solved","stopped","timeout","infra_error","failed"].includes(p.status)); },
+      countBy(s){ return this.workspaceProjects().filter(p=>s==='solved' ? ['solved','completed'].includes(p.status) : p.status===s).length; },
+      get hasActive(){ return this.workspaceProjects().some(p=>!["solved","completed","stopped","timeout","infra_error","failed"].includes(p.status)); },
       statusColor(s){ return {running:"text-teal-600",created:"text-slate-500",flag_found:"text-emerald-600",
-        solved:"text-emerald-700",timeout:"text-orange-600",infra_error:"text-rose-600",failed:"text-rose-600",
+        solved:"text-emerald-700",completed:"text-emerald-700",timeout:"text-orange-600",infra_error:"text-rose-600",failed:"text-rose-600",
         stopped:"text-amber-600",active:"text-teal-600",done:"text-slate-500",paused:"text-amber-600",idle:"text-slate-400"}[s]||"text-slate-500"; },
       projectStatusBadgeClass(s){ return {running:"bg-teal-50 text-teal-700",created:"bg-slate-100 text-slate-600",
-        flag_found:"bg-emerald-50 text-emerald-700",solved:"bg-emerald-100 text-emerald-800",
+        flag_found:"bg-emerald-50 text-emerald-700",solved:"bg-emerald-100 text-emerald-800",completed:"bg-emerald-100 text-emerald-800",
         timeout:"bg-orange-50 text-orange-700",infra_error:"bg-rose-50 text-rose-700",failed:"bg-rose-50 text-rose-700",
         stopped:"bg-amber-50 text-amber-700"}[s]||"bg-slate-100 text-slate-600"; },
       factBadgeClass(id){ return id==="origin" ? "bg-teal-50 text-teal-700" : id==="goal" ? "bg-rose-50 text-rose-600" : "bg-brand-50 text-brand-700"; },
@@ -1380,7 +1456,7 @@
       projectElapsed(project){
         const start = this.parseTimestamp(project?.created_at);
         if (start === null) return "--:--:--";
-        const frozen = ["solved","stopped","timeout","infra_error","failed"].includes(project.status) ? this.parseTimestamp(project.flag_verified_at||project.updated_at) : null;
+        const frozen = ["solved","completed","stopped","timeout","infra_error","failed"].includes(project.status) ? this.parseTimestamp(project.flag_verified_at||project.updated_at) : null;
         const end = frozen === null ? this.nowMs : frozen;
         return this.formatDuration(Math.max(0, end - start));
       },
@@ -1399,7 +1475,7 @@
         {key:"stopped", label:"Stopped"},
       ],
       projectStatusGroup(status){
-        if(["solved","flag_found"].includes(status)) return "solved";
+        if(["solved","completed","flag_found"].includes(status)) return "solved";
         if(status==="running") return "running";
         if(status==="created") return "created";
         return "stopped";
@@ -1409,7 +1485,7 @@
         return order[this.projectStatusGroup(status)] ?? 3;
       },
       projectStatusGroupCount(key){
-        return this.projects.filter(project=>this.projectStatusGroup(project.status)===key).length;
+        return this.workspaceProjects().filter(project=>this.projectStatusGroup(project.status)===key).length;
       },
       toggleProjectStatusFilter(key){
         this.projectStatusFilter=this.projectStatusFilter.includes(key)
@@ -1417,14 +1493,19 @@
           : [...this.projectStatusFilter,key];
       },
       filteredProjects(){
-        if(!this.projectStatusFilter.length) return this.projects;
-        return this.projects.filter(project=>
+        if(!this.projectStatusFilter.length) return this.workspaceProjects();
+        return this.workspaceProjects().filter(project=>
           this.projectStatusFilter.includes(this.projectStatusGroup(project.status)));
       },
       async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },
-      async loadProject(id){ this.current = await this.api("GET","/projects/"+id); },
+      async loadProject(id){
+        const detail = await this.api("GET","/projects/"+id);
+        if(id !== this.selectedId) return;
+        this.current = detail;
+        if(detail.project.category === "pentest") await this.loadPentest(id);
+      },
       async openProject(id){
-        this.selectedId=id; this.selectedNode=null; this.sideTab="detail";
+        this.selectedId=id; this.selectedNode=null; this.pentestSelected=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestRequest++; this.sideTab=this.workspaceMode==='pentest' ? 'pentest' : 'detail';
         if(this.cy){ this.cy.destroy(); this.cy=null; }
         await this.loadProject(id); await this.loadLog();
         this.$nextTick(()=>this.renderGraph(true));
@@ -1432,11 +1513,17 @@
       async createProject(){
         const body={title:this.np.title,category:this.np.category,origin:this.np.origin,goal:this.np.goal,
           hints:this.np.hints.filter(h=>h.content.trim()).map(h=>({content:h.content,creator:"human"}))};
+        if(body.category === "pentest") body.pentest = {scope: this.np.origin,
+          constraints: this.pentestConstraints.split("\n").map(s=>s.trim()).filter(Boolean),
+          goals: this.pentestGoals.split("\n").map(s=>s.trim()).filter(Boolean)};
         const d=await this.api("POST","/projects",body);
         const files=this.$refs.npfile.files;
         for(const f of files){ const fd=new FormData(); fd.append("file",f); await fetch("/projects/"+d.project.id+"/attachments",{method:"POST",body:fd}); }
         this.showNewProject=false; this.np={title:"",category:"web",origin:"",goal:"",hints:[{content:""}]};
-        await this.loadProjects(); this.openProject(d.project.id);
+        await this.loadProjects();
+        const mode = d.project.category === "pentest" ? "pentest" : "ctf";
+        if(this.workspaceMode !== mode) await this.switchWorkspace(mode);
+        await this.openProject(d.project.id);
       },
       async addHint(){
         if(!this.selectedId) return;
@@ -1455,9 +1542,13 @@
       async resumeSolve(){ const r=await this.api("POST","/projects/"+this.selectedId+"/resume"); this.flash("IPC queued: "+(r.phase||r.status)); await this.loadProject(this.selectedId); this.renderGraph(); },
       async reopenProject(){ await this.api("POST","/projects/"+this.selectedId+"/reopen"); this.flash("reopened"); await this.loadProject(this.selectedId); this.renderGraph(); },
       async stopSolve(){ await this.api("POST","/projects/"+this.selectedId+"/stop"); await this.loadProject(this.selectedId); },
-      async stopAll(){ await this.api("POST","/projects/stop-all"); await this.loadProjects(); },
+      async stopAll(){
+        const active = this.workspaceProjects().filter(p=>!["solved","completed","stopped","timeout","infra_error","failed"].includes(p.status));
+        for(const project of active) await this.api("POST","/projects/"+project.id+"/stop");
+        await this.loadProjects();
+      },
       async deleteProject(){ if(!confirm("Delete project?"))return; await this.api("DELETE","/projects/"+this.selectedId);
-        this.selectedId=null; this.current=null; this.selectedNode=null; await this.loadProjects(); if(this.cy)this.cy.elements().remove(); },
+        this.pentestRequest++; this.selectedId=null; this.current=null; this.selectedNode=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestSelected=null; await this.loadProjects(); if(this.cy){this.cy.destroy();this.cy=null;} },
       async toggleLog(){ await this.api("PUT","/logs/status",{enabled:this.logEnabled}); },
       async loadLog(){
         if(!this.selectedId)return;
@@ -1701,6 +1792,7 @@
         },30);
       },
       renderGraph(fit=true){
+        if(this.workspaceMode === "pentest") { this.renderPentest(fit); return; }
         const el=document.getElementById('cy'); if(!el) return;
         const {nodes,edges}=this.buildElements();
         if(!this.cy){
@@ -2115,10 +2207,10 @@
       },
       openGzctfSetup(workflow=null){
         const spec=workflow?.spec||{};
-        this.gzctfEditingId=workflow?.id||"";
-        this.gzctfDraft={base_url:spec.challenges?.list_url||"",game_id:spec.challenges?.game_id||"",name:spec.name||"",team_id:spec.team_id||"",attachment_base_url:spec.challenges?.attachment_base_url||"",remote_concurrency:spec.remote_concurrency||0,allow_private_networks:!!spec.allow_private_networks};
+        this.gzctfEditingId=workflow?.id||"";this.gzctfPentest=spec.challenges?.category_map?.['*']==='pentest';
+        this.gzctfDraft={base_url:spec.challenges?.list_url||"",game_id:spec.challenges?.game_id||"",name:spec.name||"",team_id:spec.team_id||"",attachment_base_url:spec.challenges?.attachment_base_url||"",category_map:spec.challenges?.category_map||{},remote_concurrency:spec.remote_concurrency||0,allow_private_networks:!!spec.allow_private_networks};
         this.gzctfDeadline=spec.ends_at ? new Date(Date.parse(spec.ends_at)-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : "";
-        this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.opsConfirmError="";this.showGzctfSetup=true;
+        this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.opsConfirmError="";this.showTsecbenchSetup=false;this.showGzctfSetup=true;
       },
       closeGzctfSetup(){ this.showGzctfSetup=false;this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword=""; },
       async saveGzctfWorkflow(){
@@ -2131,7 +2223,9 @@
             if(this.gzctfUsername.trim())secrets.gzctf_username=this.gzctfUsername.trim();
             if(this.gzctfPassword)secrets.gzctf_password=this.gzctfPassword;
           }
-          const payload={...this.gzctfDraft,ends_at:this.gzctfDeadline?new Date(this.gzctfDeadline).toISOString():"",secrets};
+          const categoryMap={...(this.gzctfDraft.category_map||{})};
+          if(this.gzctfPentest)categoryMap['*']='pentest';else if(categoryMap['*']==='pentest')delete categoryMap['*'];
+          const payload={...this.gzctfDraft,category_map:categoryMap,ends_at:this.gzctfDeadline?new Date(this.gzctfDeadline).toISOString():"",secrets};
           const url=this.gzctfEditingId?"/api/ops/workflows/"+encodeURIComponent(this.gzctfEditingId)+"/gzctf":"/api/ops/workflows/gzctf";
           const workflow=await this.api(this.gzctfEditingId?"PUT":"POST",url,payload);
           this.gzctfEditingId=workflow.id;this.competitionWorkflowId=workflow.id;this.opsWorkflowId=workflow.id;

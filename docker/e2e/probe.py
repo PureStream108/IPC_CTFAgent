@@ -1,5 +1,6 @@
-import requests
 import time
+
+import requests
 
 base = "http://127.0.0.1:8000"
 workflow = {

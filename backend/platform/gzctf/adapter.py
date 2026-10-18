@@ -1083,7 +1083,7 @@ class GZCTFAdapter(PlatformAdapter):
         if external is None or title is None:
             return None
         category_raw = str(_first_value(raw, self.mapping.category_field, "category", "type", default="misc"))
-        category = self.mapping.category_map.get(category_raw, category_raw).strip().lower()
+        category = self.mapping.category_map.get(str(raw.get("id", "")), self.mapping.category_map.get("*", self.mapping.category_map.get(category_raw, category_raw))).strip().lower()
         if category not in PLATFORM_CATEGORIES:
             category = "misc"
         files, descriptors = self._normalise_files(

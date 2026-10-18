@@ -16,6 +16,52 @@ from backend.platform.tsecbench import (
 )
 
 
+def test_multi_flag_correct_is_not_challenge_completion():
+    result = TSECBenchAdapter._normalise_submission({"correct": True, "correct_flag_count": 1, "total_flag_count": 2, "matched_flag_index": 0})
+    assert result["verdict"] == "correct" and result["challenge_complete"] is False
+    result = TSECBenchAdapter._normalise_submission({"correct": True, "correct_flag_count": 2, "total_flag_count": 2, "matched_flag_index": 1})
+    assert result["challenge_complete"] is True
+
+
+def test_duplicate_refreshes_progress_without_completing_partial_task():
+    client = _FakeClient(challenges=[{"unique_code": "multi", "description": "fixture", "flag_count": 2, "correct_flag_count": 1, "is_completed": False}],
+                         submit_result=TSECBenchError("already counted", reason="duplicate"))
+    adapter = TSECBenchAdapter(client=client, mapping=FieldMapping(platform="tsecbench", list_url=client.base_url))
+    result = adapter.submit("multi", "fixture-one")
+    assert result["duplicate"] and not result["challenge_complete"]
+    assert result["correct_flag_count"] == 1
+
+
+def test_pentest_category_override_and_hint_opt_in():
+    client = _FakeClient(challenges=[{"unique_code": "assessment", "description": "web test", "flag_count": 1}])
+    mapping = FieldMapping(platform="tsecbench", list_url=client.base_url, category_map={"*": "pentest"})
+    adapter = TSECBenchAdapter(client=client, mapping=mapping)
+    assert adapter.fetch_challenges()[0].category == "pentest"
+    assert adapter.hint("assessment")["reason"] == "hint_disabled"
+    client.hint = lambda _: {"hint": "charged hint"}
+    mapping.allow_hints = True
+    assert adapter.hint("assessment")["hint"] == "charged hint"
+
+
+def test_network_preflight_distinguishes_api_from_target_reachability(monkeypatch):
+    from contextlib import nullcontext
+
+    client = _FakeClient(challenges=[{"unique_code": "network", "description": "fixture", "container_status": "available", "container_addr": ["10.0.0.1:8080", "10.0.0.2:8080"]}])
+    adapter = TSECBenchAdapter(client, FieldMapping(platform="tsecbench", list_url=client.base_url))
+    adapter.fetch_challenges()
+    def connect(address, timeout):
+        assert timeout == 0.5
+        if address[0] == "10.0.0.2":
+            raise OSError("VPN route unavailable")
+        return nullcontext()
+    monkeypatch.setattr("backend.platform.tsecbench.adapter.socket.create_connection", connect)
+    result = adapter.network_diagnostics()
+    assert result["api_reachable"] and result["vpn_required"]
+    assert [item["reachable"] for item in result["targets"]] == [True, False]
+    assert "task container" in result["sandbox_connectivity"]
+    assert not client.start_calls and not client.submit_calls
+
+
 class _Response:
     def __init__(self, payload=None, status_code: int = 200, headers: dict | None = None):
         self.status_code = status_code
@@ -312,10 +358,10 @@ def test_tsecbench_workflow_preset_builds_a_template_spec():
 def test_tsecbench_workflow_preset_rejects_foreign_credentials():
     from backend.ops.presets import TSECBenchWorkflowInput
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         TSECBenchWorkflowInput(
             base_url="https://tsecbench.zc.tencent.com",
             secrets={"gzctf_token": "nope"},
         )
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         TSECBenchWorkflowInput(base_url="https://tsecbench.zc.tencent.com/openapi", secrets={})

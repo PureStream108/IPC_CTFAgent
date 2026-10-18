@@ -22,7 +22,11 @@ from backend.core.config import ApiFormat, ApiSurface, SelectedReasoningEffort
 from backend.core.state import AppState
 from backend.ops.attachments import MAX_UPLOAD_BYTES, OpsAttachmentStore
 from backend.ops.network import NetworkPolicyError
-from backend.ops.presets import GZCTFWorkflowInput, TSECBenchWorkflowInput, workflow_templates
+from backend.ops.presets import (
+    GZCTFWorkflowInput,
+    TSECBenchWorkflowInput,
+    workflow_templates,
+)
 from backend.ops.service import (
     OpsAgentNotConfigured,
     OpsAgentService,

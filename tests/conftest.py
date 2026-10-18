@@ -94,6 +94,23 @@ def allow_local_sandbox(monkeypatch):
 def pytest_addoption(parser):
     parser.addoption("--require-postgres", action="store_true", default=False,
                      help="fail collection instead of skipping unavailable PostgreSQL integration tests")
+    parser.addoption("--require-browser", action="store_true", default=False,
+                     help="require Playwright integration tests to execute without environment skips")
+
+
+def pytest_configure(config):
+    if config.getoption("--require-browser") and importlib.util.find_spec("playwright") is None:
+        raise pytest.UsageError("browser integration requires pip install -e '.[browser]' and playwright install chromium")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if (item.config.getoption("--require-browser") and item.get_closest_marker("browser")
+            and report.skipped):
+        report.outcome = "failed"
+        report.longrepr = "required browser integration was skipped: " + str(report.longrepr)
 
 
 def pytest_collection_modifyitems(config, items) -> None:

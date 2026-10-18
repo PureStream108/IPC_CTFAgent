@@ -9,6 +9,7 @@ ProjectStatus = Literal[
     "running",
     "flag_found",
     "solved",
+    "completed",
     "timeout",
     "infra_error",
     "failed",
@@ -101,6 +102,7 @@ class ProjectMeta(BaseModel):
     external_id: str | None = None
     title: str
     category: str
+    completion_policy: str = "verified_flag"
     status: ProjectStatus
     postprocess_status: str = "not_started"
     terminal_reason: str | None = None
@@ -157,6 +159,7 @@ class CreateProjectRequest(BaseModel):
     goal: str
     category: str = "misc"
     hints: list[CreateHintInline] | None = None
+    pentest: dict | None = None
 
     _v = field_validator("title", "origin", "goal")(lambda cls, v: _non_empty(v))
 

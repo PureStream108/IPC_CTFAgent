@@ -208,6 +208,30 @@ MEMBER_TOOLS: tuple[dict[str, Any], ...] = (
     ),
 )
 
+from backend.pentest.models import ACTION_MODELS
+
+PENTEST_TOOLS = (
+    _tool("pentest_board", "Read this project's persistent objectives, scope, constraints, assets, findings, evidence and dependent work.", {}),
+    *(_tool("pentest_" + operation, {
+        "add_goal": "Register an explicit, verifiable objective from the user task.",
+        "register_asset": "Register one discovered asset and its parent. Do not expand beyond the explicit task scope.",
+        "record_evidence": "Register an existing nonempty artifact from this task container; the harness computes its SHA-256. Include the actual command and an evidence summary.",
+        "report_finding": "Register a candidate vulnerability with reproducible steps and existing evidence IDs. It still requires a separate validation intent.",
+        "verify_finding": "Record a separate intent's actual validation of one candidate. Preserve inconclusive and negative results.",
+        "prove_goal": "Prove one objective using existing evidence and confirmed findings. Platform tasks still require all platform flags; standalone tasks complete only when all required objectives are proven.",
+        "plan_work": "Persist a focused subtask with prerequisite work IDs, input evidence, priority and a concrete deliverable. Diamond dispatches it after prerequisites finish.",
+        "record_coverage": "Record a specific asset test. Mark tested only with execution evidence; failures do not count as coverage.",
+    }[operation], model.model_json_schema()["properties"], model.model_json_schema().get("required", []))
+      for operation, model in ACTION_MODELS.items()),
+)
+TOOL_ACTIONS.update({tool["name"]: tool["name"] for tool in PENTEST_TOOLS})
+PARALLEL_SAFE_TOOLS = PARALLEL_SAFE_TOOLS | {"pentest_board"}
+
+
+def tools_for_category(category):
+    return list((*MEMBER_TOOLS, *PENTEST_TOOLS) if category == "pentest" else MEMBER_TOOLS)
+
+
 MEMBER_TOOL_NAMES = tuple(tool["name"] for tool in MEMBER_TOOLS)
 
 
@@ -257,7 +281,8 @@ def tool_call_for_action(action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     kind = action.get("action") or action.get("kind")
     if kind not in ACTION_TOOLS:
         raise ValueError(f"no native tool maps to action kind: {kind!r}")
-    arguments = {k: v for k, v in action.items() if k not in ("action", "kind")}
+    excluded = {"action"} | ({"kind"} if not str(kind).startswith("pentest_") else set())
+    arguments = {k: v for k, v in action.items() if k not in excluded}
     return ACTION_TOOLS[kind], arguments
 
 

@@ -37,16 +37,20 @@ def archive_completed_project(
         row = graph_store.get_project_row(connection, project_id)
     if row is None:
         raise ValueError(f"project not found: {project_id}")
-    if row["status"] != "solved":
+    if row["status"] not in {"solved", "completed"}:
         raise ValueError(f"project {project_id} is not solved")
     wp_path = Path(str(row["wp_path"] or ""))
     if not wp_path.is_file():
         raise ValueError(f"project {project_id} does not have a readable writeup")
-    writeup_errors = validate_writeup(
-        wp_path.read_text(encoding="utf-8"),
-        expected_flag=str(row["flag"] or "") or None,
-        require_complete=True,
-    )
+    if row.get("completion_policy") == "goals":
+        from backend.pentest.report import validate_report
+        writeup_errors = validate_report(wp_path.read_text(encoding="utf-8"))
+    else:
+        writeup_errors = validate_writeup(
+            wp_path.read_text(encoding="utf-8"),
+            expected_flag=str(row["flag"] or "") or None,
+            require_complete=True,
+        )
     if writeup_errors:
         raise ValueError(
             f"project {project_id} does not have a valid final writeup: {'; '.join(writeup_errors)}"

@@ -95,7 +95,12 @@ class Diamond:
             graph_store.set_agent_state(conn, project_id, "diamond", "active")
             if not graph_store.link_exists(conn, project_id, "ipc", "diamond", "start"):
                 graph_store.add_link(conn, project_id, "ipc", "diamond", "start")
-            intent = edge_store.create_intent(conn, project_id, ["origin"], BOOTSTRAP_DESC, "diamond")
+            row = graph_store.get_project_row(conn, project_id)
+            description = ("Read pentest_board, inspect the explicit scope and constraints, decompose the user objectives, "
+                           "then persist focused work with pentest_plan_work. Record discovered assets and actual evidence. "
+                           "Use only the existing task harness and do not treat a candidate finding as verified."
+                           if row and row["category"] == "pentest" else BOOTSTRAP_DESC)
+            intent = edge_store.create_intent(conn, project_id, ["origin"], description, "diamond")
             graph_store.add_agent(conn, project_id, initial.name, "member", state="active", start_fact_id="origin")
             graph_store.set_agent_state(conn, project_id, initial.name, "active")
             graph_store.add_link(conn, project_id, "diamond", initial.name, "assign")
@@ -170,6 +175,10 @@ class Diamond:
 
     def plan_next_intent(self, project_id: str, detail, trigger: str):
         """Create one follow-up intent after a real graph-state checkpoint change."""
+        if detail.project.category == "pentest":
+            from backend.pentest.store import plan_next
+            with self.db.connect() as conn:
+                return plan_next(conn, project_id, detail, trigger, max_open=min(2, self.config.runtime.max_members_per_report))
         open_intents = [intent for intent in detail.intents if intent.to is None]
         if open_intents:
             self.logger.project(
@@ -259,6 +268,11 @@ class Diamond:
                     max_tokens=8192,
                 )
 
+        with self.db.connect() as conn:
+            row = graph_store.get_project_row(conn, project_id)
+            if row and row.get("completion_policy") == "goals":
+                from backend.pentest.report import render_report
+                return render_report(conn, project_id), ""
         return generate_wp_content(
             self.db,
             project_id,
@@ -275,8 +289,10 @@ class Diamond:
         """
 
         def _draw(conn) -> None:
-            if not graph_store.link_exists(conn, project_id, "flag", "wp", "wp"):
-                graph_store.add_link(conn, project_id, "flag", "wp", "wp")
+            row = graph_store.get_project_row(conn, project_id)
+            source = "goal" if row and row.get("completion_policy") == "goals" else "flag"
+            if not graph_store.link_exists(conn, project_id, source, "wp", "wp"):
+                graph_store.add_link(conn, project_id, source, "wp", "wp")
             if not graph_store.link_exists(conn, project_id, "wp", "diamond", "wp"):
                 graph_store.add_link(conn, project_id, "wp", "diamond", "wp")
             if not graph_store.link_exists(conn, project_id, "diamond", "ipc", "return"):

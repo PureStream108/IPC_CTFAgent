@@ -13,7 +13,6 @@
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PostgreSQL 16](https://img.shields.io/badge/Runtime-PostgreSQL_16-4169E1.svg?logo=postgresql&logoColor=white)](#durable-runtime-state)
 [![Docker Compose](https://img.shields.io/badge/Deploy-Docker_Compose-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
-
 </div>
 
 ## Current Reward
@@ -113,6 +112,12 @@ PostgreSQL 只保存运行时事实、协调状态和可查询元数据；文件
 - 题目状态为 `discovered`、`preparing`、`ready`、`assigned`、`solving`、`solved`、`expired`、`withdrawn` 或 `cancelled`；提交状态独立记录 `queued`、`pending`、`correct`、`wrong`、`unknown` 等结果。
 - 每个题目最多分配两个解题席位；WP 任务使用原作者 Member/session，远端实例与本地 sandbox 分开计量。
 - `POST /api/workflows/{id}/preflight`、`POST /api/workflows/{id}/start` 和 `/api/runs/{id}/...` 提供平台预检、启动、同步、暂停、恢复、停止与事件查询。
+
+#### Built-in GZCTF workflow
+
+GZCTF is available as the built-in default platform workflow. Use **Competition → New GZCTF** or `POST /api/ops/workflows/gzctf` and provide the platform origin, game ID, and optional competition name, team ID, deadline, container concurrency, and attachment CDN origin. Choose either a participant token or username/password; credentials are stored in the workflow secret namespace and are never copied into the run snapshot.
+
+The same preset is available to the IPC MCP tool `ipc_gzctf_workflow`. After saving the draft, run the normal confirmation and preflight flow. Future GZCTF runs reuse the native challenge discovery, attachments, submissions, verdict polling, and container lifecycle adapter; no per-event HTTP field mapping is required. Other platforms and custom HTTP JSON workflows remain available through the generic workflow endpoint.
 
 ### <a id="tool-runtime"></a>MCP
 
@@ -443,6 +448,16 @@ docker run --rm \
 
 ---
 
+## References
+
+Pentest 工作区、渗透图谱、证据与 Agent 工具说明见 [Pentest 使用文档](docs/pentest.md)。
+GZCTF 与 TSecBench 固定工作流的个性化配置见 [平台文档](backend/platform/README.md)。
+普通题目、独立渗透目标和平台多 Flag 题目分别遵循各自的完成条件，子任务继续使用本项目 Agent Harness。
+
+[Cairn](https://github.com/oritera/Cairn)
+
+[ctf-agent](https://github.com/verialabs/ctf-agent)
+
 ## 👥 Contributors
 
 <p>
@@ -456,16 +471,6 @@ docker run --rm \
     <img src="https://github.com/springbot2025.png?size=80" width="80" height="80" style="border-radius: 50%;" alt="springbot" title="springbot" />
   </a>
 </p>
-
-
-## 🤝 Contribution
-
-欢迎提交 bug 报告、稳定性测试、工具集成、文档和架构改进。
-
-1. 先在 [Issues](https://github.com/PureStream108/IPC_CTFAgent/issues) 描述问题或设计提案。
-2. 创建聚焦的分支，并为修改的运行时边界补充测试。
-3. 在 Pull Request 中说明行为变化、迁移影响和验证结果。
-
 ---
 
 ## 📝 License

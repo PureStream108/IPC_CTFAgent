@@ -90,7 +90,7 @@ class ToolRegistry:
         return list(self._tools)
 
     def by_category(self, category: str) -> list[Tool]:
-        return [t for t in self._tools if t.category == category]
+        return [t for t in self._tools if t.category == ("web" if category == "pentest" else category)]
 
     @staticmethod
     def _available(tool: Tool, available_mcps: Collection[str] | None) -> bool:

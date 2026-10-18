@@ -777,6 +777,22 @@ class CompetitionStore:
                 """UPDATE competition_submissions SET status=%s,verdict=%s,platform_submission_id=%s WHERE id=%s""",
                 (status, Jsonb(result), result.get("submission_id"), submission_id),
             )
+            if status == "correct" and "challenge_complete" in result:
+                progress = dict((challenge.get("metadata") or {}).get("flag_progress") or {})
+                for key in ("correct_flag_count", "total_flag_count", "challenge_complete", "cumulative_score"):
+                    if result.get(key) is not None:
+                        if key == "correct_flag_count":
+                            progress[key] = max(int(progress.get(key) or 0), int(result[key]))
+                        elif key == "challenge_complete":
+                            progress[key] = bool(progress.get(key)) or bool(result[key])
+                        else:
+                            progress[key] = result[key]
+                indices = set(progress.get("matched_indices", []))
+                if result.get("matched_flag_index") is not None:
+                    indices.add(result["matched_flag_index"])
+                progress["matched_indices"] = sorted(indices)
+                connection.execute("UPDATE competition_challenges SET metadata=metadata || %s WHERE id=%s",
+                                   (Jsonb({"flag_progress": progress}), challenge["id"]))
             if status == "wrong" and challenge["state"] != "solved":
                 wrong_count = challenge["wrong_count"] + 1
                 connection.execute(
@@ -792,7 +808,7 @@ class CompetitionStore:
                     (max(1, int(result.get("retry_after") or 60)), row["run_id"]),
                 )
                 connection.execute("UPDATE competition_submissions SET status='queued' WHERE id=%s", (submission_id,))
-            return {**row, "status": status}
+            return {**row, "status": status, "verdict": result}
 
     def finalize_correct_challenge(self, connection, run_id: str, challenge_id: str) -> None:
         """Commit solved/WP in the caller's verified-flag closeout transaction."""
@@ -800,6 +816,7 @@ class CompetitionStore:
         submission = connection.execute(
             """SELECT * FROM competition_submissions
                WHERE run_id=%s AND challenge_id=%s AND status='correct'
+                 AND COALESCE((verdict->>'challenge_complete')::boolean, true)
                ORDER BY created_at,id LIMIT 1 FOR UPDATE""",
             (run_id, challenge_id),
         ).fetchone()
