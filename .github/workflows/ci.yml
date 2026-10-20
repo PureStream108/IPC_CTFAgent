@@ -180,6 +180,7 @@ jobs:
         if: always()
         run: |
           mkdir -p data/exports/e2e
+          sudo chown -R "$(id -u):$(id -g)" data/exports/e2e
           docker compose -f docker-compose.e2e.yml ps -a > data/exports/e2e/compose-status.txt
           docker compose -f docker-compose.e2e.yml logs --no-color > data/exports/e2e/compose.log
 
