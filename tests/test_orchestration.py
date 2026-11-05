@@ -353,6 +353,23 @@ def test_diamond_medium_difficulty_adds_one_helper(state):
     assert assignments[0].member != "aventurine"
 
 
+def test_ctf_project_gets_an_independent_sugilite_curator(state):
+    from backend.core.orchestrator import Orchestrator
+
+    pid = _make_project(state, "web")
+    orch = Orchestrator(state, scripts={})
+    curator = orch._ensure_curator(pid)
+    try:
+        assert curator is not None
+        with state.db.connect() as conn:
+            detail = graph_store.project_detail(conn, pid)
+        assert any(agent.name == "sugilite" and agent.role == "curator" for agent in detail.agents)
+        assert "sugilite" not in {member.name for member in orch.diamond._solver_members(pid)}
+    finally:
+        orch._dispose_curator(pid)
+        orch.shutdown()
+
+
 def test_full_solve_pipeline_to_solved(state):
     """End-to-end: start -> solver -> verified Flag -> asynchronous postprocess."""
     from backend.core.orchestrator import Orchestrator
@@ -783,35 +800,15 @@ def test_stop_project_preserves_solved_status(state):
     orch.shutdown()
 
 
-def test_orchestrator_builds_task_container_mcp_targets(state):
+def test_orchestrator_no_longer_builds_container_mcp_targets(state):
     from backend.core.orchestrator import Orchestrator
+    from backend.members.base_member import MemberDeps
 
     state.pool.backend = "docker"
     orch = Orchestrator(state, max_workers=1)
-    targets = orch._container_mcps("proj_001", "aventurine")
 
-    assert set(targets) == {"browser", "reverse"}
-    reverse_args = targets["reverse"].target.args
-    assert reverse_args == [
-        "exec", "-i", "-w", "/workspace/shared", "ipc-task-proj_001",
-        "python3", "-m", "backend.mcp.mcp_server", "reverse",
-    ]
-    assert targets["reverse"].read_timeout == 600
-    browser_args = targets["browser"].target.args
-    assert "IPC_BROWSER_PROJECT_ID=proj_001" in browser_args
-    assert "IPC_BROWSER_MEMBER=aventurine" in browser_args
-    assert "IPC_BROWSER_WORKDIR=/workspace/shared" in browser_args
-    assert "IPC_BROWSER_SHARED_DIR=/workspace/shared" in browser_args
-    assert "IPC_BROWSER_ARTIFACT_ROOT=/workspace/shared/browser-artifacts" in browser_args
-    assert "IPC_BROWSER_EVENT_LIMIT=200" in browser_args
-    assert "IPC_BROWSER_RESPONSE_PREVIEW_BYTES=4096" in browser_args
-    assert "IPC_BROWSER_ALLOWED_ORIGINS=[]" in browser_args
-    assert browser_args[-7:] == [
-        "-w", "/workspace/shared", "ipc-task-proj_001",
-        "python3", "-m", "backend.mcp.mcp_server", "browser",
-    ]
-
-    assert set(targets) == {"browser", "reverse"}
+    assert not hasattr(orch, "_container_mcps")
+    assert "container_mcps" not in MemberDeps.__dataclass_fields__
     orch.shutdown()
 
 

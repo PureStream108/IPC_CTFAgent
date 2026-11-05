@@ -15,6 +15,7 @@ from backend.core.ipc import (
     FlagConflictError,
     accept_verified_flag,
     assert_flag_compatible,
+    submit_flag_candidate,
 )
 from backend.core.postprocess_store import (
     complete_existing_job,
@@ -33,6 +34,39 @@ _SENSITIVE_FIELD_RE = re.compile(
     r"(?i)\b(?:authorization|api[ _-]?key|token|cookie|password|secret)\b\s*[:=]\s*[^\s,;]+"
 )
 _COMPETITION_SERVICE_LOCK = threading.Lock()
+
+
+def _make_preset_tool(state_provider: Callable[[], AppState], template_id: str):
+    def preset_workflow(
+        settings: dict[str, Any], workflow_id: str | None = None
+    ) -> dict[str, Any]:
+        from backend.ops.service import OpsAgentService
+
+        if "secrets" in settings:
+            raise ValueError("use the structured workflow secret store for credentials")
+        state = state_provider()
+        service = getattr(state, "ops_agent_service", None) or OpsAgentService(state)
+        return service.configure_preset_workflow(
+            template_id, settings, workflow_id=workflow_id
+        )
+
+    preset_workflow.__name__ = f"{template_id}_workflow"
+    return preset_workflow
+
+
+def _register_preset_tools(
+    server: MCPServer, state_provider: Callable[[], AppState]
+) -> None:
+    """Register one ipc_*_workflow tool per built-in platform preset."""
+
+    from backend.platform.presets import preset_mcp_tools
+
+    for spec in preset_mcp_tools():
+        server.add_tool(
+            _make_preset_tool(state_provider, spec["template_id"]),
+            name=spec["name"],
+            description=spec["description"],
+        )
 
 
 def build_ipc_mcp(state_provider: Callable[[], AppState]) -> MCPServer:
@@ -60,40 +94,9 @@ operator request.""",
     )
     tools = _Tools(state_provider)
 
-    @server.tool(name="ipc_gzctf_workflow", description=(
-        "Create or update the built-in default GZCTF workflow. Supply only platform base_url, "
-        "game_id and optional name/team_id/ends_at/remote_concurrency/attachment_base_url. "
-        "No HTTP mappings or platform probing are needed. Credentials must already be in the "
-        "workflow secret store or deployment environment; ask ipc_question for gzctf_token "
-        "after creating the draft when needed. Return the draft for normal confirmation."
-    ))
-    def gzctf_workflow(settings: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
-        from backend.ops.service import OpsAgentService
+    _register_preset_tools(server, state_provider)
 
-        if "secrets" in settings:
-            raise ValueError("use the structured workflow secret store for credentials")
-        state = state_provider()
-        service = getattr(state, "ops_agent_service", None) or OpsAgentService(state)
-        return service.configure_gzctf_workflow(settings, workflow_id=workflow_id)
-
-    @server.tool(name="ipc_tsecbench_workflow", description=(
-        "Create or update the built-in default TSecBench benchmark workflow. Supply only "
-        "the platform base_url and optional name/team_id/remote_concurrency. No HTTP "
-        "mappings or platform probing are needed. The benchmark token goes into the "
-        "workflow secret store as benchmark_token; ask ipc_question with "
-        "secret_name=benchmark_token after creating the draft when it is missing. "
-        "Return the draft for normal confirmation."
-    ))
-    def tsecbench_workflow(settings: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
-        from backend.ops.service import OpsAgentService
-
-        if "secrets" in settings:
-            raise ValueError("use the structured workflow secret store for credentials")
-        state = state_provider()
-        service = getattr(state, "ops_agent_service", None) or OpsAgentService(state)
-        return service.configure_tsecbench_workflow(settings, workflow_id=workflow_id)
-
-    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store; use secret_name=benchmark_token for a native TSecBench workflow, or secret_name=gzctf_token (or gzctf_username/gzctf_password) for native GZCTF.")
+    @server.tool(name="ipc_question", description="Ask for missing platform information. Return to the operator while pending; call again with the same operation key to read the answer. Credentials go into the workflow secret store; for a native preset workflow use the secret_name that its ipc_*_workflow tool documents.")
     def question(operation_key: str, title: str, options: list[str] | None = None,
                  workflow_id: str | None = None, secret_name: str | None = None,
                  ctx: Context | None = None) -> dict:
@@ -123,7 +126,7 @@ operator request.""",
     @server.tool(
         name="ipc_platform_preflight",
         description=(
-            "Run the confirmed platform workflow preflight through IPC. This checks "
+            "Run the platform workflow preflight through IPC. This checks "
             "authentication and adapter capabilities before any challenge import or "
             "Member allocation is started."
         ),
@@ -134,7 +137,8 @@ operator request.""",
     @server.tool(
         name="ipc_start_platform",
         description=(
-            "Start one confirmed platform workflow through IPC's CompetitionService. "
+            "Start one platform workflow through IPC's CompetitionService; no confirmation "
+            "phrase is required. "
             "The idempotency key is required; preflight, import, and the ten Member "
             "seat allocation are owned by IPC."
         ),
@@ -164,7 +168,8 @@ operator request.""",
         name="ipc_start_challenge",
         description=(
             "Create and link a live IPC project for the current CTF task, then queue IPC's "
-            "distributed Members without blocking on Docker startup."
+            "distributed Members without blocking on Docker startup. For category=pentest, "
+            "pass scope, constraints and goals so the Pentest board is populated."
         ),
     )
     def start_challenge(
@@ -173,6 +178,9 @@ operator request.""",
         origin: str,
         goal: str = "Solve the challenge and document a reproducible writeup.",
         external_id: str | None = None,
+        scope: str | None = None,
+        constraints: list[str] | None = None,
+        goals: list[str] | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         return tools.start_challenge(
@@ -181,6 +189,9 @@ operator request.""",
             origin=origin,
             goal=goal,
             external_id=external_id,
+            scope=scope,
+            constraints=constraints,
+            goals=goals,
             session_id=_session_id_from_context(ctx),
         )
 
@@ -363,6 +374,9 @@ class _Tools:
         origin: str,
         goal: str,
         external_id: str | None,
+        scope: str | None = None,
+        constraints: list[str] | None = None,
+        goals: list[str] | None = None,
         session_id: str | None,
     ) -> dict[str, Any]:
         normalized_category = str(category).strip().lower()
@@ -375,9 +389,22 @@ class _Tools:
         origin = _required_text(origin, "origin", 12_000)
         goal = _required_text(goal, "goal", 12_000)
         ext = str(external_id).strip()[:240] if external_id else None
+        pentest_setup = None
+        if normalized_category == "pentest":
+            pentest_setup, setup_error = _pentest_setup(
+                scope=scope, constraints=constraints, goals=goals, origin=origin, goal=goal
+            )
+            if setup_error:
+                return {"ok": False, "error": setup_error}
         with self.state.db.connect() as conn:
             project_id = graph_store.create_project(
-                conn, title, origin, goal, normalized_category, external_id=ext
+                conn,
+                title,
+                origin,
+                goal,
+                normalized_category,
+                external_id=ext,
+                pentest_setup=pentest_setup,
             )
         self.state.logger.project(
             "ops_agent_project_started",
@@ -395,11 +422,51 @@ class _Tools:
         )
         return result
 
+    def _ownership(self, project_id: str) -> dict:
+        from backend.api.project_ownership import project_ownership_for
+
+        return project_ownership_for(self.state, project_id)
+
+    def _run_owned_error(self, project_id: str, ownership: dict, action: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "project_id": project_id,
+            "error": (
+                "this challenge is scheduled by its competition run; "
+                f"use the run control instead of {action}"
+            ),
+            "ownership": ownership["ownership"],
+            "run_id": ownership["run_id"],
+            "challenge_id": ownership["challenge_id"],
+            "control": f"/api/runs/{ownership['run_id']}/{action}",
+        }
+
     def start_solver(self, project_id: str) -> dict[str, Any]:
         self._require_project(project_id)
         startup_error = self._startup_error()
         if startup_error:
             return {"ok": False, "project_id": project_id, "error": startup_error}
+        ownership = self._ownership(project_id)
+        if ownership["ownership"] == "competition":
+            service = getattr(self.state, "competition", None)
+            snapshot = None
+            try:
+                snapshot = service.resume_local(project_id) if service is not None else None
+            except (KeyError, ValueError):
+                snapshot = None
+            if snapshot is None:
+                return self._run_owned_error(project_id, ownership, "resume")
+            run = snapshot.get("run") or {}
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "status": run.get("status"),
+                "run_id": run.get("id"),
+                "phase": "queued",
+            }
+        # Standalone projects keep the compatibility path: the ops agent is an
+        # external driver, so it starts the orchestrator directly. Run-owned
+        # projects are refused above and never reach this point.
         try:
             status = self.state.orchestrator.start_project_async(project_id)
         except (RuntimeError, ValueError) as exc:
@@ -436,6 +503,9 @@ class _Tools:
 
     def stop_challenge(self, project_id: str) -> dict[str, Any]:
         self._require_project(project_id)
+        ownership = self._ownership(project_id)
+        if ownership["ownership"] == "competition":
+            return self._run_owned_error(project_id, ownership, "stop")
         with self.state.db.connect() as conn:
             row = graph_store.get_project_row(conn, project_id)
             if row["status"] == "solved":
@@ -483,6 +553,7 @@ class _Tools:
         except ValueError as exc:
             return {"ok": False, "project_id": project_id, "error": str(exc)}
         rollback_file: Callable[[], None] | None = None
+        run_owned = self._ownership(project_id)["ownership"] == "competition"
         try:
             with self.state.db.connect() as conn:
                 assert_flag_compatible(conn, project_id, flag)
@@ -507,12 +578,15 @@ class _Tools:
                     "ops-agent",
                     "ops-agent",
                 )
-                accept_verified_flag(
-                    conn,
-                    project_id,
-                    flag,
-                    source="ops-agent",
-                )
+                if run_owned:
+                    submit_flag_candidate(conn, project_id, flag, source="ops-agent")
+                else:
+                    accept_verified_flag(
+                        conn,
+                        project_id,
+                        flag,
+                        source="ops-agent",
+                    )
                 enqueue_postprocess(conn, project_id)
                 complete_existing_job(conn, project_id, "writeup")
                 graph_store.set_runtime_phase(conn, project_id, "solved")
@@ -619,6 +693,69 @@ def _required_text(value: Any, field: str, maximum: int) -> str:
         raise ValueError(f"{field} is limited to {maximum} characters")
     return text
 
+
+def _pentest_setup(
+    *,
+    scope: str | None,
+    constraints: list[str] | None,
+    goals: list[str] | None,
+    origin: str,
+    goal: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Build the Pentest Setup payload for a project created over MCP.
+
+    The scope falls back to origin and the goals fall back to the single goal
+    text, so a plain ipc_start_challenge(category=pentest) still produces a
+    board with a usable scope instead of an empty one. Validation runs here
+    (not later inside create_project) so the caller gets a readable MCP error
+    instead of a failed transaction.
+    """
+
+    from backend.pentest.models import Setup
+
+    candidate = scope.strip() if isinstance(scope, str) else ""
+    raw_scope = candidate or origin.strip()
+    clean_constraints, error = _clean_list(constraints)
+    if error:
+        return None, f"invalid pentest setup: constraints {error}"
+    clean_goals, error = _clean_list(goals)
+    if error:
+        return None, f"invalid pentest setup: goals {error}"
+    if not clean_goals and goal.strip():
+        clean_goals = [goal.strip()[:2000]]
+    payload = {
+        "scope": raw_scope[:8000],
+        "constraints": clean_constraints,
+        "goals": clean_goals,
+    }
+    try:
+        return Setup.model_validate(payload).model_dump(), None
+    except ValueError as exc:
+        return None, f"invalid pentest setup: {exc}"
+
+
+def _clean_list(values: list[str] | None) -> tuple[list[str], str | None]:
+    """Trim, de-duplicate and bound a Pentest constraint/goal list.
+
+    Over-long entries are rejected rather than truncated: a silently shortened
+    constraint is worse than none, because it still reads like a complete rule
+    when injected into every dispatch.
+    """
+
+    if not values:
+        return [], None
+    seen: list[str] = []
+    for item in values:
+        text = str(item).strip()
+        if not text:
+            continue
+        if len(text) > 2000:
+            return [], "entries must contain 1 to 2000 characters"
+        if text not in seen:
+            seen.append(text)
+    if len(seen) > 40:
+        return [], "at most 40 entries are allowed"
+    return seen, None
 
 def _safe_summary(value: Any) -> str:
     text = _required_text(value, "summary", 12_000)

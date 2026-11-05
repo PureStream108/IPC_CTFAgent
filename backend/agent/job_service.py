@@ -4,17 +4,29 @@ import logging
 from typing import Any
 
 from backend.agent.jobs import INLINE_LIMIT, AgentJobStore, JobConflict, new_job_id
-from backend.sandbox.command_policy import host_path_violation
+from backend.sandbox.guard import command_guard
 
 _recovery_logger = logging.getLogger(__name__)
 
 class JobService:
     """Bind a job store to one session's sandbox."""
 
-    def __init__(self, store: AgentJobStore, sandbox, session_id: str) -> None:
+    def __init__(
+        self,
+        store: AgentJobStore,
+        sandbox,
+        session_id: str,
+        *,
+        project_id: str | None = None,
+        member: str | None = None,
+        intent_id: str | None = None,
+    ) -> None:
         self.store = store
         self.sandbox = sandbox
         self.session_id = session_id
+        self.project_id = project_id
+        self.member = member
+        self.intent_id = intent_id
 
 
     def start(self, command: str, *, kind: str = "bash") -> dict[str, Any]:
@@ -27,14 +39,17 @@ class JobService:
         command = (command or "").strip()
         if not command:
             return {"ok": False, "error": "a non-empty command is required"}
-        violation = host_path_violation(command)
-        if violation is not None:
-            return {"ok": False, "error": f"command blocked: {violation}"}
+        decision = command_guard.check(command, kind="job_start")
+        if decision.blocked:
+            return {"ok": False, "error": f"command blocked: {decision.reason}"}
 
         job_id = new_job_id()
         self.store.start(
             self.session_id, command, kind=kind, job_id=job_id,
             workdir=getattr(self.sandbox, "workdir", None),
+            project_id=self.project_id,
+            member=self.member,
+            intent_id=self.intent_id,
         )
         try:
             pid = self.sandbox.exec_detached(job_id, command)
@@ -53,9 +68,10 @@ class JobService:
             "state": "running",
             "pid": pid,
             "note": (
-                "Job runs without a timeout. Poll job_status and read output "
-                "with job_logs; cancel it with job_cancel when the evidence is "
-                "enough."
+                "Job runs without a timeout. Continue with other independent work "
+                "instead of blocking. Sugilite will review the completed output and "
+                "return a digest; use job_logs or job_wait only when you need the "
+                "raw result immediately."
             ),
         }
 

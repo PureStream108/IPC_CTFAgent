@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import uuid
 
+from psycopg.types.json import Jsonb
+
 
 class JobConflict(ValueError):
     """The requested job transition contradicts a durable invariant."""
@@ -30,6 +32,9 @@ class AgentJobStore:
         job_id: str | None = None,
         workdir: str | None = None,
         pid: int | None = None,
+        project_id: str | None = None,
+        member: str | None = None,
+        intent_id: str | None = None,
     ) -> dict:
         if not command.strip():
             raise JobConflict("a job command is required")
@@ -37,9 +42,9 @@ class AgentJobStore:
         with self.db.connect() as connection:
             return connection.execute(
                 """INSERT INTO agent_jobs
-                   (id,session_id,kind,command,workdir,pid)
-                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING *""",
-                (identifier, session_id, kind, command, workdir, pid),
+                   (id,session_id,project_id,member,intent_id,kind,command,workdir,pid)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (identifier, session_id, project_id, member, intent_id, kind, command, workdir, pid),
             ).fetchone()
 
     def job(self, job_id: str) -> dict:
@@ -121,6 +126,9 @@ class AgentJobStore:
                 """UPDATE agent_jobs SET state=%s,exit_code=COALESCE(%s,exit_code),
                        stdout_artifact=COALESCE(%s,stdout_artifact),
                        stderr_artifact=COALESCE(%s,stderr_artifact),
+                       digest_state=CASE
+                         WHEN project_id IS NOT NULL AND digest_state='none' THEN 'pending'
+                         ELSE digest_state END,
                        last_progress_at=now(),finished_at=now()
                    WHERE id=%s AND state='running' RETURNING *""",
                 (state, exit_code, stdout_artifact, stderr_artifact, job_id),
@@ -144,6 +152,9 @@ class AgentJobStore:
         with self.db.connect() as connection:
             return connection.execute(
                 """UPDATE agent_jobs SET state='lost',last_progress_at=now(),
+                       digest_state=CASE
+                         WHEN project_id IS NOT NULL AND digest_state='none' THEN 'pending'
+                         ELSE digest_state END,
                        finished_at=now()
                    WHERE session_id=%s AND state='running' RETURNING *""",
                 (session_id,),
@@ -165,7 +176,10 @@ class AgentJobStore:
             raise ValueError("idle_seconds must be positive")
         with self.db.connect() as connection:
             return connection.execute(
-                """UPDATE agent_jobs SET state='lost',finished_at=now()
+                """UPDATE agent_jobs SET state='lost',finished_at=now(),
+                       digest_state=CASE
+                         WHEN project_id IS NOT NULL AND digest_state='none' THEN 'pending'
+                         ELSE digest_state END
                    WHERE id IN (
                      SELECT id FROM agent_jobs
                      WHERE state='running'
@@ -174,3 +188,91 @@ class AgentJobStore:
                    ) RETURNING *""",
                 (idle_seconds, max(1, min(limit, 1000))),
             ).fetchall()
+
+
+    def running_for_project(self, project_id: str, *, limit: int = 20) -> list[dict]:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """SELECT * FROM agent_jobs
+                   WHERE project_id=%s AND state='running'
+                   ORDER BY started_at,id LIMIT %s""",
+                (project_id, max(1, min(int(limit), 200))),
+            ).fetchall()
+
+    def pending_digests(self, project_id: str, *, limit: int = 4) -> list[dict]:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """SELECT * FROM agent_jobs
+                   WHERE project_id=%s AND digest_state='pending'
+                     AND state IN ('exited','cancelled','lost')
+                   ORDER BY finished_at NULLS LAST, started_at, id
+                   LIMIT %s""",
+                (project_id, max(1, min(int(limit), 50))),
+            ).fetchall()
+
+    def claim_digest(self, job_id: str) -> dict | None:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """UPDATE agent_jobs
+                   SET digest_state='curating', digest_attempts=digest_attempts+1
+                   WHERE id=%s AND digest_state='pending'
+                   RETURNING *""",
+                (job_id,),
+            ).fetchone()
+
+    def save_digest(self, job_id: str, digest: dict) -> dict | None:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """UPDATE agent_jobs
+                   SET digest_json=%s, digest_state='curated', digest_at=now()
+                   WHERE id=%s AND digest_state='curating'
+                   RETURNING *""",
+                (Jsonb(digest), job_id),
+            ).fetchone()
+
+    def fail_digest(self, job_id: str, error: str) -> dict | None:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """UPDATE agent_jobs
+                   SET digest_state='failed', digest_json=%s, digest_at=now()
+                   WHERE id=%s AND digest_state='curating'
+                   RETURNING *""",
+                (Jsonb({"error": str(error)[:2000]}), job_id),
+            ).fetchone()
+
+    def requeue_curating(self, project_id: str, *, older_than_seconds: int = 900) -> int:
+        """Recover digests claimed by a worker that died mid-curation."""
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """UPDATE agent_jobs SET digest_state='pending'
+                   WHERE project_id=%s AND digest_state='curating'
+                     AND digest_at IS NULL
+                     AND finished_at < now() - make_interval(secs => %s)
+                   RETURNING id""",
+                (project_id, max(30, int(older_than_seconds))),
+            ).fetchall()
+            return len(rows)
+
+    def curated_digests(self, project_id: str, member: str, *, limit: int = 3) -> list[dict]:
+        with self.db.connect() as connection:
+            return connection.execute(
+                """SELECT * FROM agent_jobs
+                   WHERE project_id=%s AND member=%s
+                     AND digest_state='curated' AND delivered_at IS NULL
+                   ORDER BY finished_at NULLS LAST, started_at, id
+                   LIMIT %s""",
+                (project_id, member, max(1, min(int(limit), 20))),
+            ).fetchall()
+
+    def mark_digests_delivered(self, job_ids: list[str]) -> int:
+        ids = [str(job_id) for job_id in job_ids if job_id]
+        if not ids:
+            return 0
+        with self.db.connect() as connection:
+            rows = connection.execute(
+                """UPDATE agent_jobs SET delivered_at=now()
+                   WHERE id = ANY(%s) AND delivered_at IS NULL
+                   RETURNING id""",
+                (ids,),
+            ).fetchall()
+            return len(rows)

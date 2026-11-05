@@ -121,6 +121,7 @@ COMPETITION_SCHEMA = (
     "ALTER TABLE competition_questions ADD COLUMN IF NOT EXISTS ops_session_id TEXT REFERENCES sessions(id)",
     "ALTER TABLE competition_questions ADD COLUMN IF NOT EXISTS workflow_id TEXT REFERENCES workflows(id)",
     "ALTER TABLE competition_questions ADD COLUMN IF NOT EXISTS secret_name TEXT",
+    "ALTER TABLE competition_challenges ADD COLUMN IF NOT EXISTS attempt_started_at TIMESTAMPTZ",
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS next_sync_at TIMESTAMPTZ NOT NULL DEFAULT now()",
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS last_error TEXT",
     "ALTER TABLE competition_runs ADD COLUMN IF NOT EXISTS lease_owner TEXT",

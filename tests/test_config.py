@@ -77,23 +77,29 @@ def test_stored_claudecode_ops_config_is_migrated_with_a_warning(tmp_path: Path)
     assert "claudecode" in store.migrated_api_format
 
 
-def test_browser_runtime_limits_and_origins_are_validated():
-    runtime = RuntimeConfig(
-        browser_event_limit=1000,
-        browser_response_preview_bytes=16384,
-        browser_allowed_origins=["HTTPS://Example.Test:443/", "http://[::1]:8080"],
+def test_legacy_browser_runtime_keys_are_ignored_on_load(tmp_path: Path):
+    config_dir = write_mock_config(tmp_path / "config")
+    path = config_dir / "config.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.setdefault("runtime", {}).update(
+        {
+            "browser_event_limit": 300,
+            "browser_console_limit": 50,
+            "browser_error_limit": 20,
+            "browser_response_preview_bytes": 8192,
+            "browser_allowed_origins": ["https://legacy.test"],
+            "browser_artifact_max_bytes": 1024,
+            "zap_enabled": True,
+        }
     )
-    assert runtime.browser_allowed_origins == ["https://example.test", "http://[::1]:8080"]
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_config(config_dir)
+
+    assert not any(key.startswith("browser_") for key in cfg.runtime.model_dump())
+    assert "zap_enabled" not in cfg.runtime.model_dump()
     with pytest.raises(ValidationError):
-        RuntimeConfig(browser_event_limit=1001)
-    with pytest.raises(ValidationError):
-        RuntimeConfig(browser_response_preview_bytes=16385)
-    with pytest.raises(ValidationError):
-        RuntimeConfig(browser_artifact_max_bytes=50 * 1024 * 1024 + 1)
-    with pytest.raises(ValidationError):
-        RuntimeConfig(browser_allowed_origins=["file:///tmp/page.html"])
-    with pytest.raises(ValidationError):
-        RuntimeConfig(browser_allowed_origins=["https://example.test/path"])
+        RuntimeConfig(browser_event_limit=300)
 
 
 def test_llm_surface_and_reasoning_settings_are_validated():
@@ -248,3 +254,150 @@ def test_load_config_drops_legacy_memory_limits(tmp_path: Path):
     assert cfg.limits.total_cpu == 8
     assert cfg.limits.max_concurrent_tasks == 3
     assert "total_memory_gb" not in cfg.limits.model_dump()
+
+
+def test_pentest_mode_switches_default_off_and_ladder_is_monotonic():
+    runtime = RuntimeConfig()
+    assert runtime.diamond_pentest_mode is False
+    assert runtime.diamond_actions_per_tick == 2
+    assert (runtime.ladder_help_minutes, runtime.ladder_upgrade_minutes, runtime.ladder_park_minutes) == (10, 25, 40)
+    assert runtime.state_write_ratio > runtime.compaction_trigger_ratio
+
+    with pytest.raises(ValidationError, match="help < upgrade < park"):
+        RuntimeConfig(ladder_help_minutes=30, ladder_upgrade_minutes=20)
+    with pytest.raises(ValidationError, match="state_write_ratio must be above"):
+        RuntimeConfig(compaction_trigger_ratio=0.9, state_write_ratio=0.85)
+
+
+def test_container_limits_have_safe_defaults_and_validation():
+    from backend.core.config import LimitsConfig
+
+    limits = LimitsConfig()
+    assert limits.mem_limit == "2g"
+    assert limits.pids_limit == 512
+    assert LimitsConfig(mem_limit="1536m", pids_limit=256).mem_limit == "1536m"
+    with pytest.raises(ValidationError):
+        LimitsConfig(mem_limit="two gigabytes")
+    with pytest.raises(ValidationError):
+        LimitsConfig(pids_limit=4)
+
+
+def test_pentest_runtime_keys_survive_a_save_load_roundtrip(tmp_path: Path):
+    config_dir = write_mock_config(tmp_path / "config")
+    cfg = load_config(config_dir)
+    cfg.runtime.diamond_pentest_mode = True
+    cfg.runtime.diamond_actions_per_tick = 1
+    cfg.runtime.ladder_park_minutes = 55
+    cfg.limits.mem_limit = "1536m"
+    save_config(cfg, config_dir)
+
+    reloaded = load_config(config_dir)
+    assert reloaded.runtime.diamond_pentest_mode is True
+    assert reloaded.runtime.diamond_actions_per_tick == 1
+    assert reloaded.runtime.ladder_park_minutes == 55
+    assert reloaded.limits.mem_limit == "1536m"
+
+def test_member_backup_absent_keeps_one_shared_key():
+    cfg = AppConfig(
+        diamond=LLMConfig(api_format="mock"),
+        member=LLMConfig(api_format="openai", api_key="primary-key", base_url="https://api.example/v1"),
+    )
+    assert cfg.member_backup is None
+    assert len(cfg.members) == 10
+    assert {m.api_key for m in cfg.members} == {"primary-key"}
+
+
+def test_member_backup_splits_the_ten_seats_five_five():
+    cfg = AppConfig(
+        diamond=LLMConfig(api_format="mock"),
+        member=LLMConfig(
+            api_format="openai",
+            api_key="primary-key",
+            base_url="https://primary.example/v1",
+            model="deepseek-v4.1-flash",
+            reasoning_effort="max",
+        ),
+        member_backup=LLMConfig(
+            api_format="openai",
+            api_key="backup-key",
+            base_url="https://backup.example/v1",
+            model="deepseek-v4.1-flash",
+            reasoning_effort="max",
+        ),
+    )
+    by_name = {m.name: m for m in cfg.members}
+    assert [by_name[name].api_key for name in MEMBER_NAMES] == [
+        "primary-key", "backup-key", "primary-key", "backup-key", "primary-key",
+        "backup-key", "primary-key", "backup-key", "primary-key", "backup-key",
+    ]
+    assert by_name["amber"].api_key == "primary-key"
+    assert by_name["agate"].api_key == "backup-key"
+    assert cfg.startup_errors() == []
+    assert "backup key equals primary (no spread)" not in cfg.startup_warnings()
+
+
+def test_member_backup_requires_key_and_base_url():
+    cfg = AppConfig(
+        diamond=LLMConfig(api_format="mock"),
+        member=LLMConfig(api_format="openai", api_key="primary-key", base_url="https://primary.example/v1"),
+        member_backup=LLMConfig(api_format="openai", base_url="https://backup.example/v1"),
+    )
+    assert any("Member backup requires api_key and base_url" in error for error in cfg.startup_errors())
+
+
+def test_member_backup_with_the_primary_key_warns():
+    cfg = AppConfig(
+        diamond=LLMConfig(api_format="mock"),
+        member=LLMConfig(api_format="openai", api_key="same-key", base_url="https://api.example/v1"),
+        member_backup=LLMConfig(api_format="openai", api_key="same-key", base_url="https://api.example/v1"),
+    )
+    assert "backup key equals primary (no spread)" in cfg.startup_warnings()
+
+
+def test_member_backup_inherits_unset_model_surface_and_effort():
+    cfg = AppConfig(
+        diamond=LLMConfig(api_format="mock"),
+        member=LLMConfig(
+            api_format="openai",
+            api_key="primary-key",
+            base_url="https://primary.example/v1",
+            model="deepseek-v4.1-flash",
+            api_surface="responses",
+            reasoning_effort="max",
+        ),
+        member_backup=LLMConfig(
+            api_format="openai",
+            api_key="backup-key",
+            base_url="https://backup.example/v1",
+            reasoning_effort="auto",
+        ),
+    )
+    assert cfg.member_backup.model == "deepseek-v4.1-flash"
+    assert cfg.member_backup.api_surface == "responses"
+    assert cfg.member_backup.reasoning_effort == "max"
+    assert {m.model for m in cfg.members} == {"deepseek-v4.1-flash"}
+
+
+def test_member_backup_survives_a_save_load_roundtrip(tmp_path: Path):
+    config_dir = write_mock_config(tmp_path / "config")
+    cfg = load_config(config_dir)
+    cfg.member_backup = LLMConfig(
+        api_format="openai",
+        api_key="backup-key",
+        base_url="https://backup.example/v1",
+        model="deepseek-v4.1-flash",
+        reasoning_effort="max",
+    )
+    save_config(cfg, config_dir)
+    raw = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
+    assert list(raw) == [
+        "log_enabled", "wp_enabled", "diamond", "member", "member_backup",
+        "member_config_conflict", "members", "runtime", "limits",
+    ]
+    assert raw["member_backup"]["api_key"] == "backup-key"
+
+    reloaded = load_config(config_dir)
+    assert reloaded.member_backup is not None
+    assert reloaded.member_backup.api_key == "backup-key"
+    assert reloaded.members[1].api_key == "backup-key"
+    assert reloaded.members[0].api_key == reloaded.member.api_key

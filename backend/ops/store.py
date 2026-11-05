@@ -578,7 +578,11 @@ class OpsStore:
 
     def list_workflows(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as connection:
-            rows = connection.execute("SELECT id FROM workflows ORDER BY updated_at DESC").fetchall()
+            # source='local' rows are internal one-challenge run workflows; they
+            # are not operator-authored workflows and must not appear in IPC.
+            rows = connection.execute(
+                "SELECT id FROM workflows WHERE source <> 'local' ORDER BY updated_at DESC"
+            ).fetchall()
         return [self.get_workflow(row["id"]) for row in rows]
 
     def cleanup_duplicate_workflows(self) -> int:

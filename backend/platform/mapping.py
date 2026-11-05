@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FieldMapping(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["http_json", "ret2shell", "gzctf", "tsecbench"] = "http_json"
+    platform: str = "http_json"
     game_id: int | None = None
     list_url: str = ""
     list_path: str = "data"
@@ -29,9 +27,20 @@ class FieldMapping(BaseModel):
     max_pages: int = 100
     max_challenges: int = 0
     allow_hints: bool = False
+    attachments_only: bool = False
+    exclude: list[str] = Field(default_factory=list)
     category_map: dict[str, str] = Field(default_factory=dict)
     headers: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
+
+    @field_validator("platform")
+    @classmethod
+    def validate_platform(cls, value: str) -> str:
+        from backend.platform.presets import is_known_platform
+
+        if not is_known_platform(value):
+            raise ValueError(f"unsupported platform: {value}")
+        return value
 
     @field_validator("list_url")
     @classmethod
@@ -45,10 +54,11 @@ class FieldMapping(BaseModel):
     def require_list_url_for_http_json(self) -> FieldMapping:
         if self.platform == "http_json" and not self.list_url:
             raise ValueError("list_url is required for the http_json platform")
-        if self.platform == "gzctf" and self.game_id is None:
-            raise ValueError("game_id is required for the gzctf platform")
-        if self.platform == "tsecbench" and not self.list_url:
-            raise ValueError("list_url is required for the tsecbench platform")
+        # The platform package owns its identity rules; see
+        # backend.platform.presets for the registry.
+        from backend.platform.presets import validate_platform_mapping
+
+        validate_platform_mapping(self)
         return self
 
     @field_validator("level")

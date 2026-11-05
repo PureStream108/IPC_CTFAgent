@@ -12,18 +12,23 @@ import yaml
 
 REGISTRY_DIR = Path(__file__).resolve().parent / "registry"
 
-PUBLIC_MCPS = ("browser", "reverse")
+PUBLIC_MCPS: tuple[str, ...] = ()
 LANGUAGES = (
     "bash",
     "python",
     "java",
     "go",
-    "rust",
     "php",
     "nodejs",
     "ruby",
     "maven",
 )
+
+# Composite project categories map to the tool categories they expose.
+_CATEGORY_TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "web+pwn": ("web", "pwn"),
+    "pentest": ("web", "pwn", "reverse"),
+}
 
 
 @dataclass(slots=True)
@@ -90,7 +95,23 @@ class ToolRegistry:
         return list(self._tools)
 
     def by_category(self, category: str) -> list[Tool]:
-        return [t for t in self._tools if t.category == ("web" if category == "pentest" else category)]
+        """Tools exposed for a project category, expanding composite ones.
+
+        ``web+pwn`` challenges need both skill sets; ``pentest`` targets a live
+        service, so it opens web plus the pwn and reverse toolchains that a
+        protocol-level camera or daemon exploit needs. Every other category
+        matches itself.
+        """
+        wanted = _CATEGORY_TOOL_CATEGORIES.get(category, (category,))
+        allowed = set(wanted)
+        selected: list[Tool] = []
+        seen: set[str] = set()
+        for tool in self._tools:
+            if tool.category not in allowed or tool.name in seen:
+                continue
+            seen.add(tool.name)
+            selected.append(tool)
+        return selected
 
     @staticmethod
     def _available(tool: Tool, available_mcps: Collection[str] | None) -> bool:

@@ -1,5 +1,4 @@
 from backend.platform.ret2shell.adapter import (
-    DEFAULT_BASE_URL,
     Ret2ShellAdapter,
     Ret2ShellAuthError,
     Ret2ShellClient,
@@ -10,7 +9,6 @@ from backend.platform.ret2shell.adapter import (
 )
 
 __all__ = [
-    "DEFAULT_BASE_URL",
     "Ret2ShellAdapter",
     "Ret2ShellAuthError",
     "Ret2ShellClient",

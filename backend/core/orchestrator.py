@@ -22,6 +22,13 @@ from psycopg.types.json import Jsonb
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.competition.transport import Envelope
 from backend.core.archive import archive_completed_project
+from backend.core.curator import (
+    CURATOR_ROLE,
+    SUGILITE,
+    SugiliteCurator,
+    curator_scope,
+    is_curator_project,
+)
 from backend.core.diamond import Diamond
 from backend.core.engine_lease import (
     claim_engine_lease,
@@ -47,16 +54,14 @@ from backend.core.postprocess_store import (
 from backend.core.project_manager import ProjectManager
 from backend.core.resource_manager import ResourceManager
 from backend.core.wp_writer import persist_validated_writeup
-from backend.mcp.mcp_client import MCPClient, MCPRegistryTarget
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
-from backend.platform.ret2shell import (
-    Ret2ShellError,
-    Ret2ShellPreflightError,
-    Ret2ShellRateLimitError,
+from backend.platform.errors import (
+    PlatformError,
+    PlatformPreflightError,
+    PlatformRateLimitError,
 )
 from backend.sandbox.errors import SandboxStartupError
-from backend.sandbox.task_sandbox import member_workdir, task_container_name
 
 _recovery_logger = logging.getLogger(__name__)
 
@@ -130,6 +135,9 @@ class Orchestrator:
         self._legacy_block_counts: dict[tuple[str, str, str], int] = {}
         self._legacy_block_next_log: dict[tuple[str, str, str], float] = {}
         self._legacy_block_emitted_counts: dict[tuple[str, str, str], int] = {}
+        self._pentest_upgrades: dict[str, datetime] = {}
+        self._pentest_state_seq = 0
+        self._curators: dict[str, SugiliteCurator] = {}
         self._throttle_counts: dict[tuple[str, str], int] = {}
         self._throttle_next_log: dict[tuple[str, str], float] = {}
         self._throttle_emitted: dict[tuple[str, str], int] = {}
@@ -145,6 +153,12 @@ class Orchestrator:
     def shutdown(self) -> None:
         self._stop.set()
         self._stop_members()
+        with self._lock:
+            curators = list(getattr(self, "_curators", {}).values())
+            if hasattr(self, "_curators"):
+                self._curators.clear()
+        for curator in curators:
+            curator.close()
         if self._loop_thread and self._loop_thread.is_alive():
             self._loop_thread.join()
 
@@ -161,6 +175,96 @@ class Orchestrator:
             members = [m for proj in self._members.values() for m in proj.values()]
         for m in members:
             m.stop()
+
+    def _curator_sandbox(self, project_id: str, member: str):
+        """Return the task sandbox that owns the job's output files."""
+        try:
+            return self.state.pool.get(project_id, member)
+        except Exception:
+            _recovery_logger.debug("curator sandbox unavailable", exc_info=True)
+            return None
+
+    def _ensure_curator(self, project_id: str) -> SugiliteCurator | None:
+        with self._lock:
+            existing = self._curators.get(project_id)
+        if existing is not None:
+            return existing
+        if not curator_scope(self.state.db, project_id):
+            return None
+        dedicated_seat = is_curator_project(self.state.db, project_id)
+        curator = None
+        try:
+            curator = SugiliteCurator(
+                self.state.db,
+                self.state.logger,
+                self.state.config,
+                project_id,
+                sandbox_provider=self._curator_sandbox,
+            )
+            if dedicated_seat:
+                with self.state.db.connect() as connection:
+                    graph_store.add_agent(
+                        connection, project_id, SUGILITE, CURATOR_ROLE, state="active"
+                    )
+                    connection.execute(
+                        "UPDATE agents SET role=%s,state=%s WHERE project_id=%s AND name=%s",
+                        (CURATOR_ROLE, "active", project_id, SUGILITE),
+                    )
+                    if not graph_store.link_exists(
+                        connection, project_id, "diamond", SUGILITE, "curate"
+                    ):
+                        graph_store.add_link(
+                            connection, project_id, "diamond", SUGILITE, "curate"
+                        )
+        except Exception as exc:
+            _recovery_logger.debug("curator start failed", exc_info=True)
+            if curator is not None:
+                curator.close()
+            self.state.logger.project(
+                "curator_start_failed", project_id, member=SUGILITE,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        with self._lock:
+            raced = self._curators.get(project_id)
+            if raced is not None:
+                curator.close()
+                return raced
+            self._curators[project_id] = curator
+        self.state.logger.project(
+            "curator_started", project_id, member=SUGILITE, role=CURATOR_ROLE,
+            dedicated_seat=dedicated_seat,
+        )
+        return curator
+
+    def _dispose_curator(self, project_id: str, *, state: str = "idle") -> None:
+        with self._lock:
+            curator = self._curators.pop(project_id, None)
+        if curator is not None:
+            curator.close()
+        if is_curator_project(self.state.db, project_id):
+            with suppress(Exception), self.state.db.connect() as connection:
+                graph_store.set_agent_state(connection, project_id, SUGILITE, state)
+
+    def _tick_curators(self, summaries) -> None:
+        """Let each project's Sugilite consume completed background jobs."""
+        with self._lock:
+            curators = list(getattr(self, "_curators", {}).items())
+        active = {summary.id: summary for summary in summaries}
+        for project_id, curator in curators:
+            summary = active.get(project_id)
+            if summary is None or str(summary.status) in {
+                "solved", "completed", "stopped", "failed", "timeout", "infra_error"
+            }:
+                self._dispose_curator(
+                    project_id,
+                    state="done" if summary and str(summary.status) in {"solved", "completed"} else "idle",
+                )
+                continue
+            try:
+                curator.observe()
+            except Exception:
+                _recovery_logger.debug("curator tick failed", exc_info=True)
 
 
     def _category(self, project_id: str) -> str:
@@ -641,6 +745,7 @@ class Orchestrator:
                 return
             self._set_runtime_phase(project_id, "sandbox_preflight")
             self.resources.preflight_project(project_id)
+            self._ensure_curator(project_id)
             self._set_runtime_phase(project_id, "assigning")
             with self._lock:
                 occupied = self._global_active_members_locked() | self._reserved_members
@@ -749,6 +854,7 @@ class Orchestrator:
                 return
             self._set_runtime_phase(project_id, "sandbox_preflight")
             self.resources.preflight_project(project_id)
+            self._ensure_curator(project_id)
             self._set_runtime_phase(project_id, "assigning")
             with self.state.db.connect() as conn:
                 edge_store.expire_workers(
@@ -801,9 +907,6 @@ class Orchestrator:
             },
         )
         if self._competition_project(project_id):
-            # Competition seats are allocated by CompetitionService. A report
-            # must not mint unseated solvers: they would be recorded as active
-            # agents and then blocked by the seat check at launch.
             return
         available_slots = max(
             0,
@@ -1145,6 +1248,9 @@ class Orchestrator:
     ) -> bool:
         if self._stop.is_set():
             return False
+        if member_name == SUGILITE and is_curator_project(self.state.db, project_id):
+            self._log_legacy_block(project_id, member_name, intent_id)
+            return False
         if self._competition_project(project_id):
             seats = self._competition_members(project_id)
             if seats is not None and member_name not in seats:
@@ -1205,7 +1311,6 @@ class Orchestrator:
                 mcps=self.state.mcps,
                 registry=self.state.registry,
                 memory=self.state.memory,
-                container_mcps=self._container_mcps(project_id, member_name),
                 eval_interval=self.state.config.runtime.eval_interval_steps,
                 max_steps=self.state.config.runtime.max_member_steps,
                 max_actions_per_task=self.state.config.runtime.max_member_actions_per_task,
@@ -1213,6 +1318,11 @@ class Orchestrator:
                 on_report=self.handle_report,
                 on_fact=self._broadcast_fact,
                 evidence_dir=self.state.projects_dir / project_id / "evidence",
+                on_state=(
+                    (lambda reason, pid=project_id: self._pentest_refresh_state(pid, reason))
+                    if category == "pentest"
+                    else None
+                ),
                 on_message=self._send_member_message,
                 on_flag=self.on_flag_found,
                 lease_owner=lease_owner,
@@ -1234,6 +1344,7 @@ class Orchestrator:
                 ),
                 runtime=self.state.config.runtime,
                 job_store=job_store,
+                skills=self.state.skills,
             )
             script = self.scripts.get((project_id, member_name)) or self.scripts.get(member_name)
             member = create_member(cfg, deps, script=script)
@@ -1280,49 +1391,6 @@ class Orchestrator:
             self._futures.setdefault(project_id, []).append(future)
             self._task_index[(project_id, intent_id)] = future
         return True
-
-    def _container_mcps(self, project_id: str, member: str) -> dict[str, MCPRegistryTarget]:
-        if self.state.pool.backend != "docker":
-            return {}
-        container = task_container_name(project_id)
-        workdir = member_workdir(member)
-
-        def target(server: str, *, env: dict[str, str] | None = None) -> MCPClient:
-            args = ["exec", "-i"]
-            for key, value in (env or {}).items():
-                args.extend(["-e", f"{key}={value}"])
-            args.extend(
-                [
-                    "-w",
-                    workdir,
-                    container,
-                    "python3",
-                    "-m",
-                    "backend.mcp.mcp_server",
-                    server,
-                ]
-            )
-            return MCPClient.stdio("docker", args, read_timeout=600)
-
-        runtime = self.state.config.runtime
-        browser_env = {
-            "IPC_BROWSER_PROJECT_ID": project_id,
-            "IPC_BROWSER_MEMBER": member,
-            "IPC_BROWSER_WORKDIR": workdir,
-            "IPC_BROWSER_SHARED_DIR": "/workspace/shared",
-            "IPC_BROWSER_ARTIFACT_ROOT": f"{workdir}/browser-artifacts",
-            "IPC_BROWSER_EVENT_LIMIT": str(runtime.browser_event_limit),
-            "IPC_BROWSER_CONSOLE_LIMIT": str(runtime.browser_console_limit),
-            "IPC_BROWSER_ERROR_LIMIT": str(runtime.browser_error_limit),
-            "IPC_BROWSER_RESPONSE_PREVIEW_BYTES": str(runtime.browser_response_preview_bytes),
-            "IPC_BROWSER_ALLOWED_ORIGINS": json.dumps(runtime.browser_allowed_origins),
-            "IPC_BROWSER_ARTIFACT_MAX_BYTES": str(runtime.browser_artifact_max_bytes),
-        }
-        targets = {
-            "browser": target("browser", env=browser_env),
-            "reverse": target("reverse"),
-        }
-        return targets
 
     def _record_member_assignment(
         self, project_id: str, member_name: str, intent_id: str
@@ -1406,11 +1474,6 @@ class Orchestrator:
             _recovery_logger.debug('Error handled in _run_member', exc_info=True)
             self.state.logger.project("member_crash", project_id, member=member.name, error=str(exc))
         finally:
-            # Release the member's resources on the thread that created them.
-            # In particular the competition recon subscriber owns a ZeroMQ
-            # context plus socket; dropping it to the cyclic GC instead lets a
-            # later collection block forever in zmq_ctx_term while the socket
-            # is still open, freezing the whole interpreter.
             with suppress(Exception):
                 member.stop()
             with self._lock:
@@ -1442,6 +1505,7 @@ class Orchestrator:
     def stop_project(self, project_id: str) -> None:
         self._remove_queued_project(project_id)
         self._clear_project_member_retries(project_id)
+        self._dispose_curator(project_id)
         with self._lock:
             members = list(self._members.get(project_id, {}).values())
         for m in members:
@@ -1554,7 +1618,13 @@ class Orchestrator:
     def _dispatch_platform_verdict(self, project_id: str) -> bool:
         with self.state.db.connect() as connection:
             project = graph_store.get_project_row(connection, project_id)
-        if not project or project["platform"] != "ret2shell" or getattr(self.state, "ret2shell_client", None) is None:
+        platform = str(project["platform"] or "").strip() if project else ""
+        client = (
+            getattr(self.state, "platform_clients", {}).get(platform)
+            if platform
+            else None
+        )
+        if not project or client is None:
             with self._lock:
                 already_logged = project_id in self._verdict_deferred_logged
                 self._verdict_deferred_logged.add(project_id)
@@ -1562,7 +1632,11 @@ class Orchestrator:
                 self.state.logger.project(
                     "platform_verdict_deferred",
                     project_id,
-                    reason="platform verdict adapter or credentials are not configured",
+                    reason=(
+                        f"platform verdict client is not configured for {platform!r}"
+                        if platform
+                        else "project is not linked to a platform"
+                    ),
                 )
             return False
         with self._lock:
@@ -1592,46 +1666,62 @@ class Orchestrator:
                 self._completing.discard(project_id)
 
     def _judge_pending_submissions(self, project_id: str) -> None:
-        client = self.state.ret2shell_client
         while not self._stop.is_set():
+            submission = None
             with self.state.db.connect() as conn:
-                conn.execute(
-                    "UPDATE flag_submissions SET status = 'unknown' "
-                    "WHERE project_id = %s AND status = 'judging'",
-                    (project_id,),
-                )
-                if conn.execute(
-                    "SELECT 1 FROM flag_submissions WHERE project_id=%s AND status='unknown' LIMIT 1",
-                    (project_id,),
-                ).fetchone():
-                    self.state.logger.project("platform_verdict_needs_reconciliation", project_id)
-                    return
-                submission = conn.execute(
-                    """
-                    UPDATE flag_submissions SET status = 'judging'
-                    WHERE id = (
-                        SELECT id FROM flag_submissions
-                        WHERE project_id = %s AND status = 'pending'
-                        ORDER BY id LIMIT 1
-                    )
-                    RETURNING id, normalized_flag
-                    """,
-                    (project_id,),
-                ).fetchone()
                 row = graph_store.get_project_row(conn, project_id)
+                platform = str(row["platform"] or "").strip() if row else ""
+                client = (
+                    getattr(self.state, "platform_clients", {}).get(platform)
+                    if platform
+                    else None
+                )
+                if client is not None:
+                    conn.execute(
+                        "UPDATE flag_submissions SET status = 'unknown' "
+                        "WHERE project_id = %s AND status = 'judging'",
+                        (project_id,),
+                    )
+                    if conn.execute(
+                        "SELECT 1 FROM flag_submissions WHERE project_id=%s AND status='unknown' LIMIT 1",
+                        (project_id,),
+                    ).fetchone():
+                        self.state.logger.project(
+                            "platform_verdict_needs_reconciliation", project_id
+                        )
+                        return
+                    submission = conn.execute(
+                        """
+                        UPDATE flag_submissions SET status = 'judging'
+                        WHERE id = (
+                            SELECT id FROM flag_submissions
+                            WHERE project_id = %s AND status = 'pending'
+                            ORDER BY id LIMIT 1
+                        )
+                        RETURNING id, normalized_flag
+                        """,
+                        (project_id,),
+                    ).fetchone()
+            if client is None:
+                self.state.logger.project(
+                    "platform_verdict_deferred",
+                    project_id,
+                    reason=f"platform verdict client is not configured for {platform!r}",
+                )
+                return
             if submission is None:
                 self._resume_after_verdict(project_id, reason="no pending flag submissions")
                 return
             external_id = str(row["external_id"] or "") if row else ""
             verdict, detail = self._submit_to_platform(
-                client, external_id, submission["normalized_flag"]
+                client, external_id, submission["normalized_flag"], platform
             )
             if verdict == "correct":
                 self._verdict_unknown_attempts.pop(project_id, None)
                 self._commit_solved(
                     project_id,
                     submission["normalized_flag"],
-                    source="platform:ret2shell",
+                    source=f"platform:{platform}",
                 )
                 return
             if verdict == "wrong":
@@ -1663,7 +1753,9 @@ class Orchestrator:
                 )
             return
 
-    def _submit_to_platform(self, client, external_id: str, flag: str) -> tuple[str, str]:
+    def _submit_to_platform(
+        self, client, external_id: str, flag: str, platform: str
+    ) -> tuple[str, str]:
         """Ask the platform judge about one candidate.
 
         Returns ``(verdict, detail)`` where verdict is ``correct``, ``wrong``
@@ -1673,16 +1765,19 @@ class Orchestrator:
         try:
             challenge_id = int(external_id)
         except (TypeError, ValueError):
-            return "unknown", f"external_id {external_id!r} is not a ret2shell challenge id"
+            return (
+                "unknown",
+                f"external_id {external_id!r} is not a {platform} challenge id",
+            )
         try:
             submission = client.submit_flag(challenge_id, flag)
-        except Ret2ShellPreflightError as exc:
+        except PlatformPreflightError as exc:
             if "already solved" in str(exc):
                 return "unknown", "platform already solved externally; candidate remains unverified"
             return "unknown", f"submit preflight failed: {exc}"
-        except Ret2ShellRateLimitError as exc:
+        except PlatformRateLimitError as exc:
             return "unknown", str(exc)
-        except Ret2ShellError as exc:
+        except PlatformError as exc:
             return "unknown", f"platform submit failed: {exc}"
         except Exception as exc:
             _recovery_logger.debug('Error handled in _submit_to_platform', exc_info=True)
@@ -1753,6 +1848,9 @@ class Orchestrator:
                     connection,
                     self.state.instance_id,
                     lease_seconds=self._POSTPROCESS_LEASE_SECONDS,
+                    writeups_enabled=bool(
+                        getattr(self.state.config, "wp_enabled", True)
+                    ),
                 )
             if job is None:
                 return
@@ -2002,8 +2100,35 @@ class Orchestrator:
             competition_projects, competition_terminal_projects = (
                 self._competition_project_ownership(conn)
             )
+        self._tick_curators(summaries)
         self._initialize_reason_checkpoints(summaries)
+        pentest_mode = self._pentest_mode()
+        platform_linked: set[str] = set()
+        if pentest_mode:
+            pentest_ids = [s.id for s in summaries if s.category == "pentest"]
+            if pentest_ids:
+                with self.state.db.connect() as conn:
+                    try:
+                        platform_linked = {
+                            row["project_id"]
+                            for row in conn.execute(
+                                "SELECT DISTINCT project_id FROM competition_challenges "
+                                "WHERE project_id = ANY(%s)",
+                                (pentest_ids,),
+                            ).fetchall()
+                        }
+                    except (UndefinedTable, UndefinedColumn):
+                        _recovery_logger.debug("competition linkage read degraded", exc_info=True)
         for summary in summaries:
+            if self._is_parked(summary):
+                continue
+            if (
+                pentest_mode
+                and summary.category == "pentest"
+                and summary.id not in competition_projects
+                and summary.id not in platform_linked
+            ):
+                continue
             if summary.status == "completed":
                 with self._lock:
                     needs_cleanup = summary.runtime_phase != "completed" or summary.id in self._project_leases or any(not member._stop.is_set() for member in self._members.get(summary.id, {}).values())
@@ -2052,6 +2177,342 @@ class Orchestrator:
                     exc,
                     event="project_dispatch_failed",
                 )
+        if pentest_mode:
+            try:
+                self._tick_pentest(summaries)
+            except Exception as exc:
+                _recovery_logger.debug("Error handled in _tick_pentest", exc_info=True)
+                self.state.logger.project("scheduler_error", "system", error=str(exc))
+
+
+    def _pentest_mode(self) -> bool:
+        return bool(self.state.config.runtime.diamond_pentest_mode)
+
+    @staticmethod
+    def _is_parked(summary) -> bool:
+        return str(getattr(summary, "runtime_phase", "") or "") == "parked"
+
+    def _pentest_ladder(self):
+        runtime = self.state.config.runtime
+        return (
+            (runtime.ladder_help_minutes, "help"),
+            (runtime.ladder_upgrade_minutes, "upgrade"),
+            (runtime.ladder_park_minutes, "park"),
+        )
+
+    def _build_pentest_board(self, summaries):
+        """One read of everything the Pentest scheduler needs this tick."""
+
+        from backend.pentest.diamond_policy import (
+            Board,
+            Caps,
+            ProjectCard,
+            Seat,
+            coerce_datetime,
+        )
+
+        now = datetime.now(timezone.utc)
+        runtime = self.state.config.runtime
+        pentest = [s for s in summaries if s.category == "pentest"]
+        caps = Caps(
+            remote_instances=int(self.state.config.limits.max_concurrent_tasks),
+            seats=len(self.diamond.available_member_configs()),
+            per_project=max(1, min(2, runtime.max_members_per_report)),
+            instances_in_use=len(self.state.pool.active_projects()),
+            seats_in_use=0,
+        )
+        if not pentest:
+            return Board(now=now, caps=caps)
+
+        competition_owned: set[str] = set()
+        with self.state.db.connect() as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT project_id FROM competition_challenges "
+                    "WHERE project_id = ANY(%s)",
+                    ([summary.id for summary in pentest],),
+                ).fetchall()
+                competition_owned = {row["project_id"] for row in rows}
+            except (UndefinedTable, UndefinedColumn):
+                _recovery_logger.debug("competition linkage read degraded", exc_info=True)
+        ids = [summary.id for summary in pentest if summary.id not in competition_owned]
+        seats: dict[str, list] = {}
+        facts: dict[str, tuple] = {}
+        findings: dict[str, int] = {}
+        with self.state.db.connect() as conn:
+            try:
+                for row in conn.execute(
+                    """SELECT a.project_id, a.name, i.created_at AS started_at, i.description AS angle
+                         FROM agents a
+                         LEFT JOIN LATERAL (
+                             SELECT created_at, description FROM intents
+                              WHERE project_id = a.project_id AND worker = a.name
+                                AND concluded_at IS NULL AND to_fact_id IS NULL
+                              ORDER BY created_at DESC LIMIT 1
+                         ) i ON TRUE
+                        WHERE a.role = %s AND a.state = %s AND a.project_id = ANY(%s)
+                        ORDER BY a.project_id, a.name""",
+                    ("member", "active", ids),
+                ).fetchall():
+                    seats.setdefault(row["project_id"], []).append(
+                        Seat(
+                            member=row["name"],
+                            angle=str(row["angle"] or "")[:200],
+                            started_at=row["started_at"],
+                        )
+                    )
+                for row in conn.execute(
+                    "SELECT project_id, max(created_at) AS last_at, count(*) AS total FROM facts "
+                    "WHERE project_id = ANY(%s) GROUP BY project_id",
+                    (ids,),
+                ).fetchall():
+                    facts[row["project_id"]] = (row["last_at"], int(row["total"] or 0))
+                for row in conn.execute(
+                    "SELECT project_id, count(*) AS total FROM pentest_records "
+                    "WHERE kind = %s AND state = %s AND project_id = ANY(%s) GROUP BY project_id",
+                    ("finding", "pending", ids),
+                ).fetchall():
+                    findings[row["project_id"]] = int(row["total"] or 0)
+            except (UndefinedTable, UndefinedColumn):
+                _recovery_logger.debug("pentest board read degraded", exc_info=True)
+
+        active_members = sum(len(value) for value in seats.values())
+        cards = []
+        queue = []
+        for summary in pentest:
+            last_fact_at, fact_total = facts.get(summary.id, (None, 0))
+            card = ProjectCard(
+                id=summary.id,
+                title=summary.title,
+                difficulty=str(getattr(summary, "difficulty", "") or ""),
+                status=summary.status,
+                category=summary.category,
+                seats=tuple(seats.get(summary.id, ())),
+                created_at=coerce_datetime(getattr(summary, "created_at", None)),
+                last_fact_at=coerce_datetime(last_fact_at),
+                last_flag_at=coerce_datetime(getattr(summary, "flag_verified_at", None)),
+                last_upgrade_at=coerce_datetime(self._pentest_upgrades.get(summary.id)),
+                parked_at=(
+                    coerce_datetime(summary.updated_at)
+                    if str(summary.runtime_phase or "") == "parked"
+                    else None
+                ),
+                parked_reason=str(summary.runtime_error or "") if self._is_parked(summary) else "",
+                facts_since_assign=fact_total,
+                pending_findings=findings.get(summary.id, 0),
+                unverified_findings=findings.get(summary.id, 0),
+            )
+            cards.append(card)
+            if card.parked_at is None and card.status in ("created", "stopped") and card.seats == ():
+                queue.append(card)
+        return Board(
+            now=now,
+            caps=Caps(
+                remote_instances=caps.remote_instances,
+                seats=caps.seats,
+                per_project=caps.per_project,
+                instances_in_use=caps.instances_in_use,
+                seats_in_use=active_members,
+            ),
+            projects=tuple(cards),
+            queue=tuple(queue),
+        )
+
+    def _tick_pentest(self, summaries) -> None:
+        from backend.pentest import diamond_actions
+
+        board = self._build_pentest_board(summaries)
+        if not board.projects:
+            return
+        actions = self.diamond.tick_pentest(board, ladder=self._pentest_ladder())
+        self._write_pentest_state(board, actions)
+        if not actions:
+            return
+        results = diamond_actions.apply(actions, self._pentest_hooks())
+        self.state.logger.project(
+            "diamond_pentest_applied",
+            "system",
+            **diamond_actions.summarize(results),
+        )
+
+    def _write_pentest_state(self, board, actions=(), *, force: bool = False) -> list[str]:
+        """T2: refresh each project's STATE document when the board changed.
+
+        Read-only by construction: it renders the board and writes a file, and
+        never feeds anything back into scheduling.
+        """
+
+        from backend.pentest import state_doc
+
+        if not board.projects:
+            return []
+        self._pentest_state_seq += 1
+        steps = state_doc.describe_actions(actions) if actions else []
+        written: list[str] = []
+        for card in board.projects:
+            try:
+                path = state_doc.maybe_write(
+                    self.state,
+                    card.id,
+                    board,
+                    seq=self._pentest_state_seq,
+                    next_steps=steps,
+                    force=force,
+                )
+            except Exception:
+                _recovery_logger.debug("state write failed", exc_info=True)
+                continue
+            if path is not None:
+                written.append(str(path))
+        if written:
+            self.state.logger.project(
+                "diamond_pentest_state",
+                "system",
+                written=len(written),
+                seq=self._pentest_state_seq,
+                forced=force,
+            )
+        return written
+
+    def _pentest_refresh_state(self, project_id: str, reason: str) -> None:
+        """Called from a Member when its context ratio crosses the T2 threshold."""
+
+        with self.state.db.connect() as conn:
+            summaries = graph_store.project_summaries(conn)
+        board = self._build_pentest_board(summaries)
+        self._write_pentest_state(board, force=True)
+        self.state.logger.project(
+            "diamond_pentest_state_refresh", project_id, reason=str(reason)[:80]
+        )
+
+    def _pentest_hooks(self):
+        from backend.pentest.diamond_actions import PentestHooks
+
+        return PentestHooks(
+            spawn=self._pentest_spawn,
+            help=self._pentest_help,
+            upgrade=self._pentest_upgrade,
+            park=self._park_pentest_project,
+            reopen=self._pentest_reopen,
+            verify=self._pentest_verify,
+            close=self._pentest_close,
+            log=self._pentest_log,
+        )
+
+    def _pentest_log(self, event: str, project_id: str, fields: dict) -> None:
+        self.state.logger.project(event, project_id, **fields)
+
+    def _pentest_create_intent(self, project_id: str, direction: str):
+        """Add one Diamond intent so the next dispatch has real work to hand out."""
+
+        with self.state.db.connect() as conn:
+            existing = edge_store.find_similar_open_intent(conn, project_id, ["origin"], direction)
+            if existing is not None:
+                return existing
+            return edge_store.create_intent(conn, project_id, ["origin"], direction, "diamond")
+
+    def _pentest_spawn(self, project_id: str) -> bool:
+        if not self._ensure_project_lease(project_id):
+            return False
+        if not self._acquire_task(project_id):
+            self._queue_project(project_id)
+            return False
+        self._dispatch_project(project_id)
+        self._set_runtime_phase(project_id, "ready")
+        return True
+
+    def _pentest_help(self, project_id: str, angle: str) -> bool:
+        direction = (
+            f"追加席位，换一个未覆盖的攻击面：{angle}。"
+            "先读 pentest_board 已有证据，再独立复现一条可验证的路径；不要重复既有 work。"
+        )
+        intent = self._pentest_create_intent(project_id, direction)
+        if intent is None:
+            return False
+        self.state.logger.project("diamond_pentest_help", project_id, intent=intent.id, angle=angle)
+        return self._pentest_spawn(project_id)
+
+    def _pentest_upgrade(self, project_id: str, member: str, angle: str) -> bool:
+        """Replace the weakest seat with a fresh escalation attempt."""
+
+        if member:
+            self.stop_member(member)
+        self._pentest_upgrades[project_id] = datetime.now(timezone.utc)
+        direction = (
+            "升级：既有席位在该方向上长时间没有新证据。"
+            f"改走 {angle} 方向，并优先使用更强模型档做深入验证。"
+        )
+        intent = self._pentest_create_intent(project_id, direction)
+        if intent is None:
+            return False
+        self.state.logger.project(
+            "diamond_pentest_upgrade", project_id, replaced=member, intent=intent.id, angle=angle
+        )
+        return self._pentest_spawn(project_id)
+
+    def _pentest_verify(self, project_id: str) -> bool:
+        direction = (
+            "复核：为每条 pending finding 调用 pentest_verify_finding，附上独立复现的 evidence_id。"
+            "无法独立复现的结论必须标为 rejected 或 inconclusive。"
+        )
+        intent = self._pentest_create_intent(project_id, direction)
+        if intent is None:
+            return False
+        return self._pentest_spawn(project_id)
+
+    def _park_pentest_project(self, project_id: str, reason: str) -> bool:
+        """Release seats, instance and leases while keeping the project resumable."""
+
+        with self._lock:
+            members = list(self._members.get(project_id, {}).values())
+        for member in members:
+            member.stop()
+        self._release_owned_intent_leases(project_id)
+        with self.state.db.connect() as conn:
+            conn.execute(
+                "UPDATE agents SET state = %s WHERE project_id = %s AND role = %s",
+                ("idle", project_id, "member"),
+            )
+            conn.execute(
+                "UPDATE intents SET worker = NULL, lease_owner = NULL, lease_token = NULL, "
+                "lease_expires_at = NULL, last_heartbeat_at = NULL "
+                "WHERE project_id = %s AND concluded_at IS NULL",
+                (project_id,),
+            )
+        with suppress(Exception):
+            self.resources.release_project(project_id)
+        with suppress(Exception):
+            self.projects.teardown(project_id)
+        with suppress(Exception):
+            self.state.pool.stop_project(project_id)
+        self._release_project_lease(project_id)
+        self._set_runtime_phase(project_id, "parked", error=reason[:200])
+        self.state.logger.project("diamond_park", project_id, reason=reason)
+        return True
+
+    def _pentest_reopen(self, project_id: str) -> bool:
+        self._pentest_upgrades.pop(project_id, None)
+        self._set_runtime_phase(project_id, "queued", error=None)
+        self.state.logger.project("diamond_reopen", project_id, reason="new-intel")
+        self._queue_project(project_id)
+        return True
+
+    def _pentest_close(self, project_id: str) -> bool:
+        """Close a finished project, but never with an unsubmitted candidate flag."""
+
+        with self.state.db.connect() as conn:
+            pending = conn.execute(
+                "SELECT count(*) AS total FROM flag_submissions "
+                "WHERE project_id = %s AND status NOT IN (%s, %s)",
+                (project_id, "rejected", "invalid"),
+            ).fetchone()
+        if pending is not None and int(pending["total"] or 0) > 0:
+            self.state.logger.project(
+                "diamond_close_blocked", project_id, reason="unsubmitted-candidate-flag"
+            )
+            return False
+        self.stop_project(project_id)
+        return True
 
     def _schedule_running_recovery(self, project_id: str) -> None:
         with self._lock:
@@ -2101,6 +2562,7 @@ class Orchestrator:
                 )
             self._set_runtime_phase(project_id, "recovering_preflight")
             self.resources.preflight_project(project_id)
+            self._ensure_curator(project_id)
             self._set_runtime_phase(project_id, "recovering_dispatch")
             self._dispatch_project(project_id)
             self._set_runtime_phase(project_id, "ready")
@@ -2367,6 +2829,8 @@ class Orchestrator:
             member.name for member in self.state.config.available_members()
             if member.name not in active and member.name not in globally_occupied
         ]
+        if is_curator_project(self.state.db, project_id):
+            idle = [name for name in idle if name != SUGILITE]
         if allowed is not None:
             idle = [name for name in idle if name in allowed]
         if not idle:

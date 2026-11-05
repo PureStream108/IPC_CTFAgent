@@ -6,6 +6,12 @@ tools:
     exec: binwalk
     tags: [forensics, extraction, misc]
     when_to_use: Carve embedded files from blobs/firmware/images.
+  - name: foremost
+    description: File carving by header/footer signatures.
+    path: system
+    exec: foremost
+    tags: [forensics, carving, recovery, misc]
+    when_to_use: Recover files from disk images or blobs when binwalk signatures miss or when you need a clean output directory per file type.
   - name: steghide
     description: Hide/extract data in JPEG/BMP/WAV.
     path: system
@@ -24,12 +30,6 @@ tools:
     exec: exiftool
     tags: [metadata, forensics, misc]
     when_to_use: Inspect EXIF/metadata for hidden info.
-  - name: blindwatermark
-    description: Blind watermark embed/extract for images.
-    path: tools/BlindWaterMark
-    exec: python bwmforpy3.py
-    tags: [watermark, image, stego, misc]
-    when_to_use: Frequency-domain image watermark recovery.
   - name: volatility3
     description: Memory forensics framework.
     path: system
@@ -38,7 +38,13 @@ tools:
     when_to_use: Analyze RAM dumps for processes, secrets, artifacts.
   - name: ysoserial
     description: Generate Java deserialization gadget payloads.
-    path: tools/ysoserial-master
-    exec: java -jar ysoserial.jar
+    path: /workspace/tools/ysoserial-master
+    exec: java -jar /workspace/tools/ysoserial-master/ysoserial.jar
     tags: [java, deserialization, gadget, misc]
     when_to_use: Build Java deser payloads (also useful for web/pwn).
+  - name: tshark
+    description: Wireshark CLI for packet capture analysis and live capture; tcpdump is installed as a lightweight alternative.
+    path: system
+    exec: tshark
+    tags: [pcap, network, tshark, tcpdump, forensics, misc]
+    when_to_use: Read a provided pcap, filter conversations, extract HTTP/DNS/TLS metadata, or capture localhost traffic with tcpdump first.

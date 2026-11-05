@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 
+from backend.blackboard import graph_store
 from backend.core.config import MEMBER_NAMES
 from backend.core.orchestrator import Orchestrator
 from backend.server.app import create_app
@@ -50,6 +51,18 @@ async def lifespan(application):
 
 
 app.router.lifespan_context = lifespan
+
+
+@app.post("/e2e/projects/{project_id}/wp")
+def write_project_wp(project_id: str, body: dict):
+    """Test-only fixture: publish a complete writeup snapshot for UI E2E."""
+    state = app.state.ipc
+    path = state.wp_dir / f"{project_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(body.get("content", "")), encoding="utf-8")
+    with state.db.connect() as connection:
+        graph_store.set_wp_path(connection, project_id, str(path))
+    return {"project_id": project_id, "wp_path": str(path)}
 
 
 @app.get("/e2e/runs/{run_id}/evidence")

@@ -8,7 +8,9 @@ import requests
 
 from backend.platform.adapter import HttpJsonAdapter, PlatformAdapter
 from backend.platform.gzctf import GZCTFAdapter, GZCTFClient
+from backend.platform.ichunqiu import IchunqiuAdapter, IchunqiuClient
 from backend.platform.mapping import FieldMapping
+from backend.platform.nestctf import NestctfAdapter, NestctfClient
 from backend.platform.ret2shell import Ret2ShellAdapter, Ret2ShellClient
 from backend.platform.tsecbench import TSECBenchAdapter, TSECBenchClient
 
@@ -29,7 +31,17 @@ def build_adapter(
 
     if mapping.platform == "ret2shell":
         return Ret2ShellAdapter(
-            Ret2ShellClient(base_url=base_url or "", game_id=mapping.game_id),
+            Ret2ShellClient(
+                base_url=base_url or mapping.list_url,
+                game_id=mapping.game_id,
+                username=credentials.get("ret2shell_username", ""),
+                password=credentials.get("ret2shell_password", ""),
+                token=(
+                    credentials.get("ret2shell_token")
+                    or credentials.get("platform_token")
+                    or ""
+                ),
+            ),
             game_id=mapping.game_id,
             category_map=mapping.category_map,
             max_attachment_bytes=max_attachment_bytes,
@@ -49,6 +61,46 @@ def build_adapter(
             max_attachment_bytes=max_attachment_bytes,
             competition_id=competition_id,
             team_id=team_id,
+        )
+    if mapping.platform == "ichunqiu":
+        return IchunqiuAdapter(
+            IchunqiuClient(
+                base_url=base_url or mapping.list_url,
+                url_key=competition_id,
+                token=(
+                    credentials.get("ichunqiu_token")
+                    or credentials.get("platform_token")
+                    or ""
+                ),
+            ),
+            mapping,
+            max_attachment_bytes=max_attachment_bytes,
+        )
+    if mapping.platform == "nestctf":
+        race_id = str(competition_id or "").strip()
+        if not race_id:
+            raise ValueError("a nestctf workflow needs its race id in competition_id")
+        headers = dict(mapping.headers or {})
+        cookie = str(credentials.get("nestctf_cookie") or "").strip()
+        if cookie:
+            # The handout host is behind its own nginx gate; a browser cookie is
+            # the only credential the participant console itself uses there.
+            headers["Cookie"] = cookie
+        if headers:
+            mapping = mapping.model_copy(update={"headers": headers})
+        return NestctfAdapter(
+            NestctfClient(
+                base_url=(base_url or mapping.list_url).rstrip("/"),
+                race_id=race_id,
+                token=(
+                    credentials.get("nestctf_token")
+                    or credentials.get("platform_token")
+                    or ""
+                ),
+                request_get=request_get,
+            ),
+            mapping,
+            max_attachment_bytes=max_attachment_bytes,
         )
     if mapping.platform == "gzctf":
         resolved_base_url = base_url or ""

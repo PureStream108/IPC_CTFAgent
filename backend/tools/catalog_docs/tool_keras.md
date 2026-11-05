@@ -9,24 +9,24 @@ Load .h5/SavedModel, extract embedded data, inference attacks.
 ## 版本检查
 
 ```bash
-python3 --version
+KERAS_BACKEND=torch python3 -c "import keras; print(keras.__version__)"
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`python3`
-- 镜像路径：`system`
+- 常用入口：`KERAS_BACKEND=torch python3`
+- 镜像路径：Python site-packages（Keras 3 + CPU PyTorch 后端）
 
 ## 常用工作流
 
 1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `python3` 进行最小化探测。
+2. 设置 `KERAS_BACKEND=torch` 后导入 Keras，加载 .h5/.keras 模型并检查层与权重。
 3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
 
 ## 可执行示例
 
 ```bash
-python3 -c "import sys; print(sys.version)"
+KERAS_BACKEND=torch python3 -c "import keras; print(keras.__version__)"
 ```
 
 ## 输出解释

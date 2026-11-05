@@ -1,73 +1,87 @@
 category: web
 tools:
-  - name: browser
-    description: Stateful Playwright browser MCP with rendering, structured interaction, bounded diagnostics, uploads, downloads, and artifact-backed screenshots.
-    path: task-container
-    exec: mcp:browser
-    tags: [browser, playwright, javascript, web]
-    when_to_use: Render JavaScript applications, wait for asynchronous UI state, inspect redacted network/console errors, interact with forms, transfer files, or preserve a login session across requests. Prefer structured browser tools over eval_js.
+  - name: playwright-cli
+    description: Headless Chromium automation through @playwright/cli, with snapshots, screenshots, form interaction, and isolated named sessions.
+    path: tools/playwright-cli
+    exec: playwright-cli
+    tags: [browser, playwright, javascript, web, screenshot]
+    when_to_use: Use when a page needs a real browser, JavaScript execution, or a visual snapshot. Name a session per project/member, keep it short-lived, and run "playwright-cli -s=<project>-<member> close" when finished.
   - name: sqlmap
     description: Automatic SQL injection detection and database takeover tool.
     path: tools/sqlmap/sqlmapproject-sqlmap-03be590
     exec: python sqlmap.py
     tags: [sqli, injection, database, web]
     when_to_use: Login bypass, data exfiltration, or any parameter suspected of SQL injection.
-  - name: dirsearch
-    description: Web path/directory brute-force scanner.
-    path: tools/dirsearch/dirsearch
-    exec: python dirsearch.py
-    tags: [recon, fuzzing, directory, web]
-    when_to_use: Discover hidden endpoints, backup files, admin panels.
   - name: commix
     description: Automated command injection exploitation tool.
     path: tools/commix
     exec: python commix.py
     tags: [command-injection, rce, web]
     when_to_use: Parameter reflected into a shell command; OS command injection.
-  - name: fenjing
-    description: Jinja2/Flask SSTI automatic exploitation (中文 SSTI 工具).
-    path: tools/Fenjing
-    exec: python -m fenjing
-    tags: [ssti, jinja2, flask, template-injection, web]
-    when_to_use: Server-side template injection in Flask/Jinja2.
-  - name: typhonbreaker
-    description: Python pyjail/sandbox payload generator for restricted builtins, blacklist, and object-graph pivots.
-    path: ""
-    exec: python3 -c "from Typhon import bypassREAD, bypassRCE; print('Use bypassREAD/bypassRCE to generate payloads, then POST/GET them yourself')"
-    tags: [python, pyjail, sandbox, jail, blacklist, flask, web]
-    when_to_use: >
-      Python exec/eval sandbox, pyjail, or restricted-builtins challenge where
-      manual subclass traversal would be slow. Headless use is via Python API:
-      `from Typhon import bypassREAD, bypassRCE`; call bypassREAD(...)/bypassRCE(...)
-      with local_scope and banned_chr to generate payloads, then POST/GET the chosen
-      payload to the target endpoint yourself with curl/requests. 
   - name: flask-pin
-    description: Generate Werkzeug debugger PIN / forge Flask session from leaked data.
+    description: Generate a Werkzeug debugger PIN or forge a Flask session from leaked machine data.
     path: tools/Flask-cookie-generation-based-on-PIN-code-main
     exec: python get_flask_pin_and_cookie.py
     tags: [flask, werkzeug, pin, session, web]
-    when_to_use: Werkzeug console PIN bypass when machine-id and modules leak.
-  - name: flask-session-cookie
-    description: Decode and forge Flask session cookies given the secret key.
-    path: tools/flask-session-cookie/flask-session-cookie-manager-master
-    exec: python flask_session_cookie_manager3.py
-    tags: [flask, session, cookie, web]
-    when_to_use: Secret key known/guessed; tamper Flask session contents.
-  - name: php-filter-chain
-    description: Generate PHP filter chains to turn LFI into RCE/data leak.
-    path: tools/Php_chain/php_filter_chain_generator
-    exec: python php_filter_chain_generator.py
-    tags: [php, lfi, filter-chain, web]
-    when_to_use: php://filter LFI where you need arbitrary content/RCE.
-  - name: shiro550
-    description: Apache Shiro 550 deserialization RCE exploitation (GUI jar + helper).
-    path: tools/shiro550
-    exec: java -jar shiro_attack-5.1.1-zulu-8-jfx.jar
-    tags: [java, shiro, deserialization, rce, web]
-    when_to_use: rememberMe cookie present; Shiro deserialization with known/brute key.
-  - name: jndimap
-    description: JNDI injection exploit server (Log4Shell / JNDI).
-    path: tools/JNDIMap/JNDIMap-main
-    exec: java -jar JNDIMap.jar
-    tags: [java, jndi, log4j, log4shell, rce, web]
-    when_to_use: Log4j / JNDI lookup injection (${jndi:ldap://...}).
+    when_to_use: Werkzeug console PIN bypass when machine-id and module paths leak.
+
+  - name: whatweb
+    description: Identify web technologies, CMS, frameworks and server banners on a target.
+    path: /usr/bin/whatweb
+    exec: whatweb
+    tags: [recon, fingerprint, web, cms]
+    when_to_use: First step against an unknown web target to fingerprint the stack before choosing an exploit class. Stay on authorized hosts and keep --max-threads low.
+  - name: wafw00f
+    description: Detect and identify the web application firewall protecting a target.
+    path: /usr/local/bin/wafw00f
+    exec: wafw00f
+    tags: [recon, waf, web, fingerprint]
+    when_to_use: Ask whether a WAF explains blocked payloads before changing an exploit. A negative result is weak evidence, not proof that no WAF exists.
+  - name: nikto
+    description: Web server and CGI misconfiguration scanner with a broad signature database.
+    path: /usr/bin/nikto
+    exec: nikto
+    tags: [web, scanner, misconfiguration, cve]
+    when_to_use: Enumerate known server-level issues after fingerprinting. It is noisy and slow, so cap it with -maxtime and keep it scoped to the authorized host.
+  - name: nuclei
+    description: Template-driven vulnerability scanner for known CVEs and misconfigurations.
+    path: /usr/local/bin/nuclei
+    exec: nuclei
+    tags: [web, scanner, cve, templates]
+    when_to_use: Run targeted templates (-tags cve, or -t /root/nuclei-templates/http/cves) once a technology and version are known. The template tree is baked into the image at /root/nuclei-templates; never rely on a runtime download.
+  - name: ffuf
+    description: Fast web fuzzer for directories, parameters, vhosts and headers.
+    path: /usr/local/bin/ffuf
+    exec: ffuf
+    tags: [web, fuzzing, directory, brute-force]
+    when_to_use: Content and parameter discovery with an explicit wordlist from /workspace/wordlists. Set -rate and -t explicitly; an unthrottled run can knock over a fragile challenge service.
+  - name: feroxbuster
+    description: Recursive content discovery scanner with automatic link extraction.
+    path: /usr/local/bin/feroxbuster
+    exec: feroxbuster
+    tags: [web, fuzzing, directory, recursive]
+    when_to_use: Recursive directory discovery when the site links to itself. Prefer --no-recursion with -t 10 when the target is fragile or rate limited.
+  - name: gobuster
+    description: Directory, DNS and vhost brute-forcer written in Go.
+    path: /usr/local/bin/gobuster
+    exec: gobuster
+    tags: [web, fuzzing, directory, dns, vhost]
+    when_to_use: Directory or vhost discovery; use dns mode only against a domain inside the authorized scope. Always pass -t to bound concurrency.
+  - name: dirb
+    description: Classic recursive web content scanner with built-in wordlists.
+    path: /usr/bin/dirb
+    exec: dirb
+    tags: [web, fuzzing, directory]
+    when_to_use: Fast first pass when ffuf/feroxbuster need a wordlist you do not have. Its default wordlists are small, so treat an empty result as inconclusive.
+  - name: wfuzz
+    description: Generic HTTP fuzzer for payloads, parameter names and response filtering.
+    path: /usr/local/bin/wfuzz
+    exec: wfuzz
+    tags: [web, fuzzing, payload, filter]
+    when_to_use: When ffuf cannot express the filter or payload (complex --hs/--hc logic, nested iterators). Bound it with --reqdelay and a small payload set.
+  - name: sslscan
+    description: Query TLS services for protocol versions, cipher suites and certificate details.
+    path: /usr/bin/sslscan
+    exec: sslscan
+    tags: [tls, ssl, crypto, recon, web]
+    when_to_use: Verify weak TLS configuration or extract certificate names for vhost discovery. It is read-only and safe to run against an authorized endpoint.

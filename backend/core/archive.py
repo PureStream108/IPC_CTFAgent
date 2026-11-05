@@ -8,6 +8,7 @@ from typing import Any
 
 from backend.blackboard import graph_store
 from backend.core.logging_util import IPCLogger
+from backend.core.project_cache import invalidate_project
 from backend.core.wp_writer import validate_writeup
 from backend.filename_util import safe_stem
 
@@ -62,6 +63,7 @@ def archive_completed_project(
     with state.export_lock:
         existing = _read_manifest(manifest_path)
         if existing is not None:
+            invalidate_project(project_id)
             return existing
 
         state.wp_export_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +89,7 @@ def archive_completed_project(
             with wp_target.open("x", encoding="utf-8") as handle:
                 handle.write(wp_path.read_text(encoding="utf-8"))
             created.append(wp_target)
+            log_counts = {}
             for kind, folder in folders.items():
                 target = folder / log_filename
                 with target.open("x", encoding="utf-8") as handle:
@@ -94,6 +97,7 @@ def archive_completed_project(
                         IPCLogger.jsonl_text(state.logger.read_log(kind, project_id, None))
                     )
                 created.append(target)
+                log_counts[kind] = state.logger.count_file(target)
 
             manifest = {
                 "version": _ARCHIVE_VERSION,
@@ -105,10 +109,12 @@ def archive_completed_project(
                 "archived_at": datetime.now(UTC).isoformat(),
                 "wp_filename": wp_filename,
                 "log_filename": log_filename,
+                "log_counts": log_counts,
             }
             with manifest_path.open("x", encoding="utf-8") as handle:
                 json.dump(manifest, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
+            invalidate_project(project_id)
             return manifest
         except Exception:
             for path in created:
@@ -162,6 +168,10 @@ def _read_manifest(path: Path) -> dict[str, Any] | None:
         return None
     for key in required:
         if not isinstance(value.get(key), str) or not value[key]:
+            return None
+    for key in ("wp_filename", "log_filename"):
+        filename = Path(value[key])
+        if filename.is_absolute() or filename.name != value[key] or value[key] in {".", ".."}:
             return None
     return value
 

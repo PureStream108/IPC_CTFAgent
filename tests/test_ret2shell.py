@@ -255,6 +255,41 @@ def test_adapter_maps_categories_and_downloads_files(tmp_path):
     assert downloaded[0].read_bytes() == b"zip-bytes"
 
 
+def test_adapter_preflight_reports_remote_and_solved_state():
+    class StubClient:
+        game_id = 12
+
+        def get_profile(self):
+            return {"account": "user"}
+
+        def get_game(self, game_id=None):
+            return {"id": 12}
+
+        def list_challenges(self, game_id=None):
+            return [
+                {"id": 1, "name": "Remote", "tag": [{"name": "pwn"}], "content": "nc"},
+                {"id": 2, "name": "Solved", "tag": [{"name": "web"}], "content": ""},
+                {"id": 3, "name": "Local", "tag": [{"name": "crypto"}], "content": ""},
+            ]
+
+        def get_challenge(self, challenge_id, game_id=None):
+            return {}
+
+        def has_environment(self, challenge_id, game_id=None):
+            return challenge_id == 1
+
+        def challenge_status(self, challenge_id, game_id=None):
+            return {"solved": challenge_id == 2, "solves": 3}
+
+    adapter = Ret2ShellAdapter(StubClient(), game_id=12)
+    challenges = adapter.preflight()
+    assert [(c.external_id, c.remote, c.solved) for c in challenges] == [
+        ("1", True, False),
+        ("2", False, True),
+        ("3", False, False),
+    ]
+
+
 def test_download_file_streams_to_disk(tmp_path):
     def router(method, url, kwargs):
         if url.endswith("/api/game/37/challenge/5/file") and kwargs.get("params", {}).get("file"):
@@ -270,6 +305,92 @@ def test_download_file_streams_to_disk(tmp_path):
     client.close()
 
 
+
+
+class _FakeTunnelManager:
+    def __init__(self):
+        self.ensured = []
+        self.stopped = []
+
+    def ensure(self, challenge_id, remotes):
+        self.ensured.append((challenge_id, list(remotes)))
+        return {
+            "endpoints": [f"ipc-app:{20000 + challenge_id}"],
+            "started": list(remotes),
+        }
+
+    def stop(self, challenge_id):
+        self.stopped.append(challenge_id)
+        return [20000 + challenge_id]
+
+
+def _instance_client(instance):
+    class StubClient:
+        base_url = "https://r2s.test"
+        game_id = 12
+
+        def start_instance(self, challenge_id, game_id=None):
+            pass
+
+        def wait_for_instance(self, challenge_id, game_id=None, **kwargs):
+            return dict(instance)
+
+        def find_instance(self, challenge_id, game_id=None):
+            return dict(instance)
+
+        def renew_instance(self, challenge_id, game_id=None):
+            pass
+
+        def destroy_instance(self, challenge_id, game_id=None):
+            pass
+
+    return StubClient()
+
+
+def test_adapter_start_instance_tunnels_traffic_instances():
+    manager = _FakeTunnelManager()
+    adapter = Ret2ShellAdapter(
+        _instance_client(
+            {
+                "state": "Running",
+                "exposed_ports": None,
+                "traffic": "tok",
+                "ports": [1337],
+            }
+        ),
+        game_id=12,
+        tunnel_manager=manager,
+    )
+    view = adapter.start_instance("5")
+    assert view["state"] == "ready"
+    assert view["entry"] == "ipc-app:20005"
+    assert view["endpoints"] == ["ipc-app:20005"]
+    assert manager.ensured == [
+        (5, ["wss://r2s.test/api/traffic/tok?port=1337"])
+    ]
+
+    adapter.stop_instance("5")
+    assert manager.stopped == [5]
+
+
+def test_adapter_start_instance_uses_direct_endpoints_without_tunnels():
+    manager = _FakeTunnelManager()
+    adapter = Ret2ShellAdapter(
+        _instance_client(
+            {
+                "state": "Running",
+                "exposed_ports": [{"ctf.r2s.test:1337": {"protocol": "tcp"}}],
+                "renew_count": 1,
+            }
+        ),
+        game_id=12,
+        tunnel_manager=manager,
+    )
+    view = adapter.start_instance("6")
+    assert view["state"] == "ready"
+    assert view["entry"] == "ctf.r2s.test:1337"
+    assert "endpoints" not in view
+    assert manager.ensured == []
 
 
 def test_instance_lifecycle_and_wait_for_endpoints():
@@ -300,6 +421,28 @@ def test_instance_lifecycle_and_wait_for_endpoints():
     assert state["started"] is True
     instance = client.wait_for_instance(5, timeout=10, interval=0)
     assert instance["exposed_ports"]
+    client.close()
+
+
+def test_wait_for_instance_accepts_a_wsrx_ticket():
+    def router(method, url, kwargs):
+        if url.endswith("/api/game/37/instance"):
+            return FakeResponse(
+                200,
+                [
+                    {
+                        "state": "Running",
+                        "challenge_id": 5,
+                        "traffic": "tok",
+                        "ports": [1337],
+                    }
+                ],
+            )
+        raise AssertionError(f"unexpected {method} {url}")
+
+    client = make_client(router)
+    instance = client.wait_for_instance(5, timeout=3, interval=0)
+    assert instance["traffic"] == "tok"
     client.close()
 
 
@@ -658,8 +801,8 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("backend.api.platform.Ret2ShellClient", StubClient)
-    mapping = FieldMapping(platform="ret2shell", game_id=37)
+    monkeypatch.setattr("backend.platform.factory.Ret2ShellClient", StubClient)
+    mapping = FieldMapping(platform="ret2shell", game_id=37, list_url=BASE)
 
     preview = api_client.post(
         "/api/platform/challenges", json={"mapping": mapping.model_dump()}
@@ -689,4 +832,108 @@ def test_platform_import_supports_ret2shell_platform(api_client, monkeypatch):
 def test_field_mapping_requires_list_url_for_http_json():
     with pytest.raises(ValueError, match="list_url is required"):
         FieldMapping()
-    assert FieldMapping(platform="ret2shell").game_id is None
+    with pytest.raises(ValueError, match="list_url and game_id are required"):
+        FieldMapping(platform="ret2shell")
+    with pytest.raises(ValueError, match="list_url and game_id are required"):
+        FieldMapping(platform="ret2shell", game_id=37)
+    assert FieldMapping(platform="ret2shell", list_url=BASE, game_id=37).game_id == 37
+
+
+def test_client_requires_platform_origin_and_game_id(monkeypatch):
+    for name in ("IPC_R2S_BASE_URL", "IPC_R2S_GAME_ID", "IPC_R2S_USERNAME", "IPC_R2S_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(Ret2ShellError, match="base URL is required"):
+        Ret2ShellClient(session=FakeSession(lambda *_: None))
+    with pytest.raises(Ret2ShellError, match="must be an http"):
+        Ret2ShellClient(
+            base_url="ctf.example", game_id=1, session=FakeSession(lambda *_: None)
+        )
+    with pytest.raises(Ret2ShellError, match="game id is required"):
+        Ret2ShellClient(base_url=BASE, session=FakeSession(lambda *_: None))
+    with pytest.raises(Ret2ShellError, match="positive integer"):
+        Ret2ShellClient(
+            base_url=BASE, game_id=0, session=FakeSession(lambda *_: None)
+        )
+
+
+def test_client_accepts_explicit_deployment_env_configuration(monkeypatch):
+    monkeypatch.setenv("IPC_R2S_BASE_URL", BASE + "/")
+    monkeypatch.setenv("IPC_R2S_GAME_ID", "9")
+    client = Ret2ShellClient(session=FakeSession(lambda *_: None))
+    assert client.base_url == BASE
+    assert client.game_id == 9
+
+
+def test_deployment_hook_needs_complete_environment():
+    from backend.platform.ret2shell.workflow import build_deployment
+
+    assert build_deployment({}) is None
+    assert build_deployment({"IPC_R2S_BASE_URL": BASE}) is None
+    assert (
+        build_deployment({"IPC_R2S_BASE_URL": BASE, "IPC_R2S_GAME_ID": "12"})
+        is None
+    )
+
+    deployment = build_deployment(
+        {
+            "IPC_R2S_BASE_URL": BASE,
+            "IPC_R2S_GAME_ID": "12",
+            "IPC_R2S_TOKEN": "tok",
+        }
+    )
+    assert deployment["platform"] == "ret2shell"
+    assert deployment["client"].base_url == BASE
+    assert deployment["client"].game_id == 12
+    assert deployment["mcp"] is not None
+
+
+def test_ret2shell_workflow_preset_builds_a_template_spec():
+    from backend.ops.presets import Ret2ShellWorkflowInput, workflow_templates
+
+    templates = {item["id"]: item for item in workflow_templates()}
+    assert "ret2shell" in templates
+    assert templates["ret2shell"]["secret_names"] == [
+        "ret2shell_token",
+        "ret2shell_username",
+        "ret2shell_password",
+    ]
+
+    settings = Ret2ShellWorkflowInput(base_url=BASE, game_id=12)
+    spec = settings.workflow_spec()
+    assert spec.template_id == "ret2shell"
+    assert spec.challenges.platform == "ret2shell"
+    assert spec.challenges.game_id == 12
+    assert spec.challenges.list_url == BASE
+    assert spec.competition_id == "12"
+    assert spec.team_id == "ret2shell"
+    assert {
+        "ret2shell_token",
+        "ret2shell_username",
+        "ret2shell_password",
+    } <= spec.allowed_secret_names()
+    assert spec.required_secret_names() == set()
+
+
+def test_ret2shell_workflow_preset_rejects_foreign_credentials_and_non_origin_urls():
+    from backend.ops.presets import Ret2ShellWorkflowInput
+
+    with pytest.raises(ValueError):
+        Ret2ShellWorkflowInput(
+            base_url=BASE, game_id=12, secrets={"gzctf_token": "nope"}
+        )
+    with pytest.raises(ValueError):
+        Ret2ShellWorkflowInput(base_url=BASE + "/game/12", game_id=12)
+
+
+def test_factory_passes_workflow_credentials_to_the_client():
+    from backend.platform.factory import build_adapter
+    from backend.platform.mapping import FieldMapping
+
+    adapter = build_adapter(
+        FieldMapping(platform="ret2shell", list_url=BASE, game_id=12),
+        credentials={"ret2shell_token": "tok"},
+    )
+    assert isinstance(adapter, Ret2ShellAdapter)
+    assert adapter.client.base_url == BASE
+    assert adapter.client.game_id == 12
+    assert adapter.client._token == "tok"

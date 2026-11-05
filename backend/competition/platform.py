@@ -114,6 +114,19 @@ class CompetitionPlatform:
         result = interpret_response(response, spec)
         return {"verdict": result.status, "submission_id": submission_id, "retry_after": result.retry_after}
 
+    def hint(self, external_id: str) -> dict:
+        """Buy the platform hint for one challenge (it discounts its score).
+
+        The adapter owns the policy: it refuses when the workflow did not opt
+        into hints, so the scheduler can call this unconditionally and still
+        never buy an unapproved hint.
+        """
+
+        method = getattr(self.adapter, "hint", None)
+        if callable(method):
+            return method(external_id)
+        return {"error": "this platform exposes no hint endpoint", "reason": "hint_unsupported"}
+
     def instances(self):
         method = getattr(self.adapter, "instances", None)
         if callable(method):

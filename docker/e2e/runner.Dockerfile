@@ -4,5 +4,8 @@ RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/
     && apt-get install -y --no-install-recommends chromium \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir playwright==1.50.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 ENV IPC_PLAYWRIGHT_EXECUTABLE=/usr/bin/chromium
 CMD ["python", "/opt/playwright_e2e.py"]

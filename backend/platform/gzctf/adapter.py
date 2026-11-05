@@ -15,11 +15,12 @@ from typing_extensions import Self
 
 from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
+from backend.platform.errors import PlatformError
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
 _recovery_logger = logging.getLogger(__name__)
 
-class GZCTFError(RuntimeError):
+class GZCTFError(PlatformError):
     pass
 
 

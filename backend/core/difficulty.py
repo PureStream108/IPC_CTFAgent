@@ -28,7 +28,7 @@ _EXPLOIT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("auth", ("jwt", "session", "cookie", "csrf", "auth bypass", "idor", "oauth")),
     ("crypto", ("rsa", "lattice", "modulus", "oracle", "padding oracle", "ecc", "aes")),
     ("pwn", ("rop", "overflow", "format string", "heap", "got", "libc", "ret2")),
-    ("reverse", ("decompile", "angr", "ghidra", "ida", "patch", "anti-debug")),
+    ("reverse", ("decompile", "angr", "radare2", "ida", "patch", "anti-debug")),
     ("stego", ("stego", "exif", "lsb", "zsteg", "binwalk", "foremost")),
 )
 

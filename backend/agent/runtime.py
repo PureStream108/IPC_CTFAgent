@@ -217,12 +217,15 @@ class AgentRuntime:
         max_turns: int = 0,
         context_token_limit: int = 0,
         compaction_trigger_ratio: float = 0.75,
+        max_compactions: int = 0,
         calibration: float = 1.0,
         keep_recent_messages: int = 8,
         model_snapshot: dict[str, Any] | str | None = None,
         parallel_safe: Callable[[str], bool] | None = None,
         is_terminal: Callable[[str], bool] | None = None,
         max_parallel_tools: int = 4,
+        state_writer: Callable[[dict[str, Any]], None] | None = None,
+        state_write_ratio: float = 0.85,
     ) -> None:
         self.writer = writer
         self.adapter = adapter
@@ -244,13 +247,23 @@ class AgentRuntime:
             max_output_tokens=getattr(adapter, "max_output_tokens", 0) or 0,
         )
         self.compaction_trigger_ratio = compaction_trigger_ratio
+        self.max_compactions = max(0, int(max_compactions or 0))
+        self.compactions = 0
         self.calibration = calibration
         self.keep_recent_messages = max(2, keep_recent_messages)
         self.parallel_safe = parallel_safe or (lambda _name: False)
         self.is_terminal = is_terminal or (lambda _name: False)
         self.max_parallel_tools = max(1, max_parallel_tools)
+        self.state_writer = state_writer
+        self.state_write_ratio = min(0.99, max(0.5, float(state_write_ratio)))
+        self._state_written_ratio = 0.0
+        self._history_cache: tuple[int, list[dict[str, Any]]] | None = None
+        self.history_events_read = 0
+        self._call_states: dict[str, str] | None = None
+        self._call_index_seq = 0
         self._completed_turns = 0
         self._last_estimate = 0
+        self.last_compaction: dict[str, Any] | None = None
 
     @property
     def session_id(self) -> str:
@@ -301,20 +314,44 @@ class AgentRuntime:
         return events
 
     def _history(self) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        for event in self._all_events():
-            if event["kind"] in ("provider_messages", "user_message"):
-                messages.extend(event["payload"].get("messages", []))
-                if event["event_key"].startswith("provider:"):
-                    with_turn = event["event_key"].partition(":")[2]
-                    if with_turn.isdigit():
-                        self._completed_turns = max(
-                            self._completed_turns, int(with_turn)
-                        )
-            elif event["kind"] == "tool_result":
-                messages.append(event["payload"]["message"])
-            elif event["kind"] == "context_compacted":
-                messages = compacted_history(event["payload"])
+        """Rebuild the transcript incrementally.
+
+        The old version re-read every event of the session on every turn, so a
+        500-step session read its whole history 500 times and the peak memory
+        was the *uncompacted* transcript.  Now only events after the last one
+        we have seen are read; a compaction event inside the increment rewrites
+        the projection exactly as before, because it is applied in order.
+        """
+
+        if self._history_cache is None:
+            messages: list[dict[str, Any]] = []
+            after = 0
+        else:
+            after, messages = self._history_cache
+        events_read = 0
+        while True:
+            page = self.writer.events(after, 500)
+            if not page:
+                break
+            events_read += len(page)
+            for event in page:
+                if event["kind"] in ("provider_messages", "user_message"):
+                    messages.extend(event["payload"].get("messages", []))
+                    if event["event_key"].startswith("provider:"):
+                        with_turn = event["event_key"].partition(":")[2]
+                        if with_turn.isdigit():
+                            self._completed_turns = max(
+                                self._completed_turns, int(with_turn)
+                            )
+                elif event["kind"] == "tool_result":
+                    messages.append(event["payload"]["message"])
+                elif event["kind"] == "context_compacted":
+                    messages = compacted_history(event["payload"])
+            after = page[-1]["sequence"]
+            if len(page) < 500:
+                break
+        self.history_events_read = events_read
+        self._history_cache = (after, messages)
         return messages
 
     def record_user_message(
@@ -333,6 +370,8 @@ class AgentRuntime:
         )
 
     def record_tool_call(self, call: ToolCall, *, event_key: str | None = None) -> dict:
+        if self._call_states is not None and call.id:
+            self._call_states[call.id] = "pending"
         return self._append(
             event_key or f"tool-call:{call.id}", "tool_call",
             {"id": call.id, "name": call.name, "arguments": call.arguments},
@@ -341,6 +380,8 @@ class AgentRuntime:
     def record_tool_result(
         self, call: ToolCall, message: dict[str, Any], *, event_key: str | None = None
     ) -> dict:
+        if self._call_states is not None and call.id:
+            self._call_states[call.id] = "done"
         return self._append(
             event_key or f"tool-result:{call.id}", "tool_result",
             {"id": call.id, "message": message},
@@ -349,16 +390,46 @@ class AgentRuntime:
     def record_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         self.writer.save_checkpoint(checkpoint)
 
+    def _call_state_index(self) -> dict[str, str]:
+        """Fold every event appended since the last lookup into the index.
+
+        Incremental on purpose: the old implementation re-read the whole
+        session for every tool call, so a long session paid the full scan once
+        per call.  Reading forward from the last seen sequence also keeps the
+        index correct when an event was written by another owner.
+        """
+
+        if self._call_states is None:
+            self._call_states = {}
+        after = self._call_index_seq
+        while True:
+            page = self.writer.events(after, 500)
+            if not page:
+                break
+            for event in page:
+                payload = event.get("payload") or {}
+                call_id = payload.get("id")
+                if not call_id:
+                    continue
+                if event["kind"] == "tool_call":
+                    self._call_states[call_id] = "pending"
+                elif event["kind"] == "tool_result":
+                    self._call_states[call_id] = "done"
+            after = page[-1]["sequence"]
+            if len(page) < 500:
+                break
+        self._call_index_seq = after
+        return self._call_states
+
     def call_state(self, call_id: str) -> str | None:
-        """Return ``pending``/``done`` for a persisted call, if present."""
-        state: str | None = None
-        for event in self._all_events():
-            payload = event.get("payload") or {}
-            if event["kind"] == "tool_call" and payload.get("id") == call_id:
-                state = "pending"
-            elif event["kind"] == "tool_result" and payload.get("id") == call_id:
-                state = "done"
-        return state
+        """Return pending/done for a persisted call, if present.
+
+        The index is built once per runtime and maintained on append: the old
+        implementation scanned every event for every tool call, which is
+        quadratic in a long session.
+        """
+
+        return self._call_state_index().get(call_id)
 
     def _needs_compaction(self, messages: list[dict[str, Any]]) -> tuple[bool, dict]:
         """Decide whether to compact, preferring the token budget over bytes."""
@@ -388,20 +459,65 @@ class AgentRuntime:
             }
         return False, {"tokens": estimate}
 
-    def _compact(self, messages: list[dict[str, Any]], turn: int) -> list[dict[str, Any]]:
+    def compact(self, *, force: bool = True) -> dict[str, Any]:
+        """Compact the projection right now, as an operator would with /compact.
+
+        The automatic path only compacts when the budget is nearly spent; this
+        entry point lets a human say "summarise what we have and move on" at any
+        point. It returns the sizes and the produced summary so the caller can
+        report what the next turn will actually start from.
+        """
+        messages = self._history()
+        before = len(messages)
+        self.last_compaction = None
+        compacted = self._compact(messages, self._completed_turns + 1, force=force)
+        payload = self.last_compaction or {}
+        metrics = payload.get("metrics") or {}
+        return {
+            "compacted": bool(payload),
+            "messages_before": before,
+            "messages_after": len(compacted),
+            "tokens_before": metrics.get("input_tokens"),
+            "tokens_after": metrics.get("output_tokens"),
+            "degraded": bool(metrics.get("degraded")),
+            "summary": payload.get("summary") or {},
+            "metrics": metrics,
+        }
+
+    def _compact(
+        self, messages: list[dict[str, Any]], turn: int, *, force: bool = False
+    ) -> list[dict[str, Any]]:
         """Compact the projection when it approaches the context budget.
 
         Compaction is an optimisation, not a precondition for running: if the
         semantic compressor fails, this degrades to a deterministic projection
         and records the failure, instead of ending a task that was making
-        progress.
+        progress. force skips the budget check for a manual /compact.
         """
-        needed, detail = self._needs_compaction(messages)
-        if not needed:
-            return messages
+        if force:
+            detail = {
+                "reason": "manual",
+                "messages": len(messages),
+                "tokens": estimate_tokens(messages, calibration=self.calibration),
+            }
+            if len(messages) <= self.keep_recent_messages + 1:
+                return messages
+        else:
+            needed, detail = self._needs_compaction(messages)
+            if not needed:
+                return messages
+        self._maybe_write_state(detail)
 
+        # A manual compaction can run twice at the same turn number, so its
+        # event keys carry a counter; the automatic ones stay turn-scoped so a
+        # retried turn rewrites the same events instead of stacking new ones.
+        suffix = (
+            f"manual:{self._writer_epoch()}:{self.compactions + 1}"
+            if force
+            else f"{self._writer_epoch()}:{turn}"
+        )
         started = time.monotonic()
-        self._append(f"compact-start:{self._writer_epoch()}:{turn}", "status",
+        self._append(f"compact-start:{suffix}", "status",
                      {"status": "compaction.started", "turn": turn, **detail})
 
         summary: Any
@@ -411,7 +527,7 @@ class AgentRuntime:
                 messages, keep_recent=self.keep_recent_messages
             )
             self._append(
-                f"compact-degraded:{self._writer_epoch()}:{turn}", "error",
+                f"compact-degraded:{suffix}", "error",
                 {**detail, "status": "no_compressor",
                  "note": "compacted deterministically; no semantic summarizer configured"},
             )
@@ -426,7 +542,7 @@ class AgentRuntime:
                     messages, keep_recent=self.keep_recent_messages
                 )
                 self._append(
-                    f"compact-degraded:{self._writer_epoch()}:{turn}", "error",
+                    f"compact-degraded:{suffix}", "error",
                     {**detail, "status": "compressor_failed",
                      "error": f"{type(exc).__name__}: {exc}"[:2000]},
                 )
@@ -448,9 +564,21 @@ class AgentRuntime:
             "output_bytes": len(json.dumps(compacted, ensure_ascii=False).encode("utf-8")),
             "degraded": fallback or bool(metadata.get("degraded_reason")), **metadata,
         }}
-        self._append(f"compact:{self._writer_epoch()}:{turn}", "context_compacted", payload)
-        self._append(f"compact-end:{self._writer_epoch()}:{turn}", "status",
+        self.compactions += 1
+        self.last_compaction = payload
+        self._append(f"compact:{suffix}", "context_compacted",
+                     {**payload, "count": self.compactions, "limit": self.max_compactions})
+        if self.max_compactions and self.compactions >= self.max_compactions:
+            from backend.agent.session import SessionNeedsRebuild
+
+            raise SessionNeedsRebuild(
+                "context compacted " + str(self.compactions) + " time(s) in one attempt; "
+                "hand this challenge to a fresh seat instead of rewriting the same dead end",
+                reason="compaction_limit",
+            )
+        self._append(f"compact-end:{suffix}", "status",
                      {"status": "compaction.completed", "turn": turn, **payload["metrics"]})
+        self._state_written_ratio = 0.0
         record = getattr(self.writer, "record_compaction", None)
         if callable(record):
             record(summary, token_estimate=detail.get("tokens"))
@@ -459,6 +587,40 @@ class AgentRuntime:
              **detail}
         )
         return compacted_history(payload)
+
+    def _maybe_write_state(self, detail: dict[str, Any]) -> None:
+        """T2: refresh the scheduling document before the context is rewritten.
+
+        Fires at most once per compaction cycle, and only once the ratio passes
+        state_write_ratio, so a Member deep into a long turn hands a fresh STATE
+        to whoever picks the project up next.
+        """
+
+        if self.state_writer is None:
+            return
+        estimate = int(detail.get("tokens") or self._last_estimate or 0)
+        used_bytes = int(detail.get("bytes") or 0)
+        if self.context_token_limit and estimate > 0:
+            ratio = estimate / float(self.context_token_limit)
+        elif self.context_bytes and used_bytes > 0:
+            ratio = used_bytes / float(self.context_bytes)
+        else:
+            return
+        if ratio < self.state_write_ratio or ratio <= self._state_written_ratio:
+            return
+        self._state_written_ratio = ratio
+        try:
+            self.state_writer(
+                {
+                    "reason": "context-ratio",
+                    "ratio": round(ratio, 4),
+                    "tokens": estimate,
+                    "bytes": used_bytes,
+                    "limit": self.context_token_limit or self.context_bytes,
+                }
+            )
+        except Exception:
+            _recovery_logger.debug("state writer failed", exc_info=True)
 
     def _pending_tool_calls(self) -> list[ToolCall]:
         """Find calls whose side effect outcome was not durably recorded."""

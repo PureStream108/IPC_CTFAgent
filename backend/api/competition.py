@@ -13,6 +13,7 @@ from backend.competition.service import CompetitionService
 from backend.competition.store import CompetitionConflict
 from backend.core.state import AppState
 from backend.core.validation import InputValidationError
+from backend.platform.errors import PlatformError
 
 router = APIRouter(prefix="/api", tags=["competition"])
 
@@ -90,6 +91,10 @@ def _call(function, *args, **kwargs):
         if retry_after is not None:
             headers["Retry-After"] = str(retry_after)
         raise HTTPException(409, str(exc), headers=headers) from exc
+    except PlatformError as exc:
+        if getattr(exc, "reason", "") == "auth_required":
+            raise HTTPException(401, str(exc)) from exc
+        raise HTTPException(502, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -120,6 +125,19 @@ def list_runs(
     service: CompetitionService = _GET_COMPETITION_DEPENDENCY,
 ):
     return {"runs": service.store.list_runs(limit)}
+
+
+@router.get("/watch")
+def watch_status(service: CompetitionService = _GET_COMPETITION_DEPENDENCY):
+    """Report the platform watcher: what it polled and what it last did."""
+
+    watcher = getattr(service, "watcher", None)
+    if watcher is None:
+        return {
+            "enabled": False,
+            "reason": "watch.enabled is off in backend/config/config.yaml",
+        }
+    return watcher.snapshot()
 
 
 @router.get("/runs/{run_id}")

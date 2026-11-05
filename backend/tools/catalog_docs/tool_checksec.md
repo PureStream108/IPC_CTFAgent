@@ -1,46 +1,45 @@
 # checksec
 
-Show binary mitigations (NX, PIE, RELRO, canary).
+检查 ELF 的 NX、PIE、RELRO、Stack Canary 和 Fortify 等缓解措施。
 
 ## 用途与适用场景
 
-First triage of a pwn binary.
+拿到 pwn 二进制后先判断利用面：是否 PIE、能否写 GOT、是否有 canary、栈是否可执行。
 
 ## 版本检查
 
 ```bash
-checksec --version
+checksec --file=/bin/true
 ```
 
 ## 命令、导入与镜像路径
 
 - 常用入口：`checksec`
-- 镜像路径：`system`
+- 镜像路径：`/usr/bin/checksec`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `checksec` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先 `checksec --file=target`，再用 `readelf -lW` 与 `readelf -dW` 交叉确认 GNU_STACK、GNU_RELRO 和 BIND_NOW。pwntools 可用 `ELF.checksec()` 作为回退。
 
 ## 可执行示例
 
 ```bash
-checksec
+checksec --file=/tmp/challenge && readelf -lW /tmp/challenge | grep -E 'GNU_STACK|GNU_RELRO'
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+关注 Arch、RELRO、Canary、NX、PIE、RPATH/RUNPATH；结合 libc 版本判断 ret2libc/ROP 可行性。
 
 ## 常见错误与限制
 
-仅在合法授权的 CTF、靶场和研究环境中使用。
+checksec 只反映静态标记，不能证明运行时一定启用；容器内核、ASLR 和 seccomp 仍需动态验证。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [objdump](/memory/catalog/tool_objdump/document)
+- [gdb](/memory/catalog/tool_gdb/document)
 
 ## 官方参考
 
-- 使用镜像内 `--help`、语言内置帮助或工具上游仓库作为版本对应参考。
+- [https://github.com/slimm609/checksec.sh](https://github.com/slimm609/checksec.sh)

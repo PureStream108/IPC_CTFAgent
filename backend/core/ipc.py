@@ -45,9 +45,6 @@ def assert_flag_compatible(connection, project_id: str, flag: str) -> dict:
     policy = str(project.get("completion_policy") or "verified_flag")
     if policy == "goals":
         raise FlagConflictError("independent pentest projects complete through evidence-backed goal proofs")
-    # A platform_flags project is judged per challenge: one challenge may carry
-    # several flags, and each accepted candidate is a distinct verified row.
-    # Only a settled project is locked to the flag that closed it.
     platform_flags = policy == "platform_flags"
     settled = str(project.get("status") or "") in {"solved", "completed"}
     existing_flag = str(project["flag"] or "").strip()
@@ -222,7 +219,13 @@ def submit_flag_candidate(
     ).fetchone()
     if project is None:
         raise ValueError("project not found")
-    if requires_platform_verdict(project):
+    owned_by_run = connection.execute(
+        """SELECT 1 FROM competition_challenges c
+           JOIN competition_runs r ON r.id = c.run_id
+           WHERE c.project_id = %s AND r.status NOT IN ('finished','stopped')""",
+        (project_id,),
+    ).fetchone() is not None
+    if requires_platform_verdict(project) or owned_by_run:
         return record_pending_flag(
             connection,
             project_id,

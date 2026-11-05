@@ -13,27 +13,137 @@
   <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/vendor/alpine.min.js"></script>
   <style>
+    :root {
+      --surface: rgba(255,255,255,0.96);
+      --surface-2: #f8fafc;
+      --surface-3: #f1f5f9;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #334155;
+      --text-muted: #64748b;
+      --text-strong: #0f172a;
+      --brand-50: #eef2ff;
+      --brand-100: #e0e7ff;
+      --brand-200: #c7d2fe;
+      --brand-500: #6366f1;
+      --brand-600: #4f46e5;
+      --brand-700: #4338ca;
+      --danger-50: #fff1f2;
+      --danger-200: #fecdd3;
+      --danger-600: #e11d48;
+      --danger-700: #be123c;
+      --overlay: rgba(15,23,42,0.25);
+      --shadow-lg: 0 12px 30px rgba(15,23,42,0.08);
+      --focus-ring: 0 0 0 3px rgba(99,102,241,0.12);
+      --grid-dot: rgba(148,163,184,0.20);
+      --radius-lg: 1rem;
+      --control-h: 1.75rem;
+    }
     [x-cloak] { display: none !important; }
     #cy { width: 100%; height: 100%; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-    .overlay { background: rgba(15,23,42,0.25); backdrop-filter: blur(6px); }
-    .panel { background: rgba(255,255,255,0.96); border: 1px solid rgba(226,232,240,0.9); box-shadow: 0 12px 30px rgba(15,23,42,0.08); }
-    .chip { border: 1px solid #e2e8f0; background: #f8fafc; color: #64748b; }
-    .btn { border: 1px solid #c7d2fe; background: #eef2ff; color: #4f46e5; transition: all 160ms ease; }
-    .btn:hover { background: #e0e7ff; color: #4338ca; }
-    .btn-ghost { border: 1px solid #e2e8f0; background: rgba(255,255,255,0.9); color: #64748b; transition: all 160ms ease; }
-    .btn-ghost:hover { background: #f8fafc; color: #334155; border-color: #cbd5e1; }
-    .btn-danger { border-color: #fecdd3; color: #e11d48; }
-    .btn-danger:hover { background: #fff1f2; color: #be123c; border-color: #fda4af; }
-    input, select, textarea { background: #fff; border: 1px solid #e2e8f0; color: #334155; outline: none; }
-    input:focus, select:focus, textarea:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
-    input[type="checkbox"] { accent-color: #6366f1; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+    .overlay { background: var(--overlay); backdrop-filter: blur(6px); }
+    .panel { background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); border-radius: var(--radius-lg); }
+    .chip { border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted); }
+    .btn { border: 1px solid var(--brand-200); background: var(--brand-50); color: var(--brand-600); transition: all 160ms ease; }
+    .btn:hover { background: var(--brand-100); color: var(--brand-700); }
+    .btn-ghost { border: 1px solid var(--border); background: rgba(255,255,255,0.9); color: var(--text-muted); transition: all 160ms ease; }
+    .btn-ghost:hover { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
+    .btn-danger { border-color: var(--danger-200); color: var(--danger-600); }
+    .btn-danger:hover { background: var(--danger-50); color: var(--danger-700); border-color: #fda4af; }
+    input, select, textarea { background: #fff; border: 1px solid var(--border); color: var(--text); outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: #818cf8; box-shadow: var(--focus-ring); }
+    input[type="checkbox"] { accent-color: var(--brand-500); }
     .graph-grid {
       background:
-        radial-gradient(circle at 1px 1px, rgba(148,163,184,0.20) 1px, transparent 0) 0 0/26px 26px,
+        radial-gradient(circle at 1px 1px, var(--grid-dot) 1px, transparent 0) 0 0/26px 26px,
         linear-gradient(180deg, rgba(248,250,252,0.92), rgba(241,245,249,0.72));
+    }
+    .pentest-grid {
+      background-color: #f6f8fc;
+      background-image:
+        radial-gradient(circle at 1px 1px, rgba(100,116,139,.17) 1px, transparent 1.2px),
+        radial-gradient(ellipse at 12% 0%, rgba(99,102,241,.055), transparent 44%),
+        linear-gradient(145deg, #fafbfe 0%, #f4f7fb 100%);
+      background-size: 30px 30px, 100% 100%, 100% 100%;
+    }
+    .ctf-grid {
+      background:
+        radial-gradient(circle at 1px 1px, rgba(100,116,139,.19) 1px, transparent 1.2px) 0 0/30px 30px,
+        radial-gradient(ellipse at 8% 0%, rgba(99,102,241,.075), transparent 48%),
+        radial-gradient(ellipse at 100% 100%, rgba(14,165,233,.065), transparent 46%),
+        #f7faff;
+    }
+    .ctf-toolbar { position: absolute; top: 12px; right: 12px; z-index: 10; display: flex; align-items: center; gap: 2px; max-width: calc(100% - 24px); padding: 4px; border: 1px solid rgba(216,222,234,.85); border-radius: 12px; background: rgba(255,255,255,.88); box-shadow: 0 5px 18px rgba(38,51,77,.06); backdrop-filter: blur(16px); }
+    .ctf-tool { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #64748b; font-size: 11px; white-space: nowrap; transition: color 160ms ease, background 160ms ease; }
+    .ctf-tool:hover { color: #4338ca; background: #f5f6ff; }
+    .ctf-tool:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 1px; }
+    .ctf-tool:disabled { cursor: default; opacity: .5; }
+    .ctf-live-dot { width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; }
+    .ctf-tool[aria-pressed="true"] .ctf-live-dot { background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.12); animation: ctf-pulse 2.4s ease-in-out infinite; }
+    .ctf-position-count { padding: 0 7px; color: #818cf8; font-size: 10px; white-space: nowrap; }
+    .ctf-canvas-hint { position: absolute; bottom: 18px; left: 18px; z-index: 5; display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid rgba(226,232,240,.72); border-radius: 10px; background: rgba(255,255,255,.72); color: #94a3b8; font-size: 10px; pointer-events: none; backdrop-filter: blur(8px); }
+    @keyframes ctf-pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+    @media (max-width: 767px) {
+      .ctf-toolbar { top: 50px; right: 10px; }
+      .ctf-canvas-hint { bottom: 12px; left: 12px; }
+      .ctf-canvas-hint .desktop-hint { display: none; }
+      .ctf-position-count { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ctf-tool, .ctf-live-dot { animation: none !important; transition: none !important; }
+    }
+    .pentest-top-actions { border: 1px solid rgba(216,222,234,.85); border-radius: 12px; padding: 4px; background: rgba(255,255,255,.82); box-shadow: 0 5px 18px rgba(38,51,77,.055); backdrop-filter: blur(16px); }
+    .pentest-top-actions button { border-color: transparent; box-shadow: none; }
+    .pentest-dock { width: max-content; max-width: calc(100% - 2rem); border: 1px solid rgba(210,218,230,.9); border-radius: 18px; background: rgba(255,255,255,.92); box-shadow: 0 18px 46px rgba(35,48,73,.12), 0 2px 8px rgba(35,48,73,.04); backdrop-filter: blur(20px); }
+    .pentest-dock-main { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px; padding: 7px; }
+    .pentest-dock-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; margin: 0 7px; padding: 7px 4px 9px; border-top: 1px solid #edf0f5; }
+    .pentest-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: 0; border-radius: 10px; color: #64748b; font-size: 12px; font-weight: 600; white-space: nowrap; transition: color 160ms ease, background 160ms ease, box-shadow 160ms ease; }
+    .pentest-tab:hover { color: #334155; background: #f5f7fb; }
+    .pentest-tab.active { color: #4338ca; background: #eef2ff; box-shadow: inset 0 0 0 1px rgba(129,140,248,.18); }
+    .pentest-tool { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 0 9px; border: 0; border-radius: 9px; color: #64748b; font-size: 11px; white-space: nowrap; transition: all 160ms ease; }
+    .pentest-tool:hover { color: #4338ca; background: #f5f6ff; }
+    .pentest-tool.danger:hover { color: #be123c; background: #fff1f2; }
+    .pentest-divider { width: 1px; height: 22px; margin: 0 3px; background: #e8ecf2; }
+    .pentest-search { position: relative; flex: 1 1 180px; min-width: 140px; }
+    .pentest-search svg { position: absolute; left: 10px; top: 50%; width: 14px; height: 14px; color: #94a3b8; transform: translateY(-50%); pointer-events: none; }
+    .pentest-search input { width: 100%; height: 32px; padding: 0 10px 0 31px; border-color: #e6eaf0; border-radius: 9px; background: #f8fafc; font-size: 11px; }
+    .pentest-search input:focus { background: #fff; border-color: #a5b4fc; }
+    .pentest-metrics { display: flex; align-items: center; gap: 9px; color: #64748b; font-size: 10px; white-space: nowrap; }
+    .pentest-metrics strong { margin-right: 3px; color: #334155; font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .pentest-legend { display: flex; flex-wrap: wrap; gap: 8px; color: #64748b; font-size: 10px; }
+    .pentest-legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .pentest-legend-dot { width: 6px; height: 6px; border-radius: 999px; box-shadow: 0 0 0 3px rgba(100,116,139,.06); }
+    .pentest-empty { pointer-events: none; }
+    .pentest-empty-icon { position: relative; width: 60px; height: 60px; margin: 0 auto 16px; border: 1px solid #c7d2fe; border-radius: 50%; background: rgba(238,242,255,.65); }
+    .pentest-empty-icon::before, .pentest-empty-icon::after { content: ""; position: absolute; border: 1px solid #a5b4fc; border-radius: 50%; }
+    .pentest-empty-icon::before { inset: 11px; }
+    .pentest-empty-icon::after { width: 8px; height: 8px; top: 25px; left: 25px; border: 0; background: #6366f1; box-shadow: 0 0 0 5px rgba(99,102,241,.1); }
+    .pentest-record-tab { border: 1px solid transparent; border-radius: 8px; padding: 5px 8px; color: #64748b; transition: all 150ms ease; }
+    .pentest-record-tab:hover { background: #f6f7fb; color: #334155; }
+    .pentest-record-tab.active { border-color: #e0e7ff; background: #eef2ff; color: #4338ca; }
+    .pentest-record-card { border: 1px solid #e9edf3; border-radius: 12px; background: #fff; padding: 12px; transition: border 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+    .pentest-record-card:hover { border-color: #d9e0eb; box-shadow: 0 5px 16px rgba(38,51,77,.05); transform: translateY(-1px); }
+    .pentest-inline-detail { border: 1px solid #e3e8f2; border-radius: 14px; background: linear-gradient(155deg, #fafbff, #f7f9fc); box-shadow: inset 0 1px 0 #fff; }
+    @media (max-width: 1100px) {
+      .pentest-legend { display: none; }
+      .pentest-dock-secondary { gap: 8px; }
+    }
+    @media (max-width: 767px) {
+      .pentest-dock { bottom: 10px; max-width: calc(100% - 16px); border-radius: 15px; }
+      .pentest-dock-main { padding: 5px; }
+      .pentest-dock-secondary { flex-wrap: wrap; margin: 0 5px; padding-bottom: 7px; }
+      .pentest-search { flex-basis: 100%; }
+      .pentest-metrics { width: 100%; justify-content: center; }
+      .pentest-tab { padding: 0 9px; }
+      .pentest-tool { padding: 0 7px; }
+      .pentest-divider { display: none; }
+      .project-sidebar { position: absolute; inset: 0 auto 0 0; z-index: 40; width: 16rem !important; max-width: 85vw; box-shadow: 14px 0 36px rgba(30,41,59,.12); transition: transform 200ms ease; }
+      .project-sidebar.sidebar-closed { transform: translateX(-102%); pointer-events: none; }
+      .pentest-inspector { position: absolute; inset: 0 0 0 auto; z-index: 35; width: min(360px, 88vw); max-width: none !important; border-left: 1px solid #dfe5ef; box-shadow: -18px 0 46px rgba(30,41,59,.15); transform: translateX(102%); pointer-events: none; transition: transform 200ms ease; }
+      .pentest-inspector.inspector-open { transform: translateX(0); pointer-events: auto; }
     }
     .catalog-markdown h1 { margin: 0 0 1rem; color: #0f172a; font-size: 1.5rem; font-weight: 700; }
     .catalog-markdown h2 { margin: 1.5rem 0 .65rem; color: #334155; font-size: 1rem; font-weight: 700; }
@@ -97,8 +207,7 @@
         <img src="/static/ipc.png" alt="IPC" class="w-7 h-7 object-contain">
       </div>
       <div class="min-w-0">
-        <div class="font-semibold text-slate-700 tracking-tight leading-tight">IPC</div>
-        <div class="text-[11px] text-slate-400 leading-tight truncate">CTF_Agent</div>
+        <div class="font-semibold text-slate-700 tracking-tight leading-tight">IPC Agent</div>
       </div>
     </div>
     <div class="flex-1"></div>
@@ -122,9 +231,9 @@
     </div>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalLogs()">Logs</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openGlobalWP()">WP</button>
+    <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openRuns()">Runs</button>
     <button class="h-7 px-2.5 rounded-lg border text-xs transition" :class="workspaceMode==='ctf' ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500'" @click="switchWorkspace('ctf')">CTF</button>
     <button data-testid="pentest-workspace" class="h-7 px-2.5 rounded-lg border text-xs transition" :class="workspaceMode==='pentest' ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500'" @click="switchWorkspace('pentest')">Pentest</button>
-    <button class="h-7 px-2.5 rounded-lg border border-teal-200 bg-teal-50 text-xs text-teal-700 hover:bg-teal-100 transition inline-flex items-center" @click="openCompetition()">Competition</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-brand-200 bg-brand-50 text-xs text-brand-700 hover:bg-brand-100 transition items-center" @click="openOpsAgent()">IPC</button>
     <button class="hidden sm:inline-flex h-7 px-2.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition items-center" @click="openIPCConfig()">Config</button>
   </header>
@@ -146,13 +255,18 @@
     <div class="flex-1"></div>
     <template x-if="current">
       <div class="hidden md:flex items-center gap-2 text-xs text-slate-400 min-w-0">
-        <span class="px-2 py-1 rounded-lg chip uppercase tracking-wide" x-text="current.project.category"></span>
+        <span class="px-2 py-1 rounded-lg chip uppercase tracking-wide" x-text="current.project.category==='pentest'?'渗透':categoryLabel(current.project.category)"></span>
         <span class="truncate max-w-[320px]" x-text="current.project.title"></span>
-        <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.status"></span>
+        <span class="font-medium" :class="statusColor(current.project.status)" x-text="current.project.category==='pentest'?pentestStatusLabel(current.project.status):current.project.status"></span>
+        <button x-show="current.ownership && current.ownership.ownership==='competition'" x-cloak
+          class="rounded-md bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 hover:bg-teal-100 transition"
+          :title="'Scheduled by competition run ' + (current.ownership.run_id||'') + ' (challenge ' + (current.ownership.challenge_id||'') + ')'"
+          @click="openRuns()"
+          x-text="'run ' + (current.ownership.run_id||'').slice(0,8)"></button>
         <span x-show="current.project.runtime_phase && current.project.runtime_phase!=='idle'"
           class="rounded-md bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700"
-          :title="'Project phase: '+current.project.runtime_phase"
-          x-text="'phase '+current.project.runtime_phase"></span>
+          :title="(current.project.category==='pentest'?'项目阶段：':'Project phase: ')+current.project.runtime_phase"
+          x-text="(current.project.category==='pentest'?'阶段 ':'phase ')+(current.project.category==='pentest'?pentestPhaseLabel(current.project.runtime_phase):current.project.runtime_phase)"></span>
         <span class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white/80 px-2 py-1 text-slate-500">
           <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M12 7v5l3 3"/><path d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Z"/></svg>
           <span class="uppercase tracking-wide text-[10px] text-slate-400">Elapsed</span>
@@ -162,16 +276,43 @@
     </template>
   </div>
 
-  <div class="flex-1 flex overflow-hidden">
+  <div class="relative flex-1 flex overflow-hidden">
     <aside class="border-r border-slate-200/60 bg-white/90 flex flex-col overflow-hidden transition-all shrink-0"
-      :class="sidebarOpen ? 'w-64' : 'w-0 border-r-0'">
+      :class="sidebarOpen ? 'project-sidebar w-64' : 'project-sidebar sidebar-closed w-0 border-r-0'">
       <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
         <div class="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Projects</div>
-        <div class="flex items-center gap-1">
+        <div class="relative flex items-center gap-1" @click.outside="competitionFilterOpen=false">
+          <button class="h-6 rounded-md border px-1.5 text-[10px] inline-flex items-center gap-1"
+            :class="competitionFilterId?'border-teal-300 bg-teal-50 text-teal-700':'border-slate-200 text-slate-400 hover:bg-slate-50'"
+            @click="projectFilterOpen=false; competitionFilterOpen=!competitionFilterOpen; competitionFilterOpen && loadCompetitions()"
+            :title="competitionFilterId ? ('当前比赛：'+competitionFilterLabel()) : '按同一场比赛筛选题目'">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 4h8v5a4 4 0 0 1-8 0V4Z"/><path d="M8 5H5v1a3 3 0 0 0 3 3"/><path d="M16 5h3v1a3 3 0 0 1-3 3"/><path d="M12 13v4"/><path d="M9 20h6"/></svg>
+            <span>com</span>
+            <span x-show="competitionFilterId" x-cloak class="tabular-nums" x-text="competitionProjects().length"></span>
+          </button>
+          <div class="absolute right-0 top-7 z-20 w-56 rounded-xl border border-slate-200 bg-white p-2 shadow-lg"
+            x-show="competitionFilterOpen" x-cloak>
+            <div class="mb-1 flex items-center justify-between px-1.5">
+              <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Competition</span>
+              <button class="text-[10px] text-brand-600 hover:text-brand-700" @click="clearCompetitionFilter()">All</button>
+            </div>
+            <template x-for="item in visibleCompetitions()" :key="item.id">
+              <button class="mb-0.5 w-full rounded-lg px-1.5 py-1 text-left text-[11px] transition"
+                :class="competitionFilterId===item.id?'bg-teal-50 text-teal-700':'text-slate-600 hover:bg-slate-50'"
+                @click="selectCompetitionFilter(item.id)">
+                <div class="flex items-center gap-2">
+                  <span class="min-w-0 flex-1 truncate" x-text="item.label"></span>
+                  <span class="shrink-0 tabular-nums text-slate-400" x-text="competitionProjectCount(item)"></span>
+                </div>
+                <div class="truncate text-[10px] text-slate-400" x-show="item.platform" x-text="item.platform"></div>
+              </button>
+            </template>
+            <div x-show="!visibleCompetitions().length" class="px-1.5 py-2 text-[11px] text-slate-400">暂无比赛分组</div>
+          </div>
           <div class="relative">
             <button class="h-6 rounded-md border px-1.5 text-[10px] inline-flex items-center gap-1"
               :class="projectStatusFilter.length?'border-brand-300 bg-brand-50 text-brand-700':'border-slate-200 text-slate-400 hover:bg-slate-50'"
-              @click="projectFilterOpen=!projectFilterOpen" title="Filter by status">
+              @click="competitionFilterOpen=false; projectFilterOpen=!projectFilterOpen" title="Filter by status">
               <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M3 5h18"/><path d="M6 12h12"/><path d="M10 19h4"/></svg>
               <span x-text="projectStatusFilter.length?projectStatusFilter.length:'All'"></span>
             </button>
@@ -197,6 +338,10 @@
           </button>
         </div>
       </div>
+      <div x-show="competitionFilterId" x-cloak class="flex items-center gap-1.5 border-b border-teal-100 bg-teal-50/60 px-3 py-1.5">
+        <span class="min-w-0 flex-1 truncate text-[10px] text-teal-700" x-text="competitionFilterLabel()"></span>
+        <button class="shrink-0 text-[10px] text-teal-600 hover:text-teal-800" @click="clearCompetitionFilter()" title="清除比赛筛选">清除</button>
+      </div>
       <div class="flex-1 overflow-y-auto p-2">
         <template x-for="p in filteredProjects()" :key="p.id">
           <button class="group w-full text-left rounded-xl border p-3 mb-2 transition"
@@ -204,16 +349,16 @@
             @click="openProject(p.id)">
             <div class="flex items-start justify-between gap-2">
               <span class="text-[11px] font-mono text-slate-400" x-text="p.id"></span>
-              <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase tracking-[0.12em]" :class="projectStatusBadgeClass(p.status)" x-text="p.status"></span>
+              <span class="px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase tracking-[0.12em]" :class="projectStatusBadgeClass(p.status)" x-text="workspaceMode==='pentest'?pentestStatusLabel(p.status):p.status"></span>
             </div>
             <div class="mt-2 text-sm font-semibold text-slate-700 break-words [overflow-wrap:anywhere] group-hover:text-brand-600" x-text="p.title"></div>
             <div class="mt-2 flex items-center gap-3 text-[11px] text-slate-400">
-              <span class="uppercase" x-text="p.category"></span>
+              <span class="uppercase" x-text="workspaceMode==='pentest'?'渗透':categoryLabel(p.category)"></span>
               <span x-text="p.member_count + 'M'"></span>
               <span x-text="p.fact_count + 'F'"></span>
             </div>
             <div x-show="p.runtime_phase && !['idle','ready','solved','stopped'].includes(p.runtime_phase)"
-              class="mt-1.5 truncate font-mono text-[10px] text-sky-600" x-text="p.runtime_phase"></div>
+              class="mt-1.5 truncate font-mono text-[10px] text-sky-600" x-text="workspaceMode==='pentest'?pentestPhaseLabel(p.runtime_phase):p.runtime_phase"></div>
           </button>
         </template>
         <div x-show="workspaceProjects().length===0" class="rounded-xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400">No projects yet.</div>
@@ -221,25 +366,26 @@
       </div>
     </aside>
 
-    <main class="flex-1 flex overflow-hidden min-w-0">
-      <section class="flex-1 relative min-w-0 graph-grid">
-        <div class="absolute top-3 left-3 z-10 flex items-center gap-1.5" x-show="selectedId">
-          <button class="h-7 w-7 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-slate-200/60 text-slate-500 hover:text-slate-700 hover:bg-white transition inline-flex items-center justify-center" @click="fit()" title="Fit graph">
+    <main class="relative flex-1 flex overflow-hidden min-w-0">
+      <section class="flex-1 relative min-w-0 graph-grid" :class="workspaceMode==='pentest' ? 'pentest-grid' : 'ctf-grid'">
+        <div class="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center gap-1.5" :class="workspaceMode==='pentest' && 'pentest-top-actions w-fit right-auto'" x-show="selectedId">
+          <button x-show="workspaceMode==='pentest'" class="h-7 w-7 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-slate-200/60 text-slate-500 hover:text-slate-700 hover:bg-white transition inline-flex items-center justify-center" @click="fit()" title="Fit graph">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
           </button>
-          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='created'" @click="startSolve()">Start</button>
-          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="current && ['stopped','timeout','infra_error','failed'].includes(current.project.status)" @click="resumeSolve()">Resume</button>
-          <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.status==='running'" @click="stopSolve()">Stop</button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="workspaceMode==='pentest' && current && current.project.status==='created'" @click="startSolve()">Start</button>
+          <button class="btn h-7 px-2.5 rounded-lg text-xs" x-show="workspaceMode==='pentest' && current && ['stopped','timeout','infra_error','failed'].includes(current.project.status)" @click="resumeSolve()">Resume</button>
+          <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="workspaceMode==='pentest' && current && current.project.status==='running'" @click="stopSolve()">Stop</button>
+          <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="workspaceMode!=='pentest'" @click="openRuns()" title="CTF challenges are scheduled by a competition run">Runs</button>
           <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" x-show="current && current.project.wp_path" @click="openWP()">WP</button>
           <button class="btn-ghost btn-danger h-7 px-2.5 rounded-lg text-xs" @click="deleteProject()">Delete</button>
         </div>
         <template x-if="current && (current.project.runtime_error || !['idle','ready','solved','stopped'].includes(current.project.runtime_phase))">
           <div class="absolute top-14 left-3 z-10 max-w-[34rem] rounded-xl border border-sky-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
-            <div class="font-mono font-semibold text-sky-700" x-text="'Project phase: '+current.project.runtime_phase"></div>
+            <div class="font-mono font-semibold text-sky-700" x-text="(current.project.category==='pentest'?'项目阶段：':'Project phase: ')+(current.project.category==='pentest'?pentestPhaseLabel(current.project.runtime_phase):current.project.runtime_phase)"></div>
             <button type="button" class="mt-1 text-[11px] text-sky-600 hover:text-sky-800"
               x-show="current.project.runtime_error" x-cloak
               @click="projectPhaseErrorOpen=!projectPhaseErrorOpen"
-              x-text="projectPhaseErrorOpen?'Hide details':'Show details'"></button>
+              x-text="projectPhaseErrorOpen?'隐藏详情':'显示详情'"></button>
             <div x-show="current.project.runtime_error && projectPhaseErrorOpen" x-cloak
               class="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-rose-600"
               x-text="current.project.runtime_error"></div>
@@ -262,63 +408,121 @@
             </div>
           </div>
         </template>
-        <div x-show="workspaceMode==='pentest' && selectedId" x-cloak class="absolute bottom-4 left-4 z-20 max-w-[calc(100%-2rem)] rounded-xl border border-slate-200 bg-white/95 p-3 shadow-sm">
-          <div class="flex flex-wrap items-center gap-2 text-xs">
-            <button class="btn-ghost rounded px-2 py-1" :class="pentestView==='exploration' && 'text-brand-600'" @click="switchPentestView('exploration')">Exploration</button>
-            <button class="btn-ghost rounded px-2 py-1" :class="pentestView==='assets' && 'text-brand-600'" @click="switchPentestView('assets')">Asset coverage</button>
-            <button class="btn-ghost rounded px-2 py-1" @click="sideTab='pentest';pentestRecordTab='finding'">Findings</button>
-            <button class="btn-ghost rounded px-2 py-1" @click="openPentestReport()">Report</button>
-            <button x-show="pentestView==='exploration'" class="btn-ghost rounded px-2 py-1" @click="toggleCompletedSteps()" x-text="pentestFoldCompleted?'Expand completed':'Fold completed'"></button>
-            <button x-show="current?.project?.status==='running'" class="btn-ghost rounded px-2 py-1" @click="api('POST','/projects/'+selectedId+'/pause').then(()=>loadProject(selectedId))">Pause</button>
-            <button x-show="current?.project?.status==='stopped'" class="btn-ghost rounded px-2 py-1" @click="resumeSolve()">Resume</button>
-            <button class="btn-ghost rounded px-2 py-1" @click="fit()">Fit</button>
-            <button x-show="pentestGraph?.has_more" class="btn-ghost rounded px-2 py-1" @click="loadMorePentestNodes()" x-text="'Load more ('+(pentestGraph?.nodes?.length||0)+'/'+(pentestGraph?.total_nodes||0)+')'"></button>
-            <button x-show="pentestView==='assets' && pentestSelected" class="btn-ghost rounded px-2 py-1" @click="togglePentestFold()">Fold / expand</button>
-          </div>
-          <div class="mt-2 flex flex-wrap gap-2 text-[10px]">
-            <template x-for="kind in pentestLegend()" :key="kind"><span><span :style="'color:'+pentestColors[kind]">&#9679;</span> <span x-text="kind"></span></span></template>
-            <span x-show="pentestView==='assets'" x-text="'In scope '+(pentestGraph?.coverage?.in_scope||0)+' / tested '+(pentestGraph?.coverage?.tested||0)"></span>
-          </div>
-          <input aria-label="Filter pentest graph" class="mt-2 w-full rounded border border-slate-200 px-2 py-1 text-xs" placeholder="Filter nodes" x-model="pentestFilter" @input.debounce.200ms="loadPentest(selectedId)">
-          <p x-show="pentestError" x-text="pentestError" class="mt-2 text-xs text-rose-600"></p>
+        <div data-testid="ctf-toolbar" class="ctf-toolbar" x-show="workspaceMode!=='pentest' && selectedId" x-cloak role="toolbar" aria-label="CTF 图谱工具">
+          <button class="ctf-tool" @click="fit()" title="适应视图" aria-label="适应 CTF 图谱视图">
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3m13 5h3a2 2 0 0 0 2-2v-3"/></svg>
+          </button>
+          <button class="ctf-tool" @click="resetCtfLayout()" title="自动整理（重置手动定位）" aria-label="自动整理 CTF 图谱布局">
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h16"/><path d="m16 9 3 3-3 3"/></svg>
+            整理
+          </button>
+          <button data-testid="ctf-motion" class="ctf-tool" @click="toggleEdgeFlow()" :aria-pressed="edgeFlowEnabled" :disabled="ctfReducedMotion" :title="ctfReducedMotion?'遵循系统减少动态效果设置':'开启 / 暂停动态流线'" aria-label="切换 CTF 连线动画">
+            <span class="ctf-live-dot" aria-hidden="true"></span>流线
+          </button>
+          <span class="ctf-position-count" x-show="ctfManualPositionCount()" x-text="ctfManualPositionCount()+' 已定位'"></span>
+          <button data-testid="ctf-inspector-toggle" class="ctf-tool md:hidden" @click="ctfInspectorOpen=!ctfInspectorOpen" :aria-expanded="ctfInspectorOpen" aria-label="打开或关闭 CTF 详情">详情</button>
         </div>
-        <div id="cy" class="relative z-0"></div>
+        <div data-testid="ctf-canvas-hint" class="ctf-canvas-hint" x-show="workspaceMode!=='pentest' && selectedId" x-cloak>
+          <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path d="M8 11V5a2 2 0 0 1 4 0v5-7a2 2 0 0 1 4 0v8-5a2 2 0 0 1 4 0v8c0 5-3 8-7 8h-1c-3 0-5-2-7-5l-3-5a2 2 0 0 1 3-2l3 2"/></svg>
+          拖动节点<span class="desktop-hint"> · 滚轮缩放 · 空白处平移</span>
+        </div>
+        <div data-testid="pentest-dock" x-show="workspaceMode==='pentest' && selectedId" x-cloak class="pentest-dock absolute bottom-5 left-1/2 z-20 -translate-x-1/2">
+          <div class="pentest-dock-main" role="toolbar" aria-label="渗透图谱工具">
+            <div class="flex items-center gap-1" role="tablist" aria-label="图谱视图">
+              <button class="pentest-tab" :class="pentestView==='exploration' && 'active'" :aria-selected="pentestView==='exploration'" role="tab" @click="switchPentestView('exploration')">
+                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="m8.4 6.2 7.1.6M7 8.2l4 7.4m5.5-6.2-3.2 6.2"/></svg>
+                关联图谱
+              </button>
+              <button class="pentest-tab" :class="pentestView==='assets' && 'active'" :aria-selected="pentestView==='assets'" role="tab" @click="switchPentestView('assets')">资产覆盖</button>
+            </div>
+            <span class="pentest-divider"></span>
+            <button class="pentest-tool" @click="sideTab='pentest';pentestRecordTab='finding';pentestInspectorOpen=true">
+              发现 <span class="rounded-md bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600" x-text="pentestBoard?.record_counts?.finding??0"></span>
+            </button>
+            <button class="pentest-tool" @click="sideTab='pentest';pentestInspectorOpen=true">记录</button>
+            <button class="pentest-tool" @click="openPentestReport()">报告</button>
+            <button x-show="current?.project?.status==='running'" class="pentest-tool" @click="api('POST','/projects/'+selectedId+'/pause').then(()=>loadProject(selectedId))">暂停</button>
+            <button x-show="current?.project?.status==='stopped'" class="pentest-tool" @click="resumeSolve()">继续</button>
+            <button class="pentest-tool" @click="fit()" title="适应视图">
+              <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3m13 5h3a2 2 0 0 0 2-2v-3"/></svg>
+              适应视图
+            </button>
+            <button x-show="pentestGraph?.has_more" class="pentest-tool" @click="loadMorePentestNodes()" x-text="'加载更多 '+(pentestGraph?.nodes?.length||0)+'/'+(pentestGraph?.total_nodes||0)"></button>
+            <button x-show="pentestView==='assets' && pentestSelected" class="pentest-tool" @click="togglePentestFold()">折叠 / 展开</button>
+          </div>
+          <div class="pentest-dock-secondary">
+            <label class="pentest-search">
+              <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+              <input aria-label="筛选渗透图节点" placeholder="筛选资产、线索或证据" x-model="pentestFilter" @input.debounce.200ms="loadPentest(selectedId)">
+            </label>
+            <div class="pentest-metrics" aria-label="图谱统计">
+              <span><strong x-text="pentestGraphStats().assets"></strong>资产</span>
+              <span><strong x-text="pentestGraphStats().clues"></strong>线索</span>
+              <span><strong x-text="pentestGraphStats().links"></strong>关联</span>
+              <span x-show="pentestView==='assets'" x-text="'已测试 '+(pentestGraph?.coverage?.tested||0)+'/'+(pentestGraph?.coverage?.in_scope||0)"></span>
+            </div>
+            <div class="pentest-legend">
+              <template x-for="item in pentestLegend()" :key="item.kind"><span class="pentest-legend-item"><span class="pentest-legend-dot" :style="'background:'+pentestColors[item.kind]"></span><span x-text="item.label"></span></span></template>
+            </div>
+          </div>
+          <p x-show="pentestError" x-text="pentestError" class="mx-3 mb-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-600"></p>
+        </div>
+        <div id="cy" class="relative z-0" data-testid="pentest-graph"></div>
+        <div x-show="workspaceMode==='pentest' && selectedId && pentestGraph && pentestElements().nodes.length===0" x-cloak class="pentest-empty absolute inset-0 flex items-center justify-center pb-36 text-center">
+          <div class="max-w-64 px-6">
+            <div class="pentest-empty-icon"></div>
+            <p class="text-sm font-semibold tracking-tight text-slate-600">等待资产与线索</p>
+            <p class="mt-2 text-xs leading-5 text-slate-400">发现的资产、线索与证据会在这里形成关联网络。</p>
+          </div>
+        </div>
         <div x-show="!selectedId" class="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">
           Select or create a project to view its flow graph.
         </div>
       </section>
 
-      <aside class="w-[360px] max-w-[42vw] border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0" x-show="selectedId">
+      <aside data-testid="pentest-inspector" class="w-[360px] max-w-[42vw] xl:max-w-[42vw] min-w-0 border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0" :class="workspaceMode==='pentest' ? (pentestInspectorOpen ? 'pentest-inspector inspector-open' : 'pentest-inspector') : (ctfInspectorOpen ? 'pentest-inspector inspector-open' : 'pentest-inspector')" x-show="selectedId">
         <div class="flex border-b border-slate-100 shrink-0">
-          <button x-show="workspaceMode==='pentest'" @click="sideTab='pentest'" class="flex-1 px-3 py-2.5 text-xs font-medium" :class="sideTab==='pentest' && 'text-brand-600'">Pentest</button>
-          <button @click="sideTab='detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
-            :class="sideTab==='detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Detail</button>
-          <button @click="sideTab='hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
+          <button x-show="workspaceMode==='pentest'" @click="sideTab='pentest'" class="flex-1 px-3 py-3 text-xs font-medium transition" :class="sideTab==='pentest' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">渗透</button>
+          <button @click="sideTab='detail'" class="flex-1 px-3 py-3 text-xs font-medium transition"
+            :class="sideTab==='detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">详情</button>
+          <button @click="sideTab='hints'" class="flex-1 px-3 py-3 text-xs font-medium transition"
             :class="sideTab==='hints' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">
-            Hints <span class="ml-0.5 text-[10px] opacity-60" x-text="current ? current.hints.length : 0"></span>
+            提示 <span class="ml-0.5 text-[10px] opacity-60" x-text="current ? current.hints.length : 0"></span>
           </button>
-          <button @click="sideTab='log'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
-            :class="sideTab==='log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Log</button>
+          <button @click="sideTab='log'" class="flex-1 px-3 py-3 text-xs font-medium transition"
+            :class="sideTab==='log' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">日志</button>
+          <button x-show="workspaceMode!=='pentest'" class="px-3 text-slate-400 hover:text-slate-700 md:hidden" @click="clearSelection()" aria-label="关闭 CTF 详情" title="关闭详情">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+          <button x-show="workspaceMode==='pentest'" class="px-3 text-slate-400 hover:text-slate-700 md:hidden" @click="pentestInspectorOpen=false" aria-label="关闭渗透详情" title="关闭详情">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
         </div>
-        <div x-show="sideTab==='pentest'" class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div x-show="sideTab==='pentest'" class="flex-1 overflow-y-auto bg-[#fbfcfe] p-4 space-y-3">
+          <div class="flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+            <span>调查记录</span><span x-text="pentestGraphStats().assets+' 资产 · '+pentestGraphStats().clues+' 线索'"></span>
+          </div>
           <div class="flex flex-wrap gap-1 text-xs">
             <template x-for="kind in ['goal','finding','asset','evidence','work','coverage']" :key="kind">
-              <button class="rounded border px-2 py-1" :class="pentestRecordTab===kind && 'bg-brand-50 text-brand-700'" @click="pentestRecordTab=kind;pentestSelected=null" x-text="kind+' '+(pentestBoard?.record_counts?.[kind]??pentestRecords(kind).length)"></button>
+              <button class="pentest-record-tab" :class="pentestRecordTab===kind && 'active'" @click="pentestRecordTab=kind;pentestSelected=null;pentestDetailOpen=false" x-text="pentestRecordLabels[kind]+' '+(pentestBoard?.record_counts?.[kind]??pentestRecords(kind).length)"></button>
             </template>
           </div>
           <template x-for="record in pentestRecords(pentestRecordTab)" :key="record.id">
-            <div class="rounded-xl border border-slate-200 p-3 text-xs">
-              <button class="w-full text-left font-medium text-slate-700" @click="pentestSelected={data:{record}}" x-text="record.data.title||record.data.description||record.data.value||record.data.summary||record.data.test"></button>
-              <div class="mt-1 text-slate-400" x-text="record.state"></div>
-              <button x-show="record.kind==='finding' && current?.project?.status==='running'" @click="retestFinding(record)" class="mt-2 text-brand-600">Queue independent review</button>
+            <div class="pentest-record-card text-xs">
+              <button class="w-full text-left font-medium leading-5 text-slate-700" @click="pentestSelected={data:{record}};pentestInspectorOpen=true" x-text="pentestRecordListTitle(record)"></button>
+              <div class="mt-1.5 text-[11px] text-slate-400" x-text="pentestStateLabel(record.state)"></div>
+              <button x-show="record.kind==='finding' && current?.project?.status==='running'" @click="retestFinding(record)" class="mt-2 font-medium text-brand-600">安排独立复核</button>
             </div>
           </template>
-          <button x-show="pentestBoard?.records_more" class="text-xs text-brand-600" @click="loadMorePentestRecords()">Load more records</button>
-          <p x-show="pentestRecords(pentestRecordTab).length===0" class="text-xs text-slate-400">No records yet.</p>
-          <template x-if="pentestSelected"><div class="rounded-xl bg-slate-50 p-3 space-y-3">
-            <p class="text-sm font-semibold text-slate-700" x-text="pentestDetail().title"></p>
-            <template x-for="field in pentestDetail().fields" :key="field[0]"><div><p class="text-[10px] uppercase tracking-wide text-slate-400" x-text="field[0]"></p><p class="mt-1 whitespace-pre-wrap break-words text-xs text-slate-600" x-text="field[1]"></p></div></template>
-            <button x-show="pentestDetail().evidenceId" class="text-xs text-brand-600" @click="readPentestEvidence()">Read archived evidence</button>
+          <button x-show="pentestBoard?.records_more" class="text-xs text-brand-600" @click="loadMorePentestRecords()">加载更多记录</button>
+          <p x-show="pentestRecords(pentestRecordTab).length===0" class="rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">暂无记录。</p>
+          <template x-if="pentestSelected"><div class="pentest-inline-detail p-4 space-y-3">
+            <div class="flex items-start gap-2">
+              <p class="min-w-0 flex-1 text-sm font-semibold leading-5 text-slate-700 whitespace-pre-wrap break-words" x-text="pentestDetail().title"></p>
+              <button class="shrink-0 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-50" @click="openPentestDetail()">完整详情</button>
+            </div>
+            <template x-for="field in pentestDetail().fields" :key="field[0]"><div><p class="text-[10px] uppercase tracking-wide text-slate-400" x-text="field[0]"></p><p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-slate-600" x-text="field[1]"></p></div></template>
+            <button x-show="pentestDetail().evidenceId" class="text-xs font-medium text-brand-600" @click="readPentestEvidence()">读取归档证据</button>
             <pre x-show="pentestEvidencePreview" class="max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] text-slate-600" x-text="pentestEvidencePreview"></pre>
           </div></template>
         </div>
@@ -553,188 +757,6 @@
     </div>
   </footer>
 
-  <div class="fixed inset-0 z-30 bg-slate-50 flex flex-col overflow-x-hidden" x-show="showCompetition" x-cloak>
-    <header class="min-h-14 shrink-0 border-b border-slate-200 bg-white px-3 sm:px-4 py-2 flex flex-wrap items-center gap-2 sm:gap-3">
-      <div class="min-w-0 flex-1 sm:flex-none sm:w-56">
-        <h2 class="font-semibold text-slate-800 leading-tight">Competition</h2>
-        <p class="text-[11px] text-slate-400 truncate" x-text="competitionRun?.run?.identity_key || 'Select a confirmed workflow to begin'"></p>
-      </div>
-      <div class="hidden sm:block flex-1"></div>
-      <div class="order-3 w-full sm:order-none sm:w-auto flex items-center gap-2 min-w-0">
-        <select class="h-8 flex-1 sm:flex-none sm:w-56 min-w-0 rounded-lg px-2 text-xs" x-model="competitionWorkflowId" :disabled="competitionBusy || !!competitionRun">
-          <option value="">Select workflow</option>
-          <template x-for="workflow in opsWorkflows" :key="workflow.id">
-            <option :value="workflow.id" :disabled="workflow.status!=='confirmed'" x-text="workflow.name+' ('+workflow.status+')'"></option>
-          </template>
-        </select>
-        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="preflightCompetition()">Preflight</button>
-        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup()">New GZCTF</button>
-        <button class="btn-ghost h-8 rounded-lg px-2 text-xs" :disabled="competitionBusy||!!competitionRun" @click="openTsecbenchSetup()">New TSecBench</button>
-        <button x-show="opsWorkflows.find(w=>w.id===competitionWorkflowId)?.spec?.template_id==='tsecbench'" class="btn-ghost h-8 rounded-lg px-2 text-xs" @click="openTsecbenchSetup(opsWorkflows.find(w=>w.id===competitionWorkflowId))">Edit TSecBench</button>
-        <button class="btn-ghost h-8 shrink-0 rounded-lg px-2 text-xs" x-show="opsWorkflows.find(w=>w.id===competitionWorkflowId)?.spec?.challenges?.platform==='gzctf'" :disabled="competitionBusy||!!competitionRun" @click="openGzctfSetup(opsWorkflows.find(w=>w.id===competitionWorkflowId))">Settings</button>
-        <button class="btn h-8 shrink-0 rounded-lg px-2 sm:px-3 text-xs disabled:opacity-40" :disabled="competitionBusy||!competitionWorkflowId||!!competitionRun" @click="startCompetition()">Start</button>
-      </div>
-      <button class="h-8 w-8 rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-100" title="Close competition view" @click="closeCompetition()">&times;</button>
-    </header>
-
-    <div class="shrink-0 border-b border-slate-200 bg-white px-4 py-2 flex items-center gap-2" x-show="competitionRun">
-      <span class="rounded-lg px-2 py-1 text-xs font-semibold uppercase" :class="competitionStatusClass()" x-text="competitionRun?.run?.status"></span>
-      <span class="text-xs text-slate-400">Revision <b class="text-slate-600 tabular-nums" x-text="competitionRun?.run?.revision"></b></span>
-      <span class="text-xs text-rose-600 truncate" x-show="competitionRun?.run?.last_error" x-text="competitionRun?.run?.last_error"></span>
-      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" x-show="['finished','stopped'].includes(competitionRun?.run?.status)" @click="prepareCompetitionRun()">New run</button>
-      <div class="flex-1"></div>
-      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" :disabled="competitionBusy" @click="controlCompetition('refresh')">Refresh</button>
-      <button class="btn-ghost h-7 rounded-lg px-2.5 text-xs" x-show="competitionRun?.run?.status==='running'" :disabled="competitionBusy" @click="controlCompetition('pause')">Pause</button>
-      <button class="btn h-7 rounded-lg px-2.5 text-xs" x-show="['paused','blocked'].includes(competitionRun?.run?.status)" :disabled="competitionBusy" @click="controlCompetition('resume')">Resume</button>
-      <button class="btn-ghost btn-danger h-7 rounded-lg px-2.5 text-xs" :disabled="competitionBusy||['stopped','finished'].includes(competitionRun?.run?.status)" @click="controlCompetition('stop')">Stop</button>
-    </div>
-
-    <main class="flex-1 min-h-0 overflow-auto">
-      <div class="mx-auto max-w-[1500px] px-4 py-4 space-y-4">
-        <form x-show="showTsecbenchSetup" x-cloak @submit.prevent="saveTsecbenchWorkflow()" class="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-          <div class="font-semibold text-sm">TSecBench setup</div>
-          <div class="grid gap-3 text-xs sm:grid-cols-2">
-            <label>Platform address<input class="mt-1 w-full rounded-lg px-3 py-2" type="url" required x-model="tsecbenchDraft.base_url" placeholder="https://benchmark.example"></label>
-            <label>Name<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="tsecbenchDraft.name"></label>
-            <label>Benchmark token<input class="mt-1 w-full rounded-lg px-3 py-2" type="password" autocomplete="new-password" :required="!tsecbenchEditingId" x-model="tsecbenchToken" placeholder="Leave empty to keep saved token"></label>
-            <label>Concurrent instances (0 = platform default, max 3)<input class="mt-1 w-full rounded-lg px-3 py-2" type="number" min="0" max="3" x-model.number="tsecbenchDraft.remote_concurrency"></label>
-          </div>
-          <div class="flex flex-wrap gap-3 text-xs">
-            <label><input type="checkbox" x-model="tsecbenchPentest"> Classify imported tasks as Pentest</label>
-            <label><input type="checkbox" x-model="tsecbenchDraft.allow_private_networks"> Allow configured private platform network</label>
-            <label><input type="checkbox" x-model="tsecbenchDraft.allow_hints"> Allow hints that reduce the score</label>
-          </div>
-          <p class="text-xs text-slate-500">Connect the benchmark VPN for the application and task containers. The token identifies your benchmark task.</p>
-          <button class="btn rounded-lg px-3 py-2 text-xs" :disabled="competitionBusy">Save workflow</button>
-          <button class="btn-ghost rounded-lg px-3 py-2 text-xs" type="button" @click="showTsecbenchSetup=false;tsecbenchToken=''">Close</button>
-        </form>
-        <form x-show="showGzctfSetup" x-cloak @submit.prevent="saveGzctfWorkflow()" class="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-          <div class="font-semibold text-sm">GZCTF setup</div>
-          <label class="text-xs"><input type="checkbox" x-model="gzctfPentest"> Classify imported tasks as Pentest</label>
-          <p class="text-xs text-slate-500">Save your platform and competition once. Reuse the saved workflow for future runs.</p>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-            <label>Platform URL<input type="url" required class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.base_url" placeholder="https://ctf.example" /></label>
-            <label>Game ID<input type="number" min="1" required class="mt-1 w-full rounded-lg px-3 py-2" x-model.number="gzctfDraft.game_id" /></label>
-            <label>Competition name (optional)<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.name" /></label>
-            <label>Team ID (optional)<input class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.team_id" /></label>
-            <label>Authentication<select class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfAuthMode"><option value="token">GZCTF token</option><option value="login">Username and password</option></select></label>
-            <label x-show="gzctfAuthMode==='token'">Token<input type="password" autocomplete="off" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfToken" placeholder="Leave empty to reuse saved credentials" /></label>
-            <label x-show="gzctfAuthMode==='login'">Username<input autocomplete="username" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfUsername" /></label>
-            <label x-show="gzctfAuthMode==='login'">Password<input type="password" autocomplete="current-password" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfPassword" /></label>
-            <label>Attachment CDN URL (optional)<input type="url" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDraft.attachment_base_url" /></label>
-            <label>Deadline (local time, optional)<input type="datetime-local" class="mt-1 w-full rounded-lg px-3 py-2" x-model="gzctfDeadline" /></label>
-            <label>Container concurrency (0 = platform default)<input type="number" min="0" max="100" class="mt-1 w-full rounded-lg px-3 py-2" x-model.number="gzctfDraft.remote_concurrency" /></label>
-            <label class="flex items-center gap-2"><input type="checkbox" x-model="gzctfDraft.allow_private_networks" />Allow this platform on a private network</label>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button type="submit" class="btn rounded-lg px-3 py-2 text-xs" :disabled="competitionBusy">Save draft</button>
-            <button type="button" class="btn-ghost rounded-lg px-3 py-2 text-xs" x-show="gzctfEditingId" :disabled="competitionBusy||opsWorkflowBusy" @click="opsWorkflowId=gzctfEditingId;authorizeOpsWorkflow()">Authorize saved workflow</button>
-            <button type="button" class="btn-ghost rounded-lg px-3 py-2 text-xs" @click="closeGzctfSetup()">Close</button>
-            <span class="text-xs text-rose-600" x-text="opsConfirmError"></span>
-          </div>
-        </form>
-        <div x-show="competitionPreflight" class="border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 text-xs text-teal-800">
-          <span x-text="competitionPreflight?.challenge_count+' challenges, '+competitionPreflight?.remote_count+' remote'"></span>
-          <span class="ml-3 text-teal-600" x-show="competitionPreflight?.limits" x-text="'local '+competitionPreflight?.limits?.local_concurrency+' · remote '+competitionPreflight?.limits?.remote_concurrency"></span>
-          <span class="ml-3 text-teal-600" x-text="competitionPreflight?.identity_key"></span>
-        </div>
-        <div x-show="competitionError" class="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-700" x-text="competitionError"></div>
-
-        <template x-if="competitionRun">
-          <div class="space-y-4">
-            <section>
-              <div class="flex items-center justify-between mb-2">
-                <h3 class="text-xs font-semibold uppercase text-slate-500">Member seats</h3>
-                <div class="text-xs text-slate-400">
-                  <span class="text-teal-700" x-text="competitionRun.capacity.solving+' solving'"></span>
-                  <span class="mx-2 text-amber-700" x-text="competitionRun.capacity.writing+' WP'"></span>
-                  <span x-text="competitionRun.capacity.idle+' idle'"></span>
-                  <span class="ml-2 text-emerald-700" data-testid="competition-score" x-show="competitionRun.challenges.some(c=>typeof c.metadata.score==='number')" x-text="competitionRun.challenges.filter(c=>c.state==='solved').reduce((total,c)=>total+(c.metadata.score||0),0)+' solved challenge points'"></span>
-                  <span class="ml-2 text-slate-500" x-show="competitionRun.resource_capacity" x-text="'local '+competitionRun.resource_capacity.local.used+'/'+competitionRun.resource_capacity.local.limit+' · remote '+competitionRun.resource_capacity.remote.used+'/'+competitionRun.resource_capacity.remote.limit"></span>
-                </div>
-              </div>
-              <div class="grid grid-cols-2 sm:grid-cols-5 xl:grid-cols-10 gap-2">
-                <template x-for="item in competitionMembers" :key="item.member">
-                  <article class="h-24 rounded-lg border bg-white p-2 flex flex-col justify-between" :class="competitionMemberClass(item.state)">
-                    <div class="flex items-start justify-between gap-1">
-                      <div class="font-semibold text-xs text-slate-700 truncate" x-text="displayMember(item.member)"></div>
-                      <span class="h-1.5 w-1.5 rounded-full shrink-0 mt-1" :class="memberHealthDot(item)" :title="memberHealthTitle(item)"></span>
-                    </div>
-                    <div>
-                      <div class="text-[10px] uppercase font-semibold" x-text="item.state"></div>
-                      <div class="text-[10px] text-slate-400 truncate mt-0.5" x-text="competitionChallengeTitle(item.assignment?.challenge_id)"></div>
-                      <div class="text-[10px] tabular-nums truncate" :class="memberQuietClass(item)" x-text="memberActivity(item)"></div>
-                    </div>
-                  </article>
-                </template>
-              </div>
-            </section>
-
-            <section class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4 items-start">
-              <div class="border border-slate-200 bg-white rounded-lg overflow-hidden">
-                <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
-                  <h3 class="text-xs font-semibold uppercase text-slate-500">Challenges</h3>
-                  <span class="text-[11px] text-slate-400" x-text="competitionChallengeGroups().map(group=>group.items.length+' '+group.label.toLowerCase()).join(' · ')"></span>
-                </div>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-xs">
-                    <thead class="bg-slate-50 text-slate-400 uppercase text-[10px]"><tr><th class="text-left px-3 py-2">Challenge</th><th class="text-left px-3 py-2">Category</th><th class="text-left px-3 py-2">State</th><th class="text-left px-3 py-2">Members</th><th class="text-left px-3 py-2">Deadline</th><th class="text-right px-3 py-2">Wrong</th></tr></thead>
-                    <template x-for="group in competitionChallengeGroups()" :key="group.label">
-                      <tbody class="divide-y divide-slate-100" x-show="group.items.length">
-                        <tr class="bg-slate-50" x-show="group.items.length"><td colspan="6" class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500" x-text="group.label"></td></tr>
-                        <template x-for="challenge in group.items" :key="challenge.id">
-                          <tr class="hover:bg-slate-50">
-                                <td class="px-3 py-2"><div class="font-medium text-slate-700" x-text="challenge.metadata.title||challenge.external_id"></div><div class="text-[10px] text-slate-400" x-text="challenge.external_id"></div><div class="text-[10px] text-amber-600" x-show="challenge.metadata.queue_reason" x-text="challenge.metadata.queue_reason"></div></td>
-                            <td class="px-3 py-2 text-slate-500" x-text="challenge.metadata.category||'misc'"></td>
-                            <td class="px-3 py-2"><span class="rounded px-1.5 py-0.5" :class="competitionChallengeClass(challenge.state)" x-text="challenge.state"></span></td>
-                            <td class="px-3 py-2 text-slate-500" x-text="challenge.assignments.map(a=>displayMember(a.member)).join(', ')||'-'"></td>
-                            <td class="px-3 py-2 text-slate-500 tabular-nums" x-text="competitionDeadline(challenge.deadline_at)"></td>
-                            <td class="px-3 py-2 text-right tabular-nums" x-text="challenge.wrong_count"></td>
-                          </tr>
-                        </template>
-                      </tbody>
-                    </template>
-                  </table>
-                </div>
-              </div>
-              <aside class="border border-slate-200 bg-white rounded-lg overflow-hidden">
-                <div class="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
-                  <h3 class="text-xs font-semibold uppercase text-slate-500">Live events</h3>
-                  <div class="flex items-center gap-1">
-                    <template x-for="option in ['all','run','session']" :key="option">
-                      <button type="button" class="text-[10px] px-1.5 py-0.5 rounded border"
-                        :class="eventSourceFilter===option?'border-teal-400 bg-teal-50 text-teal-700':'border-slate-200 text-slate-500'"
-                        @click="eventSourceFilter=option" x-text="option"></button>
-                    </template>
-                    <span class="h-2 w-2 rounded-full bg-teal-500 ml-1" x-show="competitionEventSource"></span>
-                  </div>
-                </div>
-                <div class="h-[420px] overflow-y-auto divide-y divide-slate-100">
-                  <template x-for="event in mergedEvents()" :key="event.stream_key">
-                    <div class="px-3 py-2">
-                      <div class="flex justify-between gap-2">
-                        <span class="text-[11px] font-medium text-slate-700" x-text="event.kind"></span>
-                        <span class="text-[10px] text-slate-400" x-text="formatTime(event.created_at)"></span>
-                      </div>
-                      <div class="flex items-center gap-1 mt-0.5">
-                        <span class="text-[9px] uppercase rounded px-1" :class="event.source==='session'?'bg-sky-50 text-sky-700':'bg-slate-100 text-slate-500'" x-text="event.source"></span>
-                        <span class="text-[9px] text-slate-400 truncate" x-show="event.member" x-text="displayMember(event.member)"></span>
-                      </div>
-                      <div class="text-[10px] text-slate-400 mt-1 break-words" x-text="competitionEventSummary(event)"></div>
-                    </div>
-                  </template>
-                  <div class="p-6 text-center text-xs text-slate-400" x-show="mergedEvents().length===0">Waiting for events</div>
-                </div>
-              </aside>
-            </section>
-          </div>
-        </template>
-
-        <div x-show="!competitionRun" class="py-24 text-center text-sm text-slate-400">No active or historical competition run.</div>
-      </div>
-    </main>
-  </div>
-
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showNewProject" x-cloak>
     <div class="panel rounded-2xl w-[520px] max-h-[90vh] overflow-y-auto p-5">
       <div class="text-lg font-semibold text-slate-700 mb-4">New Project</div>
@@ -876,6 +898,15 @@
             </div>
             <div x-html="llmFields('member', cfg.member)"></div>
           </div>
+          <div class="rounded-2xl border border-slate-200 bg-white p-3 mb-3">
+            <div class="text-sm font-semibold text-slate-700 mb-1">Member (backup) · 5 seats <span class="text-[10px]" :class="health.member_backup?(health.member_backup.skipped?'text-slate-400':(health.member_backup.ok?'text-emerald-600':'text-rose-600')):'text-slate-400'" x-text="health.member_backup?(health.member_backup.skipped?'skipped':(health.member_backup.ok?'healthy':'unreachable')):''"></span></div>
+            <div class="text-[11px] text-slate-400 mb-2">Optional second Member key. When set, 5 of the 10 Member seats use it: even seats (amber, topaz, …) keep the primary key, odd seats (agate, …) use this one.</div>
+            <div class="text-xs text-amber-600 mb-2" x-show="(cfg.startup_warnings||[]).some(w=>w.includes('backup key equals primary'))">Backup key equals the primary Member key, so requests are not spread.</div>
+            <div x-html="llmFields('member_backup', cfg.member_backup || {api_format:'openai',api_surface:'auto',reasoning_effort:'max',model:'',base_url:'',api_key_set:false,api_key_preview:''})"></div>
+            <div class="mt-2 flex justify-end" x-show="cfg.member_backup">
+              <button class="btn-ghost text-xs px-2 py-1 rounded" @click="clearMemberBackup()">Clear backup slot</button>
+            </div>
+          </div>
           <template x-if="opsCfg">
             <div class="rounded-2xl border border-brand-100 bg-brand-50/30 p-3 mb-3">
               <div class="text-sm font-semibold text-slate-700 mb-1">IPC action agent <span class="text-[10px]" :class="health.ops_agent?(health.ops_agent.ok?'text-emerald-600':'text-rose-600'):'text-slate-400'" x-text="health.ops_agent?(health.ops_agent.ok?'healthy':'unreachable'):''"></span></div>
@@ -966,7 +997,7 @@
   </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showGlobalLogs" x-cloak>
-    <div class="panel rounded-2xl w-[860px] max-h-[90vh] overflow-hidden p-5 flex flex-col">
+    <div class="panel rounded-2xl w-[860px] max-w-[calc(100vw-2rem)] max-h-[90vh] overflow-hidden p-5 flex flex-col">
       <div class="flex items-center justify-between mb-4 shrink-0">
         <div class="text-lg font-semibold text-slate-700">Logs</div>
         <div class="flex items-center gap-2">
@@ -975,16 +1006,22 @@
             <input type="checkbox" x-model="logEnabled" @change="toggleLog()" />
             Enabled
           </label>
+          <select aria-label="Filter logs by competition" class="rounded-lg px-2 py-1.5 text-sm max-w-[180px]" x-model="logCompetitionFilterId" @change="logCompetitionFilterChanged()">
+            <option value="">All competitions</option>
+            <template x-for="item in logCompetitionChoices()" :key="item.id">
+              <option :value="item.id" x-text="item.label"></option>
+            </template>
+          </select>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveLogs()">Derive</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showGlobalLogs=false">Close</button>
         </div>
       </div>
-      <div class="grid grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
+      <div class="grid grid-cols-1 md:grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
         <div class="border-r border-slate-100 overflow-y-auto p-2 bg-slate-50/70">
           <template x-for="item in globalLogs" :key="item.project_id">
             <button class="w-full text-left rounded-xl p-3 mb-1 transition"
               :class="selectedLogProjectId===item.project_id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
-              @click="selectedLogProjectId=item.project_id">
+              @click="selectLogProject(item.project_id)">
               <div class="flex items-center justify-between gap-2">
                 <span class="text-[11px] font-mono text-slate-400" x-text="item.source_project_id || item.project_id"></span>
                 <span x-show="item.archived" class="text-[9px] rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700">Archived</span>
@@ -1004,18 +1041,19 @@
                   <div class="text-sm font-semibold text-slate-700 truncate" x-text="selectedLogProject().title"></div>
                   <div class="text-[11px] text-slate-400 truncate" x-text="selectedLogFilename()"></div>
                 </div>
-                <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="openGlobalLogs()">Refresh</button>
+                <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs" @click="refreshGlobalLogs()">Refresh</button>
               </div>
               <div class="flex flex-wrap gap-1.5 mb-3">
                 <template x-for="kind in logKinds()" :key="kind">
-                  <button class="h-7 px-2.5 rounded-lg border text-xs transition"
+                  <button x-show="logKindCount(selectedLogProject(), kind)>0" class="h-7 px-2.5 rounded-lg border text-xs transition"
                     :class="globalLogKind===kind ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'"
-                    @click="globalLogKind=kind">
+                    @click="selectLogKind(kind)">
                     <span x-text="kind"></span>
                     <span class="ml-1 text-[10px] opacity-70" x-text="logKindCount(selectedLogProject(), kind)"></span>
                   </button>
                 </template>
               </div>
+              <div x-show="globalLogLoading" class="text-xs text-slate-400 mb-2">Loading entries…</div>
               <template x-for="(entry,i) in selectedLogEntries()" :key="globalLogKind+'-'+i">
                 <div class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 mb-2">
                   <div class="flex flex-wrap items-center gap-2">
@@ -1034,16 +1072,88 @@
     </div>
   </div>
 
+  <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showRuns" x-cloak>
+    <div class="panel rounded-2xl w-[960px] max-w-[calc(100vw-2rem)] max-h-[90vh] overflow-hidden p-5 flex flex-col">
+      <div class="flex items-center justify-between mb-4 shrink-0 gap-3">
+        <div class="min-w-0">
+          <div class="text-lg font-semibold text-slate-700">Runs</div>
+          <div class="text-[11px] text-slate-400 truncate">Every CTF challenge is scheduled and submitted by one competition run.</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="openRuns()">Refresh</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showRuns=false">Close</button>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-[280px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
+        <div class="border-r border-slate-100 overflow-y-auto p-2 bg-slate-50/70">
+          <template x-for="run in runs" :key="run.id">
+            <button class="w-full text-left rounded-xl p-3 mb-1 transition"
+              :class="selectedRunId===run.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-white text-slate-600'"
+              @click="selectRun(run.id)">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[10px] font-mono text-slate-400 truncate" x-text="run.id"></span>
+                <span class="text-[9px] rounded px-1.5 py-0.5" :class="runStatusClass(run.status)" x-text="run.status"></span>
+              </div>
+              <div class="mt-1 text-xs font-semibold truncate" x-text="run.workflow_id"></div>
+              <div class="mt-1 text-[10px] text-slate-400" x-text="String(run.created_at||'').slice(0,19)"></div>
+            </button>
+          </template>
+          <div x-show="runs.length===0" class="text-xs text-slate-400 p-4">No runs yet</div>
+        </div>
+        <div class="overflow-y-auto p-4 min-w-0">
+          <template x-if="runSnapshot && runSnapshot.run">
+            <div>
+              <div class="mb-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="text-sm font-semibold text-slate-700 font-mono" x-text="runSnapshot.run.id"></span>
+                  <span class="text-[10px] rounded px-2 py-0.5" :class="runStatusClass(runSnapshot.run.status)" x-text="runSnapshot.run.status"></span>
+                  <span class="text-[11px] text-slate-400" x-text="'revision '+runSnapshot.run.revision"></span>
+                  <span class="text-[11px] text-slate-400" x-text="(runSnapshot.challenges||[]).length+' challenges'"></span>
+                </div>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs disabled:opacity-40" :disabled="runControlBusy" @click="runControl('pause')">Pause</button>
+                  <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs disabled:opacity-40" :disabled="runControlBusy" @click="runControl('resume')">Resume</button>
+                  <button class="btn-ghost h-7 px-2.5 rounded-lg text-xs disabled:opacity-40" :disabled="runControlBusy" @click="runControl('refresh')">Refresh run</button>
+                  <button class="btn-ghost btn-danger h-7 px-2.5 rounded-lg text-xs disabled:opacity-40" :disabled="runControlBusy" @click="runControl('stop')">Stop</button>
+                </div>
+              </div>
+              <div class="text-[11px] text-rose-600 mb-2" x-show="runSnapshot.run.last_error" x-cloak x-text="runSnapshot.run.last_error"></div>
+              <template x-for="challenge in (runSnapshot.challenges||[])" :key="challenge.id">
+                <div class="rounded-xl border border-slate-100 bg-slate-50/70 p-3 mb-2">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-sm font-semibold text-slate-700" x-text="(challenge.metadata||{}).title || challenge.external_id"></span>
+                    <span class="text-[10px] rounded px-1.5 py-0.5 chip" x-text="challenge.state"></span>
+                    <span class="text-[10px] text-slate-400" x-text="challenge.project_id || ''"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+          <div x-show="!runSnapshot" class="text-xs text-slate-400">Select a run</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showGlobalWP" x-cloak>
-    <div class="panel rounded-2xl w-[860px] max-h-[90vh] overflow-hidden p-5 flex flex-col">
+    <div class="panel rounded-2xl w-[860px] max-w-[calc(100vw-2rem)] max-h-[90vh] overflow-hidden p-5 flex flex-col">
       <div class="flex items-center justify-between mb-4 shrink-0">
         <div class="text-lg font-semibold text-slate-700">WP</div>
-        <div class="flex gap-2">
+        <div class="flex items-center gap-2">
+          <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1 text-[11px] transition"
+            :class="wpEnabled?'border-emerald-200 bg-emerald-50/60 text-emerald-700':'border-slate-200 bg-white text-slate-400'"
+            :title="'热开关：立即'+(wpEnabled?'关闭':'开启')+'自动生成 WP'">
+            <span class="relative inline-flex h-4 w-7 items-center rounded-full transition-colors" :class="wpEnabled?'bg-emerald-500':'bg-slate-300'">
+              <span class="absolute left-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform" :class="wpEnabled?'translate-x-3':'translate-x-0'"></span>
+            </span>
+            <input type="checkbox" class="sr-only" aria-label="WP 功能热开关" x-model="wpEnabled" @change="toggleWP()" />
+            <span x-text="wpEnabled?'WP 开':'WP 关'"></span>
+          </label>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="deriveWP()">Derive</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showGlobalWP=false">Close</button>
         </div>
       </div>
-      <div class="grid grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
+      <div class="grid grid-cols-1 md:grid-cols-[240px_1fr] min-h-0 flex-1 border border-slate-200 rounded-2xl overflow-hidden bg-white">
         <div class="border-r border-slate-100 overflow-y-auto p-2 bg-slate-50/70">
           <template x-for="item in completedWPs" :key="item.project_id">
             <button class="w-full text-left rounded-xl p-3 mb-1 transition"
@@ -1084,7 +1194,7 @@
           <span class="text-[11px]" :class="opsCfg?.configured?'text-emerald-600':'text-amber-600'" x-text="opsCfg?.configured?'API configured':'Configure API in Config'"></span>
           <button x-show="opsBusy" x-cloak class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-100 disabled:opacity-50" :disabled="opsInterrupting" @click="interruptOpsRun()" x-text="opsInterrupting?'Interrupting…':'Interrupt IPC'"></button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false;openIPCConfig()">Config</button>
-          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="openSkills()" title="Skills Diamond distributes to Members">Skill</button>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="openSkills()" title="Skills assigned to Members by challenge category">Skill</button>
           <button class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="showOps=false">Close</button>
         </div>
       </div>
@@ -1108,12 +1218,18 @@
           <div class="relative flex-1 min-h-0">
             <div class="h-full overflow-y-auto p-5 space-y-3 ops-chat-scroll" x-ref="opsMessages" @scroll="updateOpsScrollState()">
               <div class="rounded-2xl border border-dashed border-slate-200 p-6 text-center text-sm text-slate-400" x-show="opsMessages.length===0">
-                Ask IPC to inspect a task sandbox, run host diagnostics, connect a CTF platform, or solve a challenge with durable logs and a writeup.
+                <div>Ask IPC to inspect a task sandbox, run host diagnostics, connect a CTF platform, or solve a challenge with durable logs and a writeup.</div>
+                <div class="mt-4 flex flex-wrap justify-center gap-2">
+                  <button type="button" class="rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100"
+                    @click="startPresetWithIpc('gzctf')">配置 GZCTF 预设</button>
+                  <button type="button" class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:border-brand-200 hover:text-brand-700"
+                    @click="startPresetWithIpc('tsecbench')">配置 TSecBench 预设</button>
+                </div>
               </div>
               <template x-for="message in opsMessages" :key="message.id || message.created_at">
                 <div class="flex" :class="message.role==='user'?'justify-end':'justify-start'">
                   <div class="rounded-2xl text-sm break-words ops-markdown"
-                    :class="message.role==='user'?'max-w-[88%] bg-brand-500 text-white rounded-br-md px-4 py-3 ops-markdown-invert':'w-full bg-transparent text-slate-700 px-1 py-1'"
+                    :class="message.role==='user'?'max-w-[88%] bg-brand-500 text-white rounded-br-md px-4 py-3 ops-markdown-invert':(message.role==='note'?'mx-auto rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] text-amber-700':'w-full bg-transparent text-slate-700 px-1 py-1')"
                     x-html="renderMarkdown(message.content)"></div>
                 </div>
               </template>
@@ -1148,31 +1264,6 @@
                 </div>
               </div>
 
-              <template x-for="question in pendingQuestions" :key="question.id">
-                <div class="flex justify-start">
-                  <div class="w-full rounded-2xl border border-brand-200 bg-brand-50/60 px-4 py-3">
-                    <div class="text-sm font-medium text-slate-700" x-text="question.title"></div>
-                    <div class="mt-2 flex flex-wrap gap-1.5" x-show="(question.options||[]).length" x-cloak>
-                      <template x-for="option in question.options" :key="option">
-                        <button type="button" class="rounded-lg border px-2.5 py-1 text-xs transition"
-                          :class="questionAnswers[question.id]===option?'border-brand-400 bg-brand-100 text-brand-700':'border-slate-200 bg-white text-slate-600 hover:border-brand-300'"
-                          @click="questionAnswers[question.id]=option" x-text="option"></button>
-                      </template>
-                    </div>
-                    <div class="mt-2 flex gap-1.5">
-                      <textarea class="min-w-0 flex-1 rounded-lg px-2 py-1.5 text-xs resize-y"
-                        rows="2" placeholder="Your answer"
-                        x-model="questionAnswers[question.id]"
-                        @keydown.enter="onQuestionEnter($event, question.id)"></textarea>
-                      <button class="btn rounded-lg px-3 py-1.5 text-xs disabled:opacity-40"
-                        :disabled="questionBusy||!(questionAnswers[question.id]||'').trim()"
-                        @click="answerQuestion(question.id)">Answer</button>
-                    </div>
-                    <div class="mt-1.5 text-[11px] text-rose-600" x-show="questionError" x-cloak x-text="questionError"></div>
-                  </div>
-                </div>
-              </template>
-
               <div class="flex justify-start" x-show="opsBusy && !opsAnswer && !opsReasoning" x-cloak>
                 <div class="rounded-2xl rounded-bl-md bg-slate-100 px-4 py-3 text-xs text-slate-400">IPC is working…</div>
               </div>
@@ -1189,6 +1280,52 @@
               ↓ Latest
             </button>
           </div>
+          <template x-for="question in pendingQuestions" :key="question.id">
+            <div class="shrink-0 border-t border-brand-200 bg-brand-50/70">
+              <div class="flex items-center gap-2 px-3 pt-2">
+                <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-brand-500"></span>
+                <span class="shrink-0 rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-semibold text-brand-700">IPC 提问</span>
+                <span class="min-w-0 flex-1 truncate text-[10px] text-slate-400" x-show="!!questionCollapsed[question.id]" x-cloak x-text="question.title"></span>
+                <button type="button" class="ml-auto shrink-0 text-[10px] text-brand-600 hover:underline"
+                  @click="questionCollapsed[question.id]=!questionCollapsed[question.id]"
+                  x-text="questionCollapsed[question.id]?'展开':'收起'"></button>
+              </div>
+              <div x-show="!questionCollapsed[question.id]">
+                <div class="px-3 pt-1">
+                  <div class="max-h-9 overflow-hidden text-[11px] font-medium leading-relaxed text-slate-700 [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
+                    x-show="!questionExpanded[question.id]" x-text="question.title"></div>
+                  <div class="max-h-[26vh] overflow-y-auto ops-log-scroll whitespace-pre-wrap break-words text-[11px] font-medium leading-relaxed text-slate-700 [overflow-wrap:anywhere]"
+                    x-show="questionExpanded[question.id]" x-text="question.title"></div>
+                  <button type="button" class="text-[10px] text-brand-600 hover:underline"
+                    @click="questionExpanded[question.id]=!questionExpanded[question.id]"
+                    x-text="questionExpanded[question.id]?'收起全文':'展开全文'"></button>
+                </div>
+                <div class="mt-1 max-h-[26vh] overflow-y-auto ops-log-scroll px-3" x-show="(question.options||[]).length" x-cloak>
+                  <template x-for="(option,index) in question.options" :key="index">
+                    <button type="button"
+                      class="flex w-full items-start gap-2 rounded-md px-1.5 py-1 text-left text-[11px] leading-relaxed transition"
+                      :class="questionAnswers[question.id]===option?'bg-brand-100 text-brand-800':'text-slate-600 hover:bg-white'"
+                      @click="questionAnswers[question.id]=questionAnswers[question.id]===option?'':option">
+                      <span class="w-3 shrink-0 text-right font-mono text-[10px] text-slate-400" x-text="index+1"></span>
+                      <span class="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]" x-text="option"></span>
+                    </button>
+                  </template>
+                </div>
+                <div class="mt-1 flex items-center gap-1.5 px-3">
+                  <input class="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 placeholder:text-slate-400"
+                    placeholder="Your answer" x-model="questionAnswers[question.id]"
+                    @keydown.enter="onQuestionEnter($event, question.id)">
+                  <button class="btn shrink-0 rounded-lg px-2.5 py-1 text-xs disabled:opacity-40"
+                    :disabled="questionBusy||!(questionAnswers[question.id]||'').trim()"
+                    @click="answerQuestion(question.id)">Answer</button>
+                </div>
+                <div class="flex items-center justify-between px-3 pb-1.5 pt-0.5 text-[10px] text-slate-400">
+                  <span>点选项或直接输入 · Enter 提交</span>
+                  <span class="text-rose-600" x-show="questionError" x-cloak x-text="questionError"></span>
+                </div>
+              </div>
+            </div>
+          </template>
           <div class="border-t border-slate-100 p-3">
             <div class="mb-1.5 flex flex-wrap gap-1.5" x-show="opsNextCalls.length" x-cloak>
               <template x-for="item in opsNextCalls" :key="item.id">
@@ -1212,7 +1349,7 @@
                 x-ref="opsInputBox" rows="1" x-model="opsInput"
                 @input="autoGrowOpsInput()"
                 @keydown.enter="onOpsInputEnter($event)"
-                :placeholder="opsBusy?'IPC is working — your message is queued and sent next.':'Describe the platform API, task, or credentials for IPC.'"></textarea>
+                :placeholder="opsBusy?'IPC is working — your message is queued and sent next.':'Describe the platform API, task, or credentials for IPC. /compact summarizes this chat.'"></textarea>
               <div class="flex items-center gap-1.5 pt-1">
                 <input type="file" x-ref="opsFileInput" class="hidden" multiple @change="uploadOpsFiles($event)" />
                 <button type="button" class="h-8 w-8 rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-40 inline-flex items-center justify-center"
@@ -1242,6 +1379,20 @@
           <div class="flex items-center justify-between mb-3">
             <div class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Workflows</div>
             <button class="text-[11px] text-brand-600" @click="loadOpsWorkflows()">Refresh</button>
+          </div>
+          <div class="mb-3 rounded-xl border border-brand-100 bg-brand-50/60 p-2.5">
+            <div class="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-brand-500">Platform presets</div>
+            <template x-for="preset in workflowTemplates" :key="preset.id">
+              <button type="button" class="mb-1.5 w-full rounded-lg border border-brand-100 bg-white px-2.5 py-2 text-left transition hover:border-brand-300 hover:bg-brand-50"
+                @click="startPresetWithIpc(preset.id)" :title="'Let IPC collect your '+preset.name+' details'">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-semibold text-slate-700" x-text="preset.name"></span>
+                  <span class="text-[9px] font-semibold uppercase tracking-wide text-brand-500">IPC</span>
+                </div>
+                <div class="mt-0.5 text-[10px] leading-relaxed text-slate-400" x-text="preset.ipc_setup?.summary || ''"></div>
+              </button>
+            </template>
+            <div x-show="!workflowTemplates.length" class="text-[10px] text-slate-400">Open IPC to load the built-in presets.</div>
           </div>
           <div class="flex flex-col gap-1.5 pb-2 mb-2">
             <template x-for="workflow in opsWorkflows" :key="workflow.id">
@@ -1278,7 +1429,7 @@
               </div>
 
               <div class="rounded-xl border border-amber-200 bg-amber-50/60 p-3" x-show="!workflowTokens[selectedOpsWorkflow().id]">
-                <div class="text-[11px] leading-relaxed text-amber-800">Review the URLs, methods and templates above before authorizing.</div>
+                <div class="text-[11px] leading-relaxed text-amber-800">Start does not need this. Authorize only to use the read-only Preview from this tab.</div>
                 <button class="mt-2 btn w-full rounded-lg px-2 py-1.5 text-xs disabled:opacity-40"
                   :disabled="opsWorkflowBusy" @click="authorizeOpsWorkflow()"
                   x-text="opsWorkflowBusy?'Authorizing…':'Authorize workflow'"></button>
@@ -1289,9 +1440,8 @@
                 <div class="text-[11px] text-emerald-700">Execution capability is held only in this browser tab.</div>
                 <div class="grid grid-cols-2 gap-2">
                   <button class="btn-ghost rounded-lg px-2 py-1.5 text-xs" @click="executeOpsWorkflow('preview')">Preview</button>
-                  <button class="btn-ghost rounded-lg px-2 py-1.5 text-xs" @click="executeOpsWorkflow('import')">Import all</button>
+                  <button class="btn-ghost rounded-lg px-2 py-1.5 text-xs" @click="openRuns()">Runs</button>
                 </div>
-                <button class="btn w-full rounded-lg px-2 py-1.5 text-xs" x-show="selectedOpsWorkflow().spec.submit" @click="submitFoundFlags()">Submit all found flags</button>
                 <button class="w-full text-[10px] text-rose-500" @click="revokeOpsWorkflow()">Revoke capability</button>
               </div>
               <div class="rounded-xl border border-brand-200 bg-brand-50/50 p-3 space-y-2">
@@ -1309,7 +1459,6 @@
                 <div class="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-2 py-1.5"
                   x-show="competitionRun" x-cloak>
                   <span class="text-[10px] text-emerald-700" x-text="'Run '+(competitionRun?.run?.status||competitionRun?.status||'started')"></span>
-                  <button class="text-[10px] text-brand-600" @click="showOps=false;openCompetition()">Open run</button>
                 </div>
               </div>
               <pre class="rounded-xl border border-slate-200 bg-white p-3 text-[10px] text-slate-500 whitespace-pre-wrap max-h-48 overflow-auto" x-show="opsResult" x-text="JSON.stringify(opsResult,null,2)"></pre>
@@ -1322,12 +1471,75 @@
   </div>
 
   <div class="fixed inset-0 overlay flex items-center justify-center z-30 p-4" x-show="showWP" x-cloak>
-    <div class="panel rounded-2xl w-[760px] max-h-[90vh] overflow-y-auto p-5">
-      <div class="flex items-center justify-between mb-4">
+    <div class="panel rounded-2xl w-[760px] max-w-[calc(100vw-2rem)] max-h-[90vh] flex flex-col overflow-hidden p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div class="text-lg font-semibold text-slate-700">Writeup</div>
-        <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showWP=false">Close</button>
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1 text-[11px] transition"
+            :class="wpEnabled?'border-emerald-200 bg-emerald-50/60 text-emerald-700':'border-slate-200 bg-white text-slate-400'"
+            :title="'热开关：立即'+(wpEnabled?'关闭':'开启')+'自动生成 WP'">
+            <span class="relative inline-flex h-4 w-7 items-center rounded-full transition-colors" :class="wpEnabled?'bg-emerald-500':'bg-slate-300'">
+              <span class="absolute left-0.5 h-3 w-3 rounded-full bg-white shadow transition-transform" :class="wpEnabled?'translate-x-3':'translate-x-0'"></span>
+            </span>
+            <input type="checkbox" class="sr-only" aria-label="WP 功能热开关" x-model="wpEnabled" @change="toggleWP()" />
+            <span x-text="wpEnabled?'WP 开':'WP 关'"></span>
+          </label>
+          <div x-show="wpSource==='project'" x-cloak role="status" aria-live="polite"
+            class="inline-flex items-center gap-1.5 rounded-full bg-slate-50 px-2 py-1 text-[11px]">
+            <span class="h-1.5 w-1.5 rounded-full" :class="wpLiveDotClass()"></span>
+            <span :class="wpLiveTextClass()" x-text="wpLiveLabel()"></span>
+          </div>
+          <div x-show="wpSource==='project'" x-cloak role="group" aria-label="Writeup 显示模式"
+            class="inline-flex items-center rounded-full border border-slate-200 bg-slate-100 p-0.5">
+            <button type="button" class="rounded-full px-2.5 py-1 text-[11px]"
+              :class="wpViewMode==='preview' ? 'bg-white font-medium text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+              :aria-pressed="wpViewMode==='preview'" @click="setWPView('preview')">预览</button>
+            <button type="button" class="rounded-full px-2.5 py-1 text-[11px]"
+              :class="wpViewMode==='source' ? 'bg-white font-medium text-slate-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+              :aria-pressed="wpViewMode==='source'" @click="setWPView('source')">源码</button>
+          </div>
+          <button class="btn-ghost px-3 py-1.5 rounded-lg text-sm"
+            @click="wpSource==='project' ? closeProjectWP() : showWP=false">Close</button>
+        </div>
       </div>
-      <pre class="text-[11px] whitespace-pre-wrap text-slate-600" x-text="wpText"></pre>
+      <div x-ref="wpScroll" class="min-h-0 flex-1 overflow-y-auto">
+        <template x-if="wpSource==='project'">
+          <div>
+            <div x-show="wpLoading" class="py-8 text-center text-xs text-slate-400">加载中…</div>
+            <div x-show="wpError" class="rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-600" x-text="wpError"></div>
+            <div x-show="wpNotice" class="mb-3 rounded-xl border border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-700" x-text="wpNotice"></div>
+            <div x-show="!wpLoading && !wpError">
+              <div x-show="wpViewMode==='preview'" class="ops-markdown text-sm text-slate-700" x-html="wpDisplayHTML()"></div>
+              <pre x-show="wpViewMode==='source'" class="text-[11px] whitespace-pre-wrap break-words text-slate-600" x-text="wpText"></pre>
+              <div x-show="!wpText" class="py-8 text-center text-xs text-slate-400">暂无内容</div>
+            </div>
+          </div>
+        </template>
+        <pre x-show="wpSource!=='project'" class="text-[11px] whitespace-pre-wrap text-slate-600" x-text="wpText"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="fixed inset-0 overlay flex items-center justify-center z-50 p-4" x-show="pentestDetailOpen" x-cloak
+    @click.self="closePentestDetail()" @keydown.escape.window="closePentestDetail()">
+    <div class="panel rounded-2xl w-[760px] max-w-[calc(100vw-2rem)] max-h-[85vh] flex flex-col overflow-hidden">
+      <div class="flex items-start gap-3 border-b border-slate-100 px-5 py-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">节点详情</div>
+          <div class="mt-1 text-sm font-semibold text-slate-700 whitespace-pre-wrap break-words" x-text="pentestDetail().title"></div>
+        </div>
+        <button class="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-500 hover:bg-slate-50" @click="closePentestDetail()">关闭</button>
+      </div>
+      <div class="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+        <template x-for="field in pentestDetail().fields" :key="field[0]">
+          <div>
+            <div class="text-[10px] font-semibold uppercase tracking-wide text-slate-400" x-text="field[0]"></div>
+            <div class="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-600" x-text="field[1]"></div>
+          </div>
+        </template>
+        <button x-show="pentestDetail().evidenceId" class="text-xs text-brand-600" @click="readPentestEvidence()">读取归档证据</button>
+        <pre x-show="pentestEvidencePreview" class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 text-[11px] text-slate-600" x-text="pentestEvidencePreview"></pre>
+      </div>
     </div>
   </div>
 
@@ -1341,59 +1553,71 @@
     return {
       ...pentestWorkspace(),
       projects: [], selectedId: null, current: null, broadcasts: [],
-      categories: ["pwn","reverse","crypto","web","misc","ai","osint","pentest"],
+      categories: ["pwn","reverse","crypto","web","misc","ai","osint","pentest","web+pwn"],
       sidebarOpen: true, sideTab: "detail", logEnabled: true, logSearch: "", logEntries: [], llmEntries: [],
       showNewProject: false, showIPC: false, showMemory: false, showAddMem: false, showWP: false,
-      showGlobalLogs: false, showGlobalWP: false, showOps: false, showCompetition: false,
+      showGlobalLogs: false, showGlobalWP: false, showOps: false,
       _appStarted: false,
       np: { title:"", category:"web", origin:"", goal:"", hints:[{content:""}] },
       newHint: { content:"", creator:"human" },
       nm: { category:"knowledge", title:"", content:"", tags:"" },
       cfg: null, opsCfg: null, health: {}, memories: [], wpText: "", toast: "",
+      wpViewMode: "preview", wpSource: "global", wpProjectId: null, wpEtag: "", wpUpdatedAt: "",
+      wpLiveStatus: "offline", wpEventSource: null, wpPollTimer: null, wpReconnectTimer: null,
+      wpRetryCount: 0, wpPollToken: 0, wpUpdatedFlash: false, wpFlashTimer: null,
+      wpLoading: false, wpError: "", wpNotice: "",
       _removedMembers: [],
       memoryTab: "catalog", catalogTree: [], catalogOpen: {}, selectedCatalog: null,
       globalLogs: [], selectedLogProjectId: null, globalLogKind: "project_log", completedWPs: [], selectedCompletedWPId: null,
-      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsRunId: null, opsNextCalls: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
+      globalLogEntries: [], globalLogLoading: false, globalLogToken: 0, logCompetitionFilterId: "", _ticking: false, _loadingLog: false,
+      opsBusy: false, opsStreaming: false, opsInterrupting: false, opsUploading: false, opsCompacting: false, opsRunId: null, opsNextCalls: [], opsSessions: [], opsSessionId: null, opsMessages: [], opsInput: "", opsAttachments: [], opsAtBottom: true,
       opsAnswer: "", opsReasoning: "", opsReasoningOpen: false, opsToolNames: [], opsToolsOpen: false,
       opsError: "", opsRetryMessage: null, opsRunStartedAt: 0, projectPhaseErrorOpen: false,
-      opsWorkflows: [], opsWorkflowId: null, workflowTokens: {},
+      opsWorkflows: [], opsWorkflowId: null, workflowTokens: {}, workflowTemplates: [],
       opsConfirmInput: "", opsResult: null,
       opsWorkflowBusy: false, opsConfirmError: "",
       opsStartBusy: false, opsStartError: "",
       projectStatusFilter: [], projectFilterOpen: false,
-      competitionRuns: [], competitionRun: null, competitionMembers: [], competitionEvents: [],
-      competitionWorkflowId: "", competitionBusy: false, competitionPreflight: null, competitionError: "", competitionEventSource: null, competitionEventSourceToken: 0,
-      showGzctfSetup: false, gzctfEditingId: "", gzctfDraft: {}, gzctfAuthMode: "token", gzctfToken: "", gzctfUsername: "", gzctfPassword: "", gzctfDeadline: "",
-      competitionEventCursor: 0, competitionEventRunId: "", competitionReconnectTimer: null,
-      sessionHealth: [], sessionEvents: [], eventSourceFilter: "all",
-      sessionEventSource: null, sessionEventSourceToken: 0, sessionEventCursor: 0,
-      sessionReconnectTimer: null,
-      nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _flowTimer: null, _clock: null,
+      competitions: [], competitionFilterId: "", competitionFilterOpen: false,
+      runs: [], showRuns: false, selectedRunId: null, runSnapshot: null, runsLoading: false, runControlBusy: false,
+      competitionRun: null, wpEnabled: true,
+      nowMs: Date.now(), selectedNode: null, cy: null, _poll: null, _clock: null,
+      edgeFlowEnabled: true, ctfReducedMotion: false, ctfInspectorOpen: false, _flowFrame: null, _lastFlowAt: 0,
 
       async init() {
         window._ipc = this;
+        this.sidebarOpen = window.innerWidth >= 768;
         this.workspaceMode = localStorage.getItem("ipc.workspace") === "pentest" ? "pentest" : "ctf";
+        this.ctfReducedMotion=window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || false;
+        this.edgeFlowEnabled=!this.ctfReducedMotion;
+        try{ this.wpViewMode = localStorage.getItem("ipc.wp.viewMode") === "source" ? "source" : "preview"; }catch(error){}
+        if(!this._wpUnloadBound){
+          this._wpUnloadBound = true;
+          window.addEventListener("beforeunload", () => this.closeProjectWPLive());
+        }
         await this.startApp();
       },
       clearAppData(){
         this.projects=[]; this.selectedId=null; this.current=null; this.broadcasts=[];
-        this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.completedWPs=[]; this.memories=[];
+        this.logEntries=[]; this.llmEntries=[]; this.globalLogs=[]; this.globalLogEntries=[]; this.globalLogToken=0; this.logCompetitionFilterId=""; this.completedWPs=[]; this.memories=[];
         this.cfg=null; this.opsCfg=null; this.opsSessions=[]; this.opsSessionId=null; this.opsMessages=[]; this.opsRunId=null; this.opsNextCalls=[]; this.opsAttachments=[]; this.opsStreaming=false; this.opsInterrupting=false; this.opsUploading=false; this.opsWorkflows=[]; this.opsWorkflowId=null;
         this.opsAnswer=""; this.opsReasoning=""; this.opsToolNames=[]; this.opsError=""; this.opsRetryMessage=null;
-        this.workflowTokens={}; this.opsResult=null;
-        this.competitionRuns=[]; this.competitionRun=null; this.competitionMembers=[]; this.competitionEvents=[];
-        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
-        this.sessionHealth=[]; this.sessionEvents=[]; this.sessionEventCursor=0;
-        if(this.sessionEventSource){ this.sessionEventSource.close(); this.sessionEventSource=null; }
+        this.workflowTokens={}; this.workflowTemplates=[]; this.opsResult=null;
+        this.competitionRun=null; this.competitions=[]; this.competitionFilterId=""; this.competitionFilterOpen=false;
+        this.runs=[]; this.showRuns=false; this.selectedRunId=null; this.runSnapshot=null;
+        this.closeProjectWPLive(); this.showWP=false; this.wpText="";
+        this.stopEdgeFlow(); this._ctfManualByProject=new Map(); this._ctfLayoutProject=null; this._ctfManualPositions=null;
         if(this.cy){ this.cy.destroy(); this.cy=null; }
       },
       async startApp(){
         if(this._appStarted) return;
         this._appStarted=true;
         try{
-          await this.loadProjects();
+          await Promise.all([this.loadProjects(), this.loadCompetitions()]);
+          await this.loadRuns();
           await this.loadBroadcasts();
           const status=await this.api("GET","/logs/status"); this.logEnabled=status.enabled;
+          try{ const wpStatus=await this.api("GET","/wp/status"); this.wpEnabled=!!wpStatus.enabled; }catch(error){}
           if(this.workspaceProjects().length) await this.openProject(this.workspaceProjects()[0].id);
           this._clock=setInterval(()=>{ this.nowMs=Date.now(); },1000);
           this._poll=setInterval(()=>this.tick(),2500);
@@ -1405,10 +1629,12 @@
       stopApp(){
         if(this._clock) clearInterval(this._clock);
         if(this._poll) clearInterval(this._poll);
-        if(this._flowTimer) clearInterval(this._flowTimer);
-        this._clock=null; this._poll=null; this._flowTimer=null; this._appStarted=false;
+        this.stopEdgeFlow();
+        this._clock=null; this._poll=null; this._appStarted=false;
       },
       async tick() {
+        if(this._ticking) return;
+        this._ticking=true;
         this.nowMs = Date.now();
         try{
           await this.loadProjects(); await this.loadBroadcasts();
@@ -1416,8 +1642,7 @@
           if (this.selectedId && this.sideTab==='log') await this.loadLog();
           if(this.showOps && this.opsRunId && !this.opsStreaming) await this.pollOpsRun();
           if(this.showOps && this.opsSessionId) await this.loadQuestions();
-          if(this.showCompetition && this.competitionRun) await this.loadCompetitionRun(this.competitionRun.run.id,false);
-        }catch(error){}
+        }catch(error){}finally{ this._ticking=false; }
       },
       async api(method, path, body) {
         const opt = { method, headers: {}, credentials:"same-origin" };
@@ -1485,16 +1710,48 @@
         return order[this.projectStatusGroup(status)] ?? 3;
       },
       projectStatusGroupCount(key){
-        return this.workspaceProjects().filter(project=>this.projectStatusGroup(project.status)===key).length;
+        return this.competitionProjects().filter(project=>this.projectStatusGroup(project.status)===key).length;
       },
       toggleProjectStatusFilter(key){
         this.projectStatusFilter=this.projectStatusFilter.includes(key)
           ? this.projectStatusFilter.filter(item=>item!==key)
           : [...this.projectStatusFilter,key];
       },
+      async loadCompetitions(){
+        try{
+          const data=await this.api("GET","/projects/competitions");
+          this.competitions=data.competitions||[];
+        }catch(error){ this.competitions=[]; }
+        if(this.competitionFilterId && !this.competitions.some(item=>item.id===this.competitionFilterId)){
+          this.competitionFilterId="";
+        }
+      },
+      selectCompetitionFilter(id){
+        this.competitionFilterId=this.competitionFilterId===id ? "" : id;
+        this.competitionFilterOpen=false;
+      },
+      clearCompetitionFilter(){ this.competitionFilterId=""; this.competitionFilterOpen=false; },
+      competitionProjects(){
+        if(!this.competitionFilterId) return this.workspaceProjects();
+        const group=this.competitions.find(item=>item.id===this.competitionFilterId);
+        const ids=new Set(group?.project_ids||[]);
+        return this.workspaceProjects().filter(project=>ids.has(project.id));
+      },
+      competitionProjectCount(item){
+        const ids=new Set(item?.project_ids||[]);
+        return this.workspaceProjects().filter(project=>ids.has(project.id)).length;
+      },
+      visibleCompetitions(){
+        return this.competitions.filter(item=>this.competitionProjectCount(item)>0);
+      },
+      competitionFilterLabel(){
+        const group=this.competitions.find(item=>item.id===this.competitionFilterId);
+        return group?.label || "";
+      },
       filteredProjects(){
-        if(!this.projectStatusFilter.length) return this.workspaceProjects();
-        return this.workspaceProjects().filter(project=>
+        const base=this.competitionProjects();
+        if(!this.projectStatusFilter.length) return base;
+        return base.filter(project=>
           this.projectStatusFilter.includes(this.projectStatusGroup(project.status)));
       },
       async loadBroadcasts(){ this.broadcasts = await this.api("GET","/broadcasts"); },
@@ -1505,10 +1762,13 @@
         if(detail.project.category === "pentest") await this.loadPentest(id);
       },
       async openProject(id){
-        this.selectedId=id; this.selectedNode=null; this.pentestSelected=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestRequest++; this.sideTab=this.workspaceMode==='pentest' ? 'pentest' : 'detail';
-        if(this.cy){ this.cy.destroy(); this.cy=null; }
+        if(this.showWP && this.wpSource==="project" && this.wpProjectId!==id) this.closeProjectWP();
+        this.selectedId=id; this.selectedNode=null; this.ctfInspectorOpen=false; this.pentestSelected=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestRequest++; this.pentestInspectorOpen=false; this.sideTab=this.workspaceMode==='pentest' ? 'pentest' : 'detail';
+        this.stopEdgeFlow(); if(this.cy){ this.cy.destroy(); this.cy=null; }
         await this.loadProject(id); await this.loadLog();
-        this.$nextTick(()=>this.renderGraph(true));
+        this.$nextTick(()=>{
+          if(id===this.selectedId && this.workspaceMode!=="pentest") this.renderGraph(true);
+        });
       },
       async createProject(){
         const body={title:this.np.title,category:this.np.category,origin:this.np.origin,goal:this.np.goal,
@@ -1543,35 +1803,137 @@
       async reopenProject(){ await this.api("POST","/projects/"+this.selectedId+"/reopen"); this.flash("reopened"); await this.loadProject(this.selectedId); this.renderGraph(); },
       async stopSolve(){ await this.api("POST","/projects/"+this.selectedId+"/stop"); await this.loadProject(this.selectedId); },
       async stopAll(){
+        await this.loadRuns();
+        const run=this.activeRun();
+        if(this.workspaceMode!=="pentest" && run){
+          if(!confirm("Stop run "+run.id+"? Assignments are released and instances are stopped.")) return;
+          await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/stop",{revision:run.revision});
+          await Promise.all([this.loadProjects(),this.loadRuns()]);
+          return;
+        }
         const active = this.workspaceProjects().filter(p=>!["solved","completed","stopped","timeout","infra_error","failed"].includes(p.status));
         for(const project of active) await this.api("POST","/projects/"+project.id+"/stop");
         await this.loadProjects();
       },
+      async loadRuns(){
+        try{ const data=await this.api("GET","/api/runs?limit=50"); this.runs=data.runs||[]; }
+        catch(error){ this.runs=[]; }
+      },
+      async openRuns(){
+        this.showRuns=true;
+        await this.loadRuns();
+        if(!this.runs.some(item=>item.id===this.selectedRunId)) this.selectedRunId=this.runs[0]?.id||null;
+        if(this.selectedRunId) await this.selectRun(this.selectedRunId);
+        else this.runSnapshot=null;
+      },
+      async selectRun(runId){
+        if(!runId) return;
+        this.selectedRunId=runId;
+        try{ this.runSnapshot=await this.api("GET","/api/runs/"+encodeURIComponent(runId)); }
+        catch(error){ this.runSnapshot=null; }
+      },
+      async runControl(action){
+        const run=this.runSnapshot?.run; if(!run||this.runControlBusy) return;
+        if(action==="stop" && !confirm("Stop run "+run.id+"? Assignments are released and instances are stopped.")) return;
+        this.runControlBusy=true;
+        try{
+          await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/"+action,{revision:run.revision});
+          await this.loadRuns();
+          await this.selectRun(run.id);
+          await Promise.all([this.loadProjects(),this.loadCompetitions()]);
+        }catch(error){}
+        finally{ this.runControlBusy=false; }
+      },
+      runStatusClass(status){ return {running:"bg-teal-50 text-teal-700",paused:"bg-amber-50 text-amber-700",blocked:"bg-rose-50 text-rose-700",stopped:"bg-slate-100 text-slate-600",finished:"bg-emerald-50 text-emerald-700",draining:"bg-sky-50 text-sky-700"}[status]||"bg-slate-100 text-slate-600"; },
+      activeRun(){ return this.runs.find(item=>!["finished","stopped"].includes(item.status))||null; },
+      ctfRunLabel(){ const run=this.activeRun(); return run ? (run.status+" · "+run.id) : "No active run"; },
       async deleteProject(){ if(!confirm("Delete project?"))return; await this.api("DELETE","/projects/"+this.selectedId);
-        this.pentestRequest++; this.selectedId=null; this.current=null; this.selectedNode=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestSelected=null; await this.loadProjects(); if(this.cy){this.cy.destroy();this.cy=null;} },
+        this.pentestRequest++; this.selectedId=null; this.current=null; this.selectedNode=null; this.pentestBoard=null; this.pentestGraph=null; this.pentestSelected=null; await Promise.all([this.loadProjects(),this.loadCompetitions()]); this.stopEdgeFlow(); if(this.cy){this.cy.destroy();this.cy=null;} },
       async toggleLog(){ await this.api("PUT","/logs/status",{enabled:this.logEnabled}); },
+      async toggleWP(){
+        try{
+          await this.api("PUT","/wp/status",{enabled:this.wpEnabled});
+          this.flash(this.wpEnabled ? "WP 已开启（立即生效）" : "WP 已关闭（立即生效）");
+        }catch(error){ this.wpEnabled=!this.wpEnabled; }
+      },
       async loadLog(){
-        if(!this.selectedId)return;
-        const p=await this.api("GET","/logs/"+this.selectedId+"?kind=project&limit=500");
-        const l=await this.api("GET","/logs/"+this.selectedId+"?kind=llm&limit=500");
-        this.logEntries=p.entries||[]; this.llmEntries=l.entries||[];
+        if(!this.selectedId || this._loadingLog) return;
+        this._loadingLog=true;
+        try{
+          const p=await this.api("GET","/logs/"+this.selectedId+"?kind=project&limit=500");
+          const l=await this.api("GET","/logs/"+this.selectedId+"?kind=llm&limit=500");
+          this.logEntries=p.entries||[]; this.llmEntries=l.entries||[];
+        }finally{
+          this._loadingLog=false;
+        }
       },
       logSummary(e){ const k=Object.keys(e).filter(x=>!["ts","event","project_id"].includes(x)); return k.map(x=>x+"="+JSON.stringify(e[x])).join(" ").slice(0,160); },
       logEntryMember(entry){ return entry?.member || entry?.worker || entry?.agent || "unknown"; },
       async openGlobalLogs(){
-        const r=await this.api("GET","/logs/projects?limit=500");
-        this.globalLogs=r.logs||[];
-        this.selectedLogProjectId=this.globalLogs[0]?.project_id||null;
-        this.globalLogKind="project_log";
         this.showGlobalLogs=true;
+        await this.loadGlobalLogCatalog();
+      },
+      async refreshGlobalLogs(){
+        await this.loadGlobalLogCatalog();
+      },
+      logCompetitionChoices(){
+        return (this.competitions||[]).filter(item=>(item.project_ids||[]).length>0);
+      },
+      async logCompetitionFilterChanged(){
+        try{
+          await this.loadGlobalLogCatalog();
+        }catch(error){
+          this.globalLogs=[]; this.selectedLogProjectId=null; this.globalLogEntries=[];
+        }
+      },
+      async loadGlobalLogCatalog(){
+        const params=new URLSearchParams({include_entries:"false"});
+        if(this.logCompetitionFilterId) params.set("competition_id", this.logCompetitionFilterId);
+        const r=await this.api("GET","/logs/projects?"+params.toString());
+        const logs=r?.logs||[];
+        this.globalLogs=logs;
+        const still=logs.find(item=>item.project_id===this.selectedLogProjectId);
+        this.selectedLogProjectId=(still||logs[0]||{}).project_id||null;
+        this.globalLogKind=this.defaultLogKind(this.selectedLogProject());
+        await this.loadSelectedLogEntries();
+      },
+      defaultLogKind(item){
+        if(!item) return "project_log";
+        return this.logKinds().find(kind=>this.logKindCount(item,kind)>0)||"project_log";
+      },
+      async selectLogProject(projectId){
+        if(this.selectedLogProjectId===projectId) return;
+        this.selectedLogProjectId=projectId;
+        this.globalLogKind=this.defaultLogKind(this.selectedLogProject());
+        await this.loadSelectedLogEntries();
+      },
+      async selectLogKind(kind){
+        if(this.globalLogKind===kind) return;
+        this.globalLogKind=kind;
+        await this.loadSelectedLogEntries();
+      },
+      async loadSelectedLogEntries(){
+        const item=this.selectedLogProject();
+        if(!item){ this.globalLogEntries=[]; return; }
+        const token=++this.globalLogToken;
+        this.globalLogLoading=true;
+        const kind=String(this.globalLogKind).replace(/_log$/,"");
+        try{
+          const r=await this.api("GET","/logs/"+encodeURIComponent(item.project_id)+"?kind="+encodeURIComponent(kind)+"&limit=500");
+          if(token===this.globalLogToken) this.globalLogEntries=r?.entries||[];
+        }catch(error){
+          if(token===this.globalLogToken) this.globalLogEntries=[];
+        }finally{
+          if(token===this.globalLogToken) this.globalLogLoading=false;
+        }
       },
       logKinds(){ return ["project_log","llm_log","tool_log","memory_log"]; },
-      logKindCount(item, kind){ return item?.[kind]?.entries?.length || 0; },
-      logEntryCount(item){ return this.logKinds().reduce((count, kind)=>count+this.logKindCount(item, kind), 0); },
+      logKindCount(item, kind){ const value=item?.[kind]; if(!value) return 0; return typeof value.count==="number" ? value.count : (value.entries?.length||0); },
+      logEntryCount(item){ return typeof item?.entry_count==="number" ? item.entry_count : this.logKinds().reduce((count, kind)=>count+this.logKindCount(item, kind), 0); },
       selectedLogProject(){ return this.globalLogs.find(x=>x.project_id===this.selectedLogProjectId)||this.globalLogs[0]||null; },
       selectedProjectLogFilename(item){ return item?.[this.globalLogKind]?.filename || item?.project_log?.filename || ""; },
       selectedLogEntries(){
-        const entries=this.selectedLogProject()?.[this.globalLogKind]?.entries || [];
+        const entries=this.globalLogEntries||[];
         const query=this.logSearch.trim().toLocaleLowerCase();
         return query ? entries.filter(entry=>[this.globalLogDetail(entry),entry.event,this.logEntryMember(entry)].join("\n").toLocaleLowerCase().includes(query)) : entries;
       },
@@ -1639,9 +2001,9 @@
           if(ref==="flag"){add("flag",{label:"FLAG",ntype:"flag",kind:"special",specialId:"flag"});return "flag";}
           if(ref==="wp"){add("wp",{label:"WP",ntype:"wp",kind:"special",specialId:"wp"});return "wp";}
           return ref; };
-        for(const l of d.agent_links){ if(!["start","assign","report","flag","wp","return"].includes(l.kind)) continue; const s=resolve(l.src),t=resolve(l.dst); if(!have.has(s)||!have.has(t)) continue;
-          edges.push({data:{id:"L"+l.id,source:s,target:t,etype:"orch",label:l.kind}}); }
-        return {nodes,edges};
+        for(const l of d.agent_links){ if(!["start","assign","report","flag","wp","return","curate"].includes(l.kind)) continue; const s=resolve(l.src),t=resolve(l.dst); if(!have.has(s)||!have.has(t)) continue;
+          edges.push({data:{id:"L"+l.id,source:s,target:t,etype:l.kind==="curate"?"curate":"orch",label:l.kind==="curate"?"审阅":l.kind}}); }
+        return {nodes,edges:this.decorateCtfEdges(edges)};
       },
       truncate(text,n){ text=(text||"").trim(); return text.length>n ? text.slice(0,n-1)+"..." : text; },
       agentRecord(name){ return this.current ? this.current.agents.find(a=>a.name===name) || null : null; },
@@ -1685,39 +2047,74 @@
         }
         return owner ? [owner] : [];
       },
-      graphStyles(){ const common={'text-valign':'center','text-halign':'center','font-family':'-apple-system,BlinkMacSystemFont,Inter,sans-serif'};
+      decorateCtfEdges(edges){
+        const groups=new Map();
+        for(const edge of edges){
+          const data=edge.data;
+          const key=[data.source,data.target].sort().join("\u0000");
+          if(!groups.has(key)) groups.set(key,[]);
+          groups.get(key).push(data);
+        }
+        const colors={create:"#059669",derive:"#8b5cf6",explore:"#d97706",context:"#7ca6c5",orch:"#6366f1",curate:"#7c3aed"};
+        for(const group of groups.values()){
+          group.forEach((data,index)=>{
+            const offset=group.length===1 ? 32 : (index-(group.length-1)/2)*48;
+            data.curveStyle=data.etype==="context" ? "taxi" : data.etype==="create" ? "bezier" : "unbundled-bezier";
+            data.curveDistances=[data.source>data.target ? -offset : offset];
+            data.curveWeights=[0.5];
+            data.lineColor=colors[data.etype]||"#94a3b8";
+          });
+        }
+        return edges;
+      },
+      graphStyles(){
+        const fontFamily='"PingFang SC","Microsoft YaHei","Noto Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const common={"text-valign":"center","text-halign":"center","font-family":fontFamily};
         return [
-          {selector:'node',style:{...common,'label':'data(label)','color':'#fff','font-size':'10px','font-weight':'bold','text-wrap':'wrap','text-max-width':'116px','text-overflow-wrap':'anywhere','width':'data(width)','height':'data(height)','shape':'round-rectangle','background-color':'#6366f1','border-width':0}},
-          {selector:'node[ntype="origin"]',style:{'background-color':'#14b8a6','font-size':'11px','text-max-width':'92px'}},
-          {selector:'node[ntype="goal"]',style:{'background-color':'#f43f5e','font-size':'11px','text-max-width':'92px'}},
-          {selector:'node[ntype="ipc"]',style:{'background-color':'#312e81','shape':'round-rectangle','text-max-width':'88px'}},
-          {selector:'node[ntype="diamond"]',style:{'background-color':'#f59e0b','text-max-width':'88px'}},
-          {selector:'node[ntype="member"]',style:{'background-color':'#0ea5e9','shape':'ellipse','text-max-width':'88px'}},
-          {selector:'node[ntype="flag"]',style:{'background-color':'#10b981','shape':'diamond','width':52,'height':52}},
-          {selector:'node[ntype="wp"]',style:{'background-color':'#38bdf8'}},
-          {selector:'node[ntype="intent_done"]',style:{'background-color':'#7c3aed','font-size':'10px','text-max-width':'112px'}},
-          {selector:'node[ntype="in_progress"]',style:{'background-color':'#f59e0b','background-opacity':0.9,'shape':'round-rectangle','border-width':2,'border-color':'#d97706','font-size':'9px','text-max-width':'108px'}},
-          {selector:'node[ntype="unclaimed"]',style:{'background-color':'#cbd5e1','background-opacity':0.72,'shape':'round-rectangle','color':'#475569','border-width':1.5,'border-color':'#94a3b8','border-style':'dashed','font-size':'9px','text-max-width':'108px'}},
-          {selector:'edge',style:{'width':1.6,'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1','target-arrow-shape':'triangle','curve-style':'bezier','font-size':'7px','color':'#94a3b8','label':'data(label)','text-rotation':'autorotate','text-margin-y':-9,'text-max-width':'86px','text-wrap':'ellipsis','text-background-color':'#f8fafc','text-background-opacity':0.88,'text-background-padding':'2px','arrow-scale':0.85}},
-          {selector:'edge[etype="create"]',style:{'line-color':'#10b981','target-arrow-color':'#10b981','width':2.1,'color':'#047857','text-background-color':'#ecfdf5'}},
-          {selector:'edge[etype="derive"]',style:{'line-color':'#a78bfa','target-arrow-color':'#a78bfa','width':1.8,'color':'#6d28d9','text-background-color':'#f5f3ff'}},
-          {selector:'edge[etype="explore"]',style:{'line-color':'#fbbf24','target-arrow-color':'#fbbf24','line-style':'dashed','line-dash-pattern':[8,4],'width':1.8,'color':'#b45309','text-background-color':'#fffbeb'}},
-          {selector:'edge[etype="context"]',style:{'line-color':'#94a3b8','target-arrow-color':'#0ea5e9','line-style':'dashed','line-dash-pattern':[4,4],'width':1.7,'color':'#475569','text-background-color':'#f8fafc'}},
-          {selector:'edge[etype="orch"]',style:{'line-color':'#818cf8','target-arrow-color':'#818cf8','line-style':'dotted','line-dash-pattern':[2,5],'width':2,'color':'#6366f1'}},
-          {selector:'node.focus',style:{'border-width':3,'border-color':'#312e81','border-opacity':0.95,'z-index':1000}},
-          {selector:'edge.focus',style:{'z-index':1000,'overlay-color':'#93c5fd','overlay-opacity':0.24,'overlay-padding':5}},
-          {selector:'.highlight',style:{'z-index':999}},
-          {selector:'.faded',style:{opacity:0.38}},
-          {selector:'.fresh',style:{opacity:0}},
+          {selector:"node",style:{...common,"label":"data(label)","color":"#1e293b","font-size":"11px","font-weight":600,"line-height":1.38,"text-wrap":"wrap","text-max-width":"156px","text-overflow-wrap":"anywhere","width":"data(width)","height":"data(height)","shape":"round-rectangle","background-color":"#fff","border-width":1.5,"border-color":"#818cf8","overlay-opacity":0}},
+          {selector:'node[ntype="origin"]',style:{"background-color":"#ecfeff","border-color":"#0891b2","color":"#155e75","text-max-width":"122px"}},
+          {selector:'node[ntype="goal"]',style:{"background-color":"#fff1f2","border-color":"#e11d48","color":"#9f1239","text-max-width":"122px"}},
+          {selector:'node[ntype="ipc"]',style:{"background-color":"#312e81","border-color":"#312e81","border-width":2,"color":"#fff","text-max-width":"120px"}},
+          {selector:'node[ntype="diamond"]',style:{"background-color":"#fff7ed","border-color":"#ea580c","color":"#9a3412","shape":"cut-rectangle","text-max-width":"100px"}},
+          {selector:'node[ntype="member"]',style:{"background-color":"#f0f9ff","border-color":"#0284c7","color":"#075985","shape":"hexagon","text-max-width":"100px"}},
+          {selector:'node[ntype="curator"]',style:{"background-color":"#f5f3ff","border-color":"#7c3aed","color":"#5b21b6","shape":"hexagon","text-max-width":"116px"}},
+          {selector:'node[ntype="flag"]',style:{"background-color":"#059669","border-color":"#059669","shape":"diamond","color":"#fff","width":64,"height":64}},
+          {selector:'node[ntype="wp"]',style:{"background-color":"#eff6ff","border-color":"#3b82f6","color":"#1d4ed8","shape":"round-tag","text-max-width":"96px"}},
+          {selector:'node[ntype="intent_done"]',style:{"background-color":"#f5f3ff","border-color":"#8b5cf6","color":"#5b21b6","font-size":"10px","text-max-width":"148px"}},
+          {selector:'node[ntype="in_progress"]',style:{"background-color":"#fffbeb","border-color":"#d97706","color":"#92400e","font-size":"10px","text-max-width":"148px"}},
+          {selector:'node[ntype="unclaimed"]',style:{"background-color":"#f1f5f9","border-color":"#94a3b8","border-style":"dashed","color":"#64748b","font-size":"10px","text-max-width":"148px"}},
+          {selector:"node.manual",style:{"underlay-color":"#6366f1","underlay-opacity":0.12,"underlay-padding":5}},
+          {selector:"node.is-dragging",style:{"border-color":"#4338ca","border-width":2.5,"underlay-opacity":0.2,"z-index":1000,"opacity":1}},
+          {selector:"edge",style:{"width":1.8,"curve-style":"data(curveStyle)","control-point-step-size":44,"control-point-distances":"data(curveDistances)","control-point-weights":"data(curveWeights)","taxi-direction":"vertical","taxi-turn":36,"taxi-turn-min-distance":16,"line-color":"data(lineColor)","target-arrow-color":"data(lineColor)","target-arrow-shape":"triangle","target-arrow-fill":"filled","arrow-scale":0.8,"line-cap":"round","opacity":0.82,"label":"data(label)","font-size":"9px","color":"#64748b","min-zoomed-font-size":10,"text-rotation":"autorotate","text-margin-y":-8,"text-max-width":"180px","text-wrap":"ellipsis","text-background-color":"#f8fafc","text-background-opacity":0.95,"text-background-padding":3,"text-border-width":1,"text-border-color":"#e2e8f0","text-border-opacity":0.65}},
+          {selector:'edge[etype="create"]',style:{"width":2.1,"color":"#047857","text-background-color":"#ecfdf5"}},
+          {selector:'edge[etype="derive"]',style:{"color":"#6d28d9","text-background-color":"#f5f3ff"}},
+          {selector:'edge[etype="explore"]',style:{"line-style":"dashed","line-dash-pattern":[10,7],"color":"#b45309","text-background-color":"#fffbeb"}},
+          {selector:'edge[etype="context"]',style:{"line-style":"dashed","line-dash-pattern":[3,5],"width":1.6}},
+          {selector:'edge[etype="orch"]',style:{"line-style":"dashed","line-dash-pattern":[2,5],"width":2.2,"color":"#4f46e5","line-gradient-stop-colors":"#6366f1 #06b6d4","line-gradient-stop-positions":"0% 100%"}},
+          {selector:'edge[etype="curate"]',style:{"line-style":"dashed","line-dash-pattern":[6,5],"color":"#7c3aed","text-background-color":"#f5f3ff"}},
+          {selector:"node.focus",style:{"border-width":2.8,"border-color":"#4338ca","z-index":1000,"underlay-color":"#6366f1","underlay-opacity":0.14,"underlay-padding":6,"overlay-color":"#c7d2fe","overlay-opacity":0.12,"overlay-padding":7}},
+          {selector:"edge.focus",style:{"width":2.8,"opacity":1,"z-index":1000,"overlay-color":"#93c5fd","overlay-opacity":0.18,"overlay-padding":5}},
+          {selector:".highlight",style:{"z-index":999}},
+          {selector:"node.faded",style:{"opacity":0.24}},
+          {selector:"edge.faded",style:{"opacity":0.09}},
+          {selector:".fresh",style:{"opacity":0}},
         ]; },
-      layoutOpts(fit=true, animate=true){ return {name:'dagre',rankDir:'TB',ranker:'longest-path',nodeSep:70,rankSep:90,edgeSep:22,padding:50,fit,animate,animationDuration:400,animationEasing:'ease-in-out-cubic'}; },
+      layoutOpts(fit=true, animate=true){ return {name:"dagre",rankDir:"TB",ranker:"longest-path",nodeSep:88,rankSep:116,edgeSep:36,padding:64,fit,animate,animationDuration:520,animationEasing:"ease-in-out-cubic"}; },
       nodeSize(label,ntype){
-        if(ntype==="flag") return {width:52,height:52};
-        const preset=ntype==="in_progress"||ntype==="unclaimed"
-          ? {fontSize:9,maxTextWidth:108,minWidth:76,minHeight:50,paddingX:8,paddingY:8}
-          : ["origin","goal"].includes(ntype)
-            ? {fontSize:11,maxTextWidth:92,minWidth:58,minHeight:38,paddingX:10,paddingY:10}
-            : {fontSize:10,maxTextWidth:116,minWidth:52,minHeight:34,paddingX:10,paddingY:10};
+        if(ntype==="flag") return {width:64,height:64};
+        const presets={
+          origin:{fontSize:11,maxTextWidth:122,minWidth:106,minHeight:54,paddingX:16,paddingY:12},
+          goal:{fontSize:11,maxTextWidth:122,minWidth:106,minHeight:54,paddingX:16,paddingY:12},
+          ipc:{fontSize:11,maxTextWidth:120,minWidth:106,minHeight:58,paddingX:18,paddingY:14},
+          diamond:{fontSize:11,maxTextWidth:100,minWidth:110,minHeight:58,paddingX:18,paddingY:14},
+          member:{fontSize:11,maxTextWidth:100,minWidth:112,minHeight:64,paddingX:18,paddingY:14},
+          curator:{fontSize:11,maxTextWidth:116,minWidth:116,minHeight:64,paddingX:18,paddingY:14},
+          wp:{fontSize:11,maxTextWidth:96,minWidth:84,minHeight:48,paddingX:16,paddingY:12},
+          in_progress:{fontSize:10,maxTextWidth:148,minWidth:108,minHeight:72,paddingX:16,paddingY:13},
+          intent_done:{fontSize:10,maxTextWidth:148,minWidth:108,minHeight:72,paddingX:16,paddingY:13},
+          unclaimed:{fontSize:10,maxTextWidth:148,minWidth:108,minHeight:72,paddingX:16,paddingY:13},
+        };
+        const preset=presets[ntype]||{fontSize:11,maxTextWidth:156,minWidth:92,minHeight:54,paddingX:18,paddingY:12};
         const measured=this.measureWrappedText(label,preset.maxTextWidth,preset.fontSize);
         return {
           width:Math.max(preset.minWidth,Math.ceil(measured.width+preset.paddingX*2)),
@@ -1791,76 +2188,174 @@
           element.removeClass("fresh");
         },30);
       },
+      syncCtfLayoutMemory(){
+        this._ctfManualByProject ||= new Map();
+        if(this._ctfLayoutProject!==this.selectedId){
+          this._ctfLayoutProject=this.selectedId;
+          this._ctfManualPositions=this._ctfManualByProject.get(this.selectedId)||new Map();
+          this._ctfManualByProject.set(this.selectedId,this._ctfManualPositions);
+        }
+        return this._ctfManualPositions;
+      },
+      rememberCtfNodePosition(node){
+        const positions=this.syncCtfLayoutMemory();
+        positions.set(node.id(),{...node.position()});
+        node.addClass("manual");
+      },
+      restoreCtfManualPositions(){
+        if(!this.cy || this.workspaceMode!=="ctf") return;
+        const positions=this.syncCtfLayoutMemory();
+        for(const [id,position] of positions){
+          const node=this.cy.getElementById(id);
+          if(node.length) { node.position(position); node.addClass("manual"); }
+        }
+      },
+      ctfManualPositionCount(){ return this.syncCtfLayoutMemory().size; },
+      nextCtfOpenPosition(){
+        const positions=[...this.snapshotNodePositions().values()];
+        const right=Math.max(...positions.map(point=>point.x),0)+230;
+        const top=Math.min(...positions.map(point=>point.y),0);
+        return {x:right,y:top+(positions.size%5)*112};
+      },
+      bindCtfGraphInteractions(){
+        this.cy.on("tap","node",event=>this.onNodeTap(event));
+        this.cy.on("tap","edge",event=>this.onEdgeTap(event));
+        this.cy.on("tap",event=>{ if(event.target===this.cy) this.clearSelection(); });
+        this.cy.on("mouseover","node",()=>{ document.getElementById("cy").style.cursor="grab"; });
+        this.cy.on("mouseout","node",()=>{ document.getElementById("cy").style.cursor=""; });
+        this.cy.on("grabon","node",event=>{
+          document.getElementById("cy").style.cursor="grabbing";
+          event.target.addClass("is-dragging");
+          this.rememberCtfNodePosition(event.target);
+        });
+        this.cy.on("freeon","node",event=>{
+          document.getElementById("cy").style.cursor="grab";
+          event.target.removeClass("is-dragging");
+          this.rememberCtfNodePosition(event.target);
+        });
+        this.cy.on("layoutstop",()=>this.restoreCtfManualPositions());
+        if(!this._flowVisibilityBound){
+          this._flowVisibilityBound=true;
+          document.addEventListener("visibilitychange",()=>{
+            if(document.hidden) this.stopEdgeFlow(); else this.startEdgeFlow();
+          });
+        }
+      },
+      relayoutCtf(fit=true,animate=true){
+        if(!this.cy || this.workspaceMode!=="ctf") return;
+        if(this.ctfManualPositionCount()) {
+          this.restoreCtfManualPositions();
+          if(fit) this.cy.fit(undefined,64);
+          return;
+        }
+        this.cy.layout(this.layoutOpts(fit,animate)).run();
+      },
+      resetCtfLayout(){
+        if(!this.cy || this.workspaceMode!=="ctf") return;
+        this.syncCtfLayoutMemory().clear();
+        this.cy.nodes().removeClass("manual is-dragging");
+        this.relayoutCtf(true,true);
+      },
       renderGraph(fit=true){
         if(this.workspaceMode === "pentest") { this.renderPentest(fit); return; }
-        const el=document.getElementById('cy'); if(!el) return;
+        const el=document.getElementById("cy"); if(!el) return;
+        this.syncCtfLayoutMemory();
         const {nodes,edges}=this.buildElements();
+        const viewport=this.cy ? {pan:{...this.cy.pan()},zoom:this.cy.zoom()} : null;
         if(!this.cy){
-          this.cy=cytoscape({container:el,elements:[...nodes,...edges],style:this.graphStyles(),layout:this.layoutOpts(fit,false),minZoom:0.15,maxZoom:3.5});
-          this.cy.on('tap','node',e=>this.onNodeTap(e));
-          this.cy.on('tap','edge',e=>this.onEdgeTap(e));
-          this.cy.on('tap',e=>{ if(e.target===this.cy) this.clearSelection(); });
+          this.cy=cytoscape({container:el,elements:[...nodes,...edges],style:this.graphStyles(),layout:this.layoutOpts(fit,false),minZoom:0.18,maxZoom:3.5,autoungrabify:false});
+          this.bindCtfGraphInteractions();
           this.startEdgeFlow();
         } else {
           const wantNodes=new Set(nodes.map(n=>n.data.id));
           const wantEdges=new Set(edges.map(e=>e.data.id));
           const previousPositions=this.snapshotNodePositions();
           let changed=false;
-
-          this.cy.nodes().forEach(n=>{ if(!wantNodes.has(n.id())){ n.remove(); changed=true; } });
-          this.cy.edges().forEach(e=>{ if(!wantEdges.has(e.id())){ e.remove(); changed=true; } });
-
-          for(const n of nodes){
-            const ex=this.cy.getElementById(n.data.id);
-            if(ex.length===0){
-              const initialPosition=this.initialPositionForNode(n.data,previousPositions);
-              const added=this.cy.add(initialPosition ? {...n,position:initialPosition} : n);
+          this.cy.nodes().forEach(node=>{
+            if(!wantNodes.has(node.id())) { this._ctfManualPositions.delete(node.id()); node.remove(); changed=true; }
+          });
+          this.cy.edges().forEach(edge=>{ if(!wantEdges.has(edge.id())){ edge.remove(); changed=true; } });
+          for(const data of nodes){
+            const existing=this.cy.getElementById(data.data.id);
+            if(!existing.length){
+              const saved=this._ctfManualPositions.get(data.data.id);
+              const position=saved||this.initialPositionForNode(data.data,previousPositions)||(this.ctfManualPositionCount() ? this.nextCtfOpenPosition() : null);
+              const added=this.cy.add(position ? {...data,position} : data);
+              if(saved) added.addClass("manual");
               this.fadeInFreshElement(added);
               changed=true;
             } else {
               const keys=["ntype","label","description","width","height","state"];
-              if(keys.some(k=>ex.data(k)!==n.data[k])){ ex.data(n.data); changed=true; }
+              if(keys.some(key=>existing.data(key)!==data.data[key])){ existing.data(data.data); changed=true; }
             }
           }
-          for(const e of edges){
-            const ex=this.cy.getElementById(e.data.id);
-            if(ex.length===0){
-              const added=this.cy.add(e);
+          for(const data of edges){
+            const existing=this.cy.getElementById(data.data.id);
+            if(!existing.length){
+              const added=this.cy.add(data);
               this.fadeInFreshElement(added);
               changed=true;
-            } else if(ex.data("etype")!==e.data.etype||ex.data("label")!==e.data.label){
-              ex.data(e.data);
+            } else if(["etype","label","curveStyle","lineColor"].some(key=>existing.data(key)!==data.data[key])){
+              existing.data(data.data); changed=true;
             }
           }
-          if(changed) this.cy.layout(this.layoutOpts(fit,true)).run();
+          if(changed) this.relayoutCtf(fit,true);
         }
+        if(!fit && viewport){ this.cy.pan(viewport.pan); this.cy.zoom(viewport.zoom); }
         this.refreshGraphDecorations();
       },
-      fit(){ if(this.cy)this.cy.fit(undefined,50); },
-      clearSelection(){ this.selectedNode=null; if(this.cy)this.cy.elements().removeClass('highlight focus faded'); },
+      fit(){
+        if(!this.cy) return;
+        if(this.workspaceMode!=='pentest'){ this.cy.fit(undefined,50); return; }
+        const apply=()=>{
+          if(!this.cy || this.workspaceMode!=='pentest') return;
+          const nodes=this.cy.nodes();
+          if(nodes.length) this.cy.fit(nodes.boundingBox({includeLabels:true,includeEdges:false}),80);
+        };
+        apply();
+        if(this._pentestFitTimer) clearTimeout(this._pentestFitTimer);
+        this._pentestFitTimer=setTimeout(()=>{
+          this._pentestFitTimer=null;
+          if(this.cy){ this.cy.resize(); apply(); }
+        },240);
+      },
+      clearSelection(){ this.selectedNode=null; this.ctfInspectorOpen=false; if(this.cy)this.cy.elements().removeClass('highlight focus faded'); },
       onNodeTap(e){
         const n=e.target, kind=n.data('kind');
         if(kind==="fact") this.selectFact(n.data('factId'));
         else if(kind==="intent") this.selectIntent(n.data('intentId'));
         else if(kind==="agent") this.selectAgent(n.data('agent'));
         else if(kind==="special") this.selectSpecial(n.data('specialId'));
-        this.sideTab="detail";
+        this.sideTab="detail"; this.ctfInspectorOpen=true;
       },
-      onEdgeTap(e){ const iid=e.target.data('intentId'); if(iid) this.selectIntent(iid); this.sideTab="detail"; },
+      onEdgeTap(e){ const iid=e.target.data('intentId'); if(iid) this.selectIntent(iid); this.sideTab="detail"; this.ctfInspectorOpen=true; },
       selectFact(id){ this.selectedNode={type:"fact",id}; this.applyLineageHighlightForFact(id); },
       selectIntent(id){ this.selectedNode={type:"intent",id}; this.applyLineageHighlightForIntent(id); },
       selectAgent(id){ this.selectedNode={type:"agent",id}; this.applyFocus([id],[]); },
       selectSpecial(id){ this.selectedNode={type:"special",id}; this.applyFocus([id],[]); },
       refreshGraphDecorations(){ if(!this.selectedNode||!this.cy)return; if(this.selectedNode.type==="fact")this.applyLineageHighlightForFact(this.selectedNode.id); if(this.selectedNode.type==="intent")this.applyLineageHighlightForIntent(this.selectedNode.id); if(this.selectedNode.type==="agent")this.applyFocus([this.selectedNode.id],[]); if(this.selectedNode.type==="special")this.applyFocus([this.selectedNode.id],[]); },
       startEdgeFlow(){
-        if(!this.cy) return;
-        if(this._flowTimer) return;
-        let offset = 0;
-        this._flowTimer = setInterval(()=>{
-          if(!this.cy) return;
-          offset = (offset + 1) % 40;
-          this.cy.edges('[etype = "explore"], [etype = "orch"]').style('line-dash-offset', offset);
-        }, 70);
+        if(!this.cy || this.workspaceMode!=="ctf" || this._flowFrame || !this.edgeFlowEnabled || this.ctfReducedMotion) return;
+        if(typeof document!=="undefined" && document.hidden) return;
+        const tick=now=>{
+          this._flowFrame=null;
+          if(!this.cy || this.workspaceMode!=="ctf" || !this.edgeFlowEnabled || this.ctfReducedMotion || document.hidden) return;
+          if(!this._lastFlowAt || now-this._lastFlowAt>=40){
+            this.cy.edges('[etype = "explore"], [etype = "orch"]').style("line-dash-offset",-(now/48)%64);
+            this._lastFlowAt=now;
+          }
+          this._flowFrame=window.requestAnimationFrame(tick);
+        };
+        this._flowFrame=window.requestAnimationFrame(tick);
+      },
+      stopEdgeFlow(){
+        if(this._flowFrame) window.cancelAnimationFrame(this._flowFrame);
+        this._flowFrame=null;
+      },
+      toggleEdgeFlow(){
+        if(this.ctfReducedMotion){ this.edgeFlowEnabled=false; return; }
+        this.edgeFlowEnabled=!this.edgeFlowEnabled;
+        if(this.edgeFlowEnabled) this.startEdgeFlow(); else this.stopEdgeFlow();
       },
       applyFocus(nodeIds,edgeIds){
         if(!this.cy)return; this.cy.elements().removeClass('highlight focus faded');
@@ -1949,8 +2444,155 @@
       timelineEventBadgeClass(e){ return {project_created:"bg-slate-100 text-slate-600",hint_added:"bg-amber-50 text-amber-700",intent_declared:"bg-violet-50 text-violet-700",intent_concluded:"bg-teal-50 text-teal-700",project_completed:"bg-rose-50 text-rose-700",report:"bg-sky-50 text-sky-700"}[e.type]||"bg-slate-100 text-slate-600"; },
       timelineEventDotClass(e){ return {project_created:"bg-slate-400",hint_added:"bg-amber-400",intent_declared:"bg-violet-400",intent_concluded:"bg-teal-400",project_completed:"bg-rose-400",report:"bg-sky-400"}[e.type]||"bg-slate-300"; },
       openTimelineEntry(e){ if(e.targetType==="fact")this.selectFact(e.targetId); if(e.targetType==="intent")this.selectIntent(e.targetId); if(e.targetType==="agent")this.selectAgent(e.targetId); if(e.targetType!=="hints")this.sideTab="detail"; },
-      async openWP(){ const r=await fetch("/projects/"+this.selectedId+"/wp"); this.wpText=await r.text(); this.showWP=true; },
+      wpLiveLabel(){ return this.wpUpdatedFlash ? "已更新" : ({connecting:"连接中",live:"实时",polling:"轮询",offline:"离线"}[this.wpLiveStatus]||"离线"); },
+      wpLiveDotClass(){ return this.wpUpdatedFlash ? "bg-emerald-500" : ({connecting:"bg-sky-400 animate-pulse",live:"bg-emerald-500",polling:"bg-amber-400",offline:"bg-slate-300"}[this.wpLiveStatus]||"bg-slate-300"); },
+      wpLiveTextClass(){ return this.wpUpdatedFlash ? "text-emerald-700" : ({connecting:"text-sky-600",live:"text-emerald-700",polling:"text-amber-700",offline:"text-slate-400"}[this.wpLiveStatus]||"text-slate-400"); },
+      setWPView(mode){
+        if(this.wpSource!=="project" || !["preview","source"].includes(mode)) return;
+        if(mode==="preview" && (typeof marked==="undefined" || typeof DOMPurify==="undefined")){
+          mode="source"; this.wpNotice="预览渲染库不可用，已切换为源码。";
+        }else if(mode==="preview"){ this.wpNotice=""; }
+        const container=this.$refs.wpScroll;
+        const ratio=container&&container.scrollHeight>container.clientHeight ? container.scrollTop/(container.scrollHeight-container.clientHeight) : 0;
+        this.wpViewMode=mode;
+        try{ localStorage.setItem("ipc.wp.viewMode",mode); }catch(error){}
+        this.$nextTick(()=>{
+          const next=this.$refs.wpScroll;
+          if(next&&next.scrollHeight>next.clientHeight) next.scrollTop=ratio*(next.scrollHeight-next.clientHeight);
+        });
+      },
+      wpDisplayHTML(){
+        if(this.wpSource!=="project" || this.wpViewMode!=="preview") return "";
+        if(typeof marked==="undefined" || typeof DOMPurify==="undefined") return "";
+        return this.renderMarkdown(this.wpText);
+      },
+      connectProjectWPStream(projectId){
+        this.stopProjectWPLive();
+        if(this.wpSource!=="project" || this.wpProjectId!==projectId || !this.showWP) return;
+        this.wpLiveStatus="connecting";
+        const source=new EventSource("/projects/"+encodeURIComponent(projectId)+"/wp/stream");
+        this.wpEventSource=source;
+        const current=()=>this.wpSource==="project" && this.wpProjectId===projectId && this.showWP && this.wpEventSource===source;
+        source.onopen=()=>{ if(current()){ this.wpLiveStatus="live"; this.wpRetryCount=0; } };
+        source.addEventListener("writeup",event=>{
+          if(!current()) return;
+          try{
+            const payload=JSON.parse(event.data);
+            this.applyProjectWPUpdate(payload);
+            this.wpLiveStatus="live"; this.wpRetryCount=0;
+          }catch(error){}
+        });
+        source.addEventListener("missing",event=>{
+          if(!current()) return;
+          this.wpError="Writeup 文件已被移除"; this.wpLiveStatus="offline";
+          source.close(); if(this.wpEventSource===source) this.wpEventSource=null;
+        });
+        const onReadError=event=>{
+          if(!current() || !event || event.data===undefined) return;
+          this.wpError="Writeup 读取失败"; this.wpLiveStatus="offline";
+          source.close(); if(this.wpEventSource===source) this.wpEventSource=null;
+        };
+        source.addEventListener("error",onReadError);
+        source.onerror=event=>{
+          if(event&&event.data!==undefined){ onReadError(event); return; }
+          if(!current()) return;
+          source.close(); if(this.wpEventSource===source) this.wpEventSource=null;
+          this.scheduleProjectWPReconnect(projectId);
+        };
+      },
+      scheduleProjectWPReconnect(projectId){
+        if(this.wpSource!=="project" || this.wpProjectId!==projectId || !this.showWP) return;
+        if(this.wpReconnectTimer){ clearTimeout(this.wpReconnectTimer); this.wpReconnectTimer=null; }
+        this.wpRetryCount+=1;
+        if(this.wpRetryCount>3){ this.startProjectWPPolling(projectId); return; }
+        const delay=[1000,2000,5000][Math.min(this.wpRetryCount-1,2)];
+        this.wpLiveStatus="connecting";
+        this.wpReconnectTimer=setTimeout(()=>{
+          this.wpReconnectTimer=null;
+          if(this.wpSource==="project" && this.wpProjectId===projectId && this.showWP) this.connectProjectWPStream(projectId);
+        },delay);
+      },
+      startProjectWPPolling(projectId){
+        if(this.wpPollTimer){ clearTimeout(this.wpPollTimer); this.wpPollTimer=null; }
+        const token=++this.wpPollToken;
+        this.wpLiveStatus="polling";
+        const poll=async()=>{
+          if(token!==this.wpPollToken || this.wpSource!=="project" || this.wpProjectId!==projectId || !this.showWP) return;
+          try{
+            const headers={};
+            if(this.wpEtag) headers["If-None-Match"]='"'+this.wpEtag+'"';
+            const response=await fetch("/projects/"+encodeURIComponent(projectId)+"/wp",{headers,cache:"no-store",credentials:"same-origin"});
+            if(token!==this.wpPollToken) return;
+            if(response.status===404){ this.wpError="Writeup 文件已被移除"; this.wpLiveStatus="offline"; return; }
+            if(response.ok && response.status!==304){
+              const content=await response.text();
+              this.applyProjectWPUpdate({content,etag:response.headers.get("X-WP-ETag")||"",updated_at:response.headers.get("X-WP-Updated-At")||""});
+              this.wpLiveStatus="polling";
+            }
+          }catch(error){ if(token===this.wpPollToken) this.wpLiveStatus="offline"; }
+          if(token===this.wpPollToken && this.wpSource==="project" && this.showWP) this.wpPollTimer=setTimeout(poll,2000);
+        };
+        this.wpPollTimer=setTimeout(poll,2000);
+      },
+      applyProjectWPUpdate(payload){
+        if(this.wpSource!=="project" || !payload || !payload.etag || payload.etag===this.wpEtag) return;
+        const container=this.$refs.wpScroll;
+        const scrollTop=container?container.scrollTop:0;
+        const atBottom=container?container.scrollHeight-container.scrollTop-container.clientHeight<24:true;
+        this.wpText=String(payload.content??"");
+        this.wpEtag=String(payload.etag||"");
+        this.wpUpdatedAt=String(payload.updated_at||"");
+        this.wpError="";
+        this.wpUpdatedFlash=true;
+        if(this.wpFlashTimer) clearTimeout(this.wpFlashTimer);
+        this.wpFlashTimer=setTimeout(()=>{ this.wpUpdatedFlash=false; this.wpFlashTimer=null; },2000);
+        this.$nextTick(()=>{
+          const next=this.$refs.wpScroll;
+          if(!next) return;
+          next.scrollTop=atBottom?next.scrollHeight:scrollTop;
+        });
+      },
+      stopProjectWPLive(){
+        this.wpPollToken+=1;
+        if(this.wpEventSource){ this.wpEventSource.close(); this.wpEventSource=null; }
+        if(this.wpPollTimer){ clearTimeout(this.wpPollTimer); this.wpPollTimer=null; }
+        if(this.wpReconnectTimer){ clearTimeout(this.wpReconnectTimer); this.wpReconnectTimer=null; }
+        if(this.wpFlashTimer){ clearTimeout(this.wpFlashTimer); this.wpFlashTimer=null; }
+        this.wpUpdatedFlash=false;
+      },
+      closeProjectWPLive(){
+        this.stopProjectWPLive();
+        this.wpLiveStatus="offline";
+        this.wpRetryCount=0;
+      },
+      closeProjectWP(){
+        this.closeProjectWPLive();
+        this.showWP=false; this.wpSource="global";
+        this.wpText=""; this.wpEtag=""; this.wpUpdatedAt="";
+        this.wpProjectId=null; this.wpLoading=false; this.wpError=""; this.wpNotice="";
+      },
+      async openWP(projectId){
+        const id=projectId||this.selectedId;
+        if(!id) return;
+        this.closeProjectWPLive();
+        this.wpSource="project"; this.wpProjectId=id; this.wpEtag=""; this.wpUpdatedAt="";
+        this.wpText=""; this.wpError=""; this.wpNotice=""; this.wpLoading=true; this.wpLiveStatus="connecting"; this.wpRetryCount=0;
+        if(typeof marked==="undefined" || typeof DOMPurify==="undefined"){
+          this.wpViewMode="source"; this.wpNotice="预览渲染库不可用，已切换为源码。";
+        }
+        this.showWP=true;
+        try{
+          const response=await fetch("/projects/"+encodeURIComponent(id)+"/wp",{cache:"no-store",credentials:"same-origin"});
+          if(!response.ok){ this.wpError=response.status===404?"Writeup 尚未生成":"Writeup 加载失败"; return; }
+          this.wpText=await response.text();
+          this.wpEtag=response.headers.get("X-WP-ETag")||(response.headers.get("ETag")||"").replace(/^W\/|"/g,"");
+          this.wpUpdatedAt=response.headers.get("X-WP-Updated-At")||"";
+        }catch(error){ this.wpError="Writeup 加载失败"; }
+        finally{ this.wpLoading=false; }
+        if(this.wpSource==="project" && this.wpProjectId===id && !this.wpError) this.connectProjectWPStream(id);
+      },
       async openGlobalWP(){
+        this.closeProjectWPLive(); this.wpSource="global"; this.wpProjectId=null; this.wpError=""; this.wpText="";
         const r=await this.api("GET","/wp/completed");
         this.completedWPs=r.writeups||[];
         this.selectedCompletedWPId=this.completedWPs[0]?.project_id||null;
@@ -1977,7 +2619,7 @@
         this.showOps=true; this.opsResult=null;
         try{
           this.opsCfg=await this.api("GET","/api/ops/config");
-          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows()]);
+          await Promise.all([this.loadOpsSessions(),this.loadOpsWorkflows(),this.loadWorkflowPresets()]);
           if(this.opsSessionId) await this.selectOpsSession(this.opsSessionId);
         }catch(error){}
       },
@@ -2101,6 +2743,12 @@
       },
       async sendOpsMessage(){
         const message=this.opsInput.trim(); if(!message||!this.opsCfg?.configured) return;
+        const compactCommand=/^\/compact(?:\s+([\s\S]*))?$/i.exec(message);
+        if(compactCommand){
+          this.opsInput=""; this.resetOpsInputHeight();
+          await this.compactOpsSession((compactCommand[1]||"").trim());
+          return;
+        }
         const attachments=[...this.opsAttachments];
         this.opsInput=""; this.resetOpsInputHeight(); this.opsAttachments=[];
         if(this.opsBusy){
@@ -2108,6 +2756,34 @@
           return;
         }
         await this.runOpsMessage(message,attachments);
+      },
+      async compactOpsSession(instructions){
+        if(!this.opsSessionId){ this.flash("Start a conversation before compacting it."); return; }
+        if(this.opsBusy){ this.flash("IPC is still working — stop the run before compacting."); return; }
+        if(this.opsCompacting) return;
+        this.opsCompacting=true;
+        try{
+          const result=await this.api("POST","/api/ops/sessions/"+encodeURIComponent(this.opsSessionId)+"/compact",{instructions:instructions||""});
+          this.opsMessages.push({
+            id:"compact-"+Date.now(), role:"note", created_at:new Date().toISOString(),
+            content:this.compactionNote(result)
+          });
+          this.scrollOpsToLatest(true);
+        }catch(error){
+          this.flash(error.message||"could not compact this conversation");
+        }finally{ this.opsCompacting=false; }
+      },
+      compactionNote(result){
+        if(!result || !result.compacted) return "Context left as is — not enough history to compact yet.";
+        const parts=["Context compacted: "+result.messages_before+" → "+result.messages_after+" messages"];
+        if(result.tokens_before) parts.push("~"+result.tokens_before+" → ~"+(result.tokens_after||"?")+" tokens");
+        const summary=result.summary||{};
+        const facts=(summary.verified_facts||[]).length;
+        const dead=(summary.failed_paths||[]).length;
+        if(facts) parts.push(facts+" verified fact"+(facts===1?"":"s")+" kept");
+        if(dead) parts.push(dead+" ruled-out path"+(dead===1?"":"s")+" kept");
+        if(result.degraded) parts.push("summary degraded to the deterministic projection");
+        return parts.join(" · ");
       },
       removeOpsNextCall(id){ this.opsNextCalls=this.opsNextCalls.filter(item=>item.id!==id); },
       async drainOpsNextCalls(){
@@ -2205,269 +2881,47 @@
         this.opsWorkflows=data.workflows||[];
         if(this.opsWorkflowId&&!this.opsWorkflows.some(workflow=>workflow.id===this.opsWorkflowId)) this.opsWorkflowId=null;
       },
-      openGzctfSetup(workflow=null){
-        const spec=workflow?.spec||{};
-        this.gzctfEditingId=workflow?.id||"";this.gzctfPentest=spec.challenges?.category_map?.['*']==='pentest';
-        this.gzctfDraft={base_url:spec.challenges?.list_url||"",game_id:spec.challenges?.game_id||"",name:spec.name||"",team_id:spec.team_id||"",attachment_base_url:spec.challenges?.attachment_base_url||"",category_map:spec.challenges?.category_map||{},remote_concurrency:spec.remote_concurrency||0,allow_private_networks:!!spec.allow_private_networks};
-        this.gzctfDeadline=spec.ends_at ? new Date(Date.parse(spec.ends_at)-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : "";
-        this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.opsConfirmError="";this.showTsecbenchSetup=false;this.showGzctfSetup=true;
-      },
-      closeGzctfSetup(){ this.showGzctfSetup=false;this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword=""; },
-      async saveGzctfWorkflow(){
-        if(this.competitionBusy)return;
-        this.competitionBusy=true;this.competitionError="";
+      async loadWorkflowPresets(){
         try{
-          const secrets={};
-          if(this.gzctfAuthMode==="token"&&this.gzctfToken.trim())secrets.gzctf_token=this.gzctfToken.trim();
-          if(this.gzctfAuthMode==="login"){
-            if(this.gzctfUsername.trim())secrets.gzctf_username=this.gzctfUsername.trim();
-            if(this.gzctfPassword)secrets.gzctf_password=this.gzctfPassword;
-          }
-          const categoryMap={...(this.gzctfDraft.category_map||{})};
-          if(this.gzctfPentest)categoryMap['*']='pentest';else if(categoryMap['*']==='pentest')delete categoryMap['*'];
-          const payload={...this.gzctfDraft,category_map:categoryMap,ends_at:this.gzctfDeadline?new Date(this.gzctfDeadline).toISOString():"",secrets};
-          const url=this.gzctfEditingId?"/api/ops/workflows/"+encodeURIComponent(this.gzctfEditingId)+"/gzctf":"/api/ops/workflows/gzctf";
-          const workflow=await this.api(this.gzctfEditingId?"PUT":"POST",url,payload);
-          this.gzctfEditingId=workflow.id;this.competitionWorkflowId=workflow.id;this.opsWorkflowId=workflow.id;
-          this.gzctfToken="";this.gzctfUsername="";this.gzctfPassword="";this.competitionPreflight=null;
-          const tokens={...this.workflowTokens};delete tokens[workflow.id];this.workflowTokens=tokens;
-          await this.loadOpsWorkflows();this.flash("GZCTF workflow saved; authorize it before starting");
-        }catch(error){this.competitionError=error.message||"Could not save GZCTF settings";}
-        finally{this.competitionBusy=false;}
+          const data=await this.api("GET","/api/ops/workflow-templates");
+          this.workflowTemplates=data.templates||[];
+        }catch(error){ this.workflowTemplates=[]; }
+      },
+      workflowPreset(presetId){
+        return this.workflowTemplates.find(item=>item.id===presetId)||null;
+      },
+      presetTitle(presetId){
+        return this.workflowPreset(presetId)?.name || presetId;
+      },
+      presetSummary(presetId){
+        return this.workflowPreset(presetId)?.ipc_setup?.summary || "";
+      },
+      presetSetupPrompt(presetId){
+        return this.workflowPreset(presetId)?.ipc_setup?.prompt ||
+          ("Set up the built-in "+presetId+" preset workflow through IPC. Ask me for "+
+           "missing platform details with question and never ask for credentials in ordinary chat.");
+      },
+      async startPresetWithIpc(presetId){
+        if(!this.opsCfg){
+          try{ this.opsCfg=await this.api("GET","/api/ops/config"); }catch(error){}
+        }
+        if(!this.opsCfg?.configured){
+          this.flash("请先在 Config 中配置 IPC API");
+          this.openIPCConfig();
+          return;
+        }
+        if(!this.workflowTemplates.length) await this.loadWorkflowPresets();
+        const prompt=this.presetSetupPrompt(presetId);
+        this.showOps=true;
+        if(this.opsBusy){
+          this.opsNextCalls.push({id:"preset-"+Date.now()+"-"+this.opsNextCalls.length,message:prompt,attachments:[]});
+          this.flash("预设配置请求已排到当前 IPC 任务之后");
+          return;
+        }
+        await this.runOpsMessage(prompt,[]);
       },
       selectedOpsWorkflow(){ return this.opsWorkflows.find(workflow=>workflow.id===this.opsWorkflowId)||null; },
-      async openCompetition(){
-        this.showCompetition=true; this.competitionError="";
-        try{
-          await Promise.all([this.loadOpsWorkflows(),this.loadCompetitionRuns()]);
-          if(!this.competitionWorkflowId){
-            const confirmed=this.opsWorkflows.find(workflow=>workflow.status==="confirmed");
-            this.competitionWorkflowId=confirmed?.id||"";
-          }
-        }catch(error){ this.competitionError=error.message||"Could not load competition state"; }
-      },
-      closeCompetition(){
-        this.showCompetition=false;
-        this.competitionEventSourceToken++;
-        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
-        if(this.competitionReconnectTimer){ clearTimeout(this.competitionReconnectTimer); this.competitionReconnectTimer=null; }
-        this.sessionEventSourceToken++;
-        if(this.sessionEventSource){ this.sessionEventSource.close(); this.sessionEventSource=null; }
-        if(this.sessionReconnectTimer){ clearTimeout(this.sessionReconnectTimer); this.sessionReconnectTimer=null; }
-      },
-      async loadCompetitionRuns(){
-        const data=await this.api("GET","/api/runs?limit=50");
-        this.competitionRuns=data.runs||[];
-        const active=this.competitionRuns.find(run=>!["finished","stopped"].includes(run.status));
-        const selected=active||this.competitionRuns[0];
-        if(selected) await this.loadCompetitionRun(selected.id,true);
-        else{ this.competitionRun=null; this.competitionMembers=[]; }
-      },
-      async loadCompetitionRun(runId,connectEvents=true){
-        const [snapshot,members]=await Promise.all([
-          this.api("GET","/api/runs/"+encodeURIComponent(runId)),
-          this.api("GET","/api/runs/"+encodeURIComponent(runId)+"/members")
-        ]);
-        const changed=this.competitionRun?.run?.id!==runId;
-        this.competitionRun=snapshot; this.competitionMembers=members.members||[];
-        await this.loadSessionHealth();
-        if(connectEvents||changed){ this.connectCompetitionEvents(runId); this.connectSessionEvents(); }
-      },
-      async loadSessionHealth(){
-        try{
-          const data=await this.api("GET","/api/agent/sessions?kind=competition");
-          this.sessionHealth=data.sessions||[];
-        }catch(error){ this.sessionHealth=[]; }
-      },
-      memberSessionHealth(item){
-        const sessionId=item?.assignment?.session_id;
-        if(!sessionId) return null;
-        return this.sessionHealth.find(row=>row.session_id===sessionId)||null;
-      },
-      memberHealthDot(item){
-        if(!item?.assignment) return "bg-slate-200";
-        const health=this.memberSessionHealth(item);
-        if(!health) return "bg-slate-300";
-        if(health.health==="handoff") return "bg-rose-500";
-        if(health.health==="cancel") return "bg-orange-500";
-        if(health.health==="diagnose") return "bg-amber-400";
-        if(health.worker_live===false) return "bg-rose-400";
-        return "bg-teal-500";
-      },
-      memberHealthTitle(item){
-        if(!item?.assignment) return "No seat";
-        const health=this.memberSessionHealth(item);
-        if(!health) return "No session health yet";
-        const parts=[health.health_reason||health.health];
-        if(health.worker_live===false) parts.push("worker lease lapsed");
-        if(health.running_jobs>0) parts.push(health.running_jobs+" job(s) running");
-        if(health.turn_status) parts.push("turn "+(health.current_turn||"?")+" "+health.turn_status);
-        return parts.join(" | ");
-      },
-      memberActivity(item){
-        const health=this.memberSessionHealth(item);
-        if(!health) return "";
-        const quiet=Number(health.quiet_seconds||0);
-        if(health.running_jobs>0) return health.running_jobs+" job"+(health.running_jobs>1?"s":"")+" running";
-        return "quiet "+this.formatQuietSeconds(quiet);
-      },
-      memberQuietClass(item){
-        const health=this.memberSessionHealth(item);
-        if(!health) return "text-slate-400";
-        if(health.running_jobs>0) return "text-sky-600";
-        if(health.health==="handoff"||health.health==="cancel") return "text-rose-600";
-        if(health.health==="diagnose") return "text-amber-600";
-        return "text-slate-400";
-      },
-      formatQuietSeconds(seconds){
-        const total=Math.max(0,Math.floor(Number(seconds)||0));
-        if(total<60) return total+"s";
-        if(total<3600) return Math.floor(total/60)+"m";
-        return Math.floor(total/3600)+"h "+Math.floor((total%3600)/60)+"m";
-      },
-      mergedEvents(){
-        const run=this.eventSourceFilter==="session"?[]:this.competitionEvents.map(item=>({
-          ...item, source:"run", stream_key:"run:"+item.event_id,
-        }));
-        const session=this.eventSourceFilter==="run"?[]:this.sessionEvents.map(item=>({
-          ...item, source:"session", stream_key:"session:"+item.event_id,
-        }));
-        return [...run,...session]
-          .sort((a,b)=>Date.parse(a.created_at||0)-Date.parse(b.created_at||0))
-          .slice(-200);
-      },
-      sessionMemberName(sessionId){
-        const seat=this.competitionMembers.find(
-          item=>item?.assignment?.session_id===sessionId
-        );
-        return seat?.member||"";
-      },
-      connectSessionEvents(){
-        const sourceToken=++this.sessionEventSourceToken;
-        if(this.sessionEventSource){ this.sessionEventSource.close(); this.sessionEventSource=null; }
-        if(this.sessionReconnectTimer){ clearTimeout(this.sessionReconnectTimer); this.sessionReconnectTimer=null; }
-        const after=this.sessionEventCursor>0?"&after="+encodeURIComponent(this.sessionEventCursor):"";
-        const source=new EventSource("/api/agent/events?kind=competition"+after);
-        const onEvent=(event)=>{
-          try{
-            const item=JSON.parse(event.data);
-            const eventId=Number(item.event_id||event.lastEventId||0);
-            if(eventId>this.sessionEventCursor) this.sessionEventCursor=eventId;
-            if(this.sessionEvents.some(existing=>existing.event_id===item.event_id)) return;
-            item.member=this.sessionMemberName(item.session_id);
-            this.sessionEvents=[...this.sessionEvents,item].slice(-150);
-          }catch(error){}
-        };
-        source.onmessage=onEvent;
-        for(const name of ["user_message","provider_messages","reasoning","tool_call","tool_result","status","error","handoff","loop_detected","context_compacted","compression_failed"]){
-          source.addEventListener(name,onEvent);
-        }
-        source.onerror=()=>{
-          if(this.sessionEventSourceToken!==sourceToken) return;
-          source.close(); this.sessionEventSource=null;
-          if(!this.showCompetition) return;
-          this.sessionReconnectTimer=setTimeout(()=>{
-            this.sessionReconnectTimer=null;
-            this.connectSessionEvents();
-          },1000);
-        };
-        this.sessionEventSource=source;
-      },
-      connectCompetitionEvents(runId){
-        const sourceToken=++this.competitionEventSourceToken;
-        if(this.competitionEventSource){ this.competitionEventSource.close(); this.competitionEventSource=null; }
-        if(this.competitionEventRunId!==runId){ this.competitionEvents=[]; this.competitionEventCursor=0; }
-        this.competitionEventRunId=runId;
-        if(this.competitionReconnectTimer){ clearTimeout(this.competitionReconnectTimer); this.competitionReconnectTimer=null; }
-        const after=this.competitionEventCursor>0?"?after="+encodeURIComponent(this.competitionEventCursor):"";
-        const source=new EventSource("/api/runs/"+encodeURIComponent(runId)+"/events"+after);
-        source.onmessage=(event)=>{
-          try{
-            const item=JSON.parse(event.data);
-            const eventId=Number(item.event_id||event.lastEventId||0);
-            if(eventId>this.competitionEventCursor) this.competitionEventCursor=eventId;
-            if(!this.competitionEvents.some(existing=>existing.event_id===item.event_id)){
-              this.competitionEvents=[...this.competitionEvents,item].slice(-150);
-            }
-          }catch(error){}
-        };
-        source.addEventListener("run.created",source.onmessage);
-        for(const name of ["run.started","run.synchronized","run.paused","run.running","run.stopped","run.blocked","assignment.started","assignment.start_failed","assignment.recovered","assignment.restored","assignment.stalled","session.diagnose","session.cancel","session.handoff","session.handed_off","session.handoff_failed","session.handoff_skipped","submission.queued","submission.verdict","instance.start_failed","instance.stop_failed","instance.renew_failed","wp.started","wp.completed","wp.deferred","coordinator.error","run.sync_failed"]){ source.addEventListener(name,source.onmessage); }
-        source.onerror=()=>{
-          if(this.competitionEventSourceToken!==sourceToken) return;
-          source.close(); this.competitionEventSource=null;
-          if(!this.showCompetition || this.competitionEventRunId!==runId) return;
-          this.competitionReconnectTimer=setTimeout(()=>{
-            this.competitionReconnectTimer=null;
-            this.connectCompetitionEvents(runId);
-          },1000);
-        };
-        this.competitionEventSource=source;
-      },
-      async preflightCompetition(){
-        if(!this.competitionWorkflowId) return;
-        this.competitionBusy=true; this.competitionError="";
-        try{ this.competitionPreflight=await this.api("POST","/api/workflows/"+encodeURIComponent(this.competitionWorkflowId)+"/preflight"); }
-        catch(error){ this.competitionError=error.message||"Preflight failed"; }
-        finally{ this.competitionBusy=false; }
-      },
-      async startCompetition(){
-        if(!this.competitionWorkflowId) return;
-        this.competitionBusy=true; this.competitionError="";
-        try{
-          await this.preflightCompetition();
-          if(this.competitionError) return;
-          const random=(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+Math.random().toString(36).slice(2));
-          this.competitionRun=await this.api("POST","/api/workflows/"+encodeURIComponent(this.competitionWorkflowId)+"/start",{idempotency_key:"ui-"+random});
-          await this.loadCompetitionRuns();
-        }catch(error){ this.competitionError=error.message||"Competition start failed"; }
-        finally{ this.competitionBusy=false; }
-      },
-      async controlCompetition(action){
-        if(!this.competitionRun) return;
-        this.competitionBusy=true; this.competitionError="";
-        const run=this.competitionRun.run;
-        try{
-          const operationId="control-"+(globalThis.crypto?.randomUUID?.()||Date.now()+"-"+Math.random().toString(16).slice(2));
-          this.competitionRun=await this.api("POST","/api/runs/"+encodeURIComponent(run.id)+"/"+action,{revision:run.revision,operation_id:operationId});
-          if(this.competitionRun.control_operation)this.flash(action+" request accepted");
-          await this.loadCompetitionRun(run.id,false);
-        }catch(error){ this.competitionError=error.message||("Could not "+action+" competition"); }
-        finally{ this.competitionBusy=false; }
-      },
-      displayMember(name){ return name ? name.charAt(0).toUpperCase()+name.slice(1) : ""; },
-      competitionChallengeTitle(challengeId){
-        const challenge=this.competitionRun?.challenges?.find(item=>item.id===challengeId);
-        return challenge?.metadata?.title||"";
-      },
-      competitionChallengeGroups(){
-        const challenges=this.competitionRun?.challenges||[];
-        return [
-          {label:"Ordinary challenges",items:challenges.filter(item=>!item.metadata?.remote)},
-          {label:"Container challenges",items:challenges.filter(item=>!!item.metadata?.remote)},
-        ];
-      },
-      competitionStatusClass(){
-        const status=this.competitionRun?.run?.status;
-        return status==="running"?"bg-teal-50 text-teal-700":status==="paused"?"bg-amber-50 text-amber-700":status==="blocked"?"bg-rose-50 text-rose-700":"bg-slate-100 text-slate-600";
-      },
-      competitionMemberClass(state){
-        return state==="primary"?"border-teal-300":state==="helper"?"border-sky-300":state==="wp"?"border-amber-300":"border-slate-200";
-      },
-      competitionChallengeClass(state){
-        return state==="solved"?"bg-emerald-50 text-emerald-700":state==="solving"?"bg-teal-50 text-teal-700":state==="expired"?"bg-rose-50 text-rose-700":state==="blocked"?"bg-amber-50 text-amber-700":"bg-slate-100 text-slate-600";
-      },
-      competitionDeadline(value){
-        if(!value) return "Not started";
-        const remaining=Date.parse(value)-this.nowMs;
-        if(remaining<=0) return "Expired";
-        const hours=Math.floor(remaining/3600000), minutes=Math.floor((remaining%3600000)/60000);
-        return hours+"h "+minutes+"m";
-      },
-      competitionEventSummary(event){
-        const payload=event?.payload||{};
-        return Object.entries(payload).map(([key,value])=>key+": "+String(value)).join(" | ");
-      },
+      categoryLabel(category){ return category==="web+pwn" ? "Web/Pwn" : (category||"misc"); },
       selectOpsWorkflow(workflowId){
         this.opsWorkflowId = this.opsWorkflowId===workflowId ? null : workflowId;
         this.opsConfirmInput=""; this.opsResult=null;
@@ -2498,13 +2952,12 @@
       },
       async deleteOpsWorkflow(workflow){
         if(!workflow||this.opsWorkflowBusy) return;
-        if(!confirm("Delete workflow \""+workflow.name+"\"?\n\nIts stored secrets and the execution capability are removed. Imported projects and competition runs are not deleted.")) return;
+        if(!confirm("Delete workflow \""+workflow.name+"\"?\n\nIts stored secrets and the execution capability are removed. Imported projects are not deleted.")) return;
         this.opsWorkflowBusy=true;
         try{
           await this.api("DELETE","/api/ops/workflows/"+encodeURIComponent(workflow.id));
           const tokens={...this.workflowTokens}; delete tokens[workflow.id]; this.workflowTokens=tokens;
           if(this.opsWorkflowId===workflow.id){ this.opsWorkflowId=null; this.opsResult=null; this.opsConfirmInput=""; }
-          if(this.competitionWorkflowId===workflow.id) this.competitionWorkflowId="";
           await this.loadOpsWorkflows();
           this.flash("workflow deleted");
         }catch(error){
@@ -2512,7 +2965,7 @@
         }finally{ this.opsWorkflowBusy=false; }
       },
       opsStartSelection(){
-        const wanted=this.projectStatusFilter.length?this.filteredProjects():this.projects;
+        const wanted=(this.projectStatusFilter.length||this.competitionFilterId)?this.filteredProjects():this.projects;
         return wanted
           .filter(project=>!["solved","flag_found"].includes(project.status))
           .map(project=>project.external_id)
@@ -2520,14 +2973,12 @@
       },
       opsStartSelectionLabel(){
         const selection=this.opsStartSelection();
-        if(!this.projectStatusFilter.length) return "all unsolved challenges";
+        if(!this.projectStatusFilter.length && !this.competitionFilterId) return "all unsolved challenges";
         return selection.length+" selected";
       },
       opsStartBlockedReason(){
         const workflow=this.selectedOpsWorkflow();
         if(!workflow) return "Select a workflow first.";
-        if(workflow.status!=="confirmed") return "Authorize the workflow first.";
-        if(!this.workflowTokens[workflow.id]) return "The execution capability is held per browser tab: authorize again in this tab.";
         return "";
       },
       opsStartReady(){ return !this.opsStartBlockedReason(); },
@@ -2536,15 +2987,18 @@
         if(!workflow||!this.opsStartReady()||this.opsStartBusy) return;
         this.opsStartBusy=true; this.opsStartError="";
         try{
-          await this.api("POST","/api/workflows/"+encodeURIComponent(workflow.id)+"/preflight");
+          const preflight=await this.api("POST","/api/workflows/"+encodeURIComponent(workflow.id)+"/preflight");
           const random=(globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+Math.random().toString(36).slice(2));
           const payload={idempotency_key:"ui-"+random};
-          const selection=this.projectStatusFilter.length?this.opsStartSelection():[];
-          if(selection.length) payload.select=selection;
+          // Only challenges this workflow actually serves may be selected; the
+          // project list may still hold another run's projects.
+          const owned=new Set(((preflight&&preflight.challenges)||[]).map(item=>String(item.external_id)));
+          const wanted=(this.projectStatusFilter.length||this.competitionFilterId)?this.opsStartSelection():[];
+          const selection=wanted.filter(id=>owned.has(String(id)));
+          if(selection.length&&selection.length<owned.size) payload.select=selection;
           this.competitionRun=await this.api("POST","/api/workflows/"+encodeURIComponent(workflow.id)+"/start",payload);
-          this.competitionWorkflowId=workflow.id;
-          await Promise.all([this.loadProjects(),this.loadCompetitionRuns()]);
-          this.flash("competition run started");
+          await Promise.all([this.loadProjects(),this.loadCompetitions()]);
+          this.flash("run started");
         }catch(error){
           this.opsStartError=error.message||"could not start the run";
         }finally{ this.opsStartBusy=false; }
@@ -2553,21 +3007,7 @@
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
         const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
         this.opsResult=await this.api("POST","/api/ops/workflows/"+workflow.id+"/execute",{execution_token,operation});
-        if(operation==="import") await this.loadProjects();
-      },
-      async submitFoundFlags(){
-        const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
-        const execution_token=this.workflowTokens[workflow.id]; if(!execution_token){ this.flash("authorize the workflow first"); return; }
-        const flags=await this.api("GET","/api/flags?reveal=true");
-        const candidates=flags.filter(item=>item.external_id&&item.flag);
-        if(!candidates.length){ this.flash("no imported project has a flag yet"); return; }
-        const results=[];
-        for(const item of candidates){
-          try{
-            results.push(await this.api("POST","/api/ops/workflows/"+workflow.id+"/execute",{execution_token,operation:"submit",project_id:item.project_id}));
-          }catch(error){ results.push({external_id:item.external_id,accepted:false,error:"submission failed"}); }
-        }
-        this.opsResult={operation:"submit_found_flags",results};
+        if(operation==="import") await Promise.all([this.loadProjects(),this.loadCompetitions()]);
       },
       async revokeOpsWorkflow(){
         const workflow=this.selectedOpsWorkflow(); if(!workflow) return;
@@ -2601,7 +3041,7 @@
         </div>`;
       },
       _edits: {},
-      pendingQuestions: [], questionAnswers: {}, questionBusy: false, questionError: "",
+      pendingQuestions: [], questionAnswers: {}, questionExpanded: {}, questionCollapsed: {}, questionBusy: false, questionError: "",
       async loadQuestions(){
         if(!this.opsSessionId){ this.pendingQuestions=[]; return; }
         try{
@@ -2708,10 +3148,16 @@
         delete this._edits.member;
         this.flash("Shared Member configuration selected");
       },
+      async clearMemberBackup(){
+        this.cfg=await this.api("PUT","/config",{clear_member_backup:true});
+        delete this._edits.member_backup;
+        this.flash("backup slot cleared");
+      },
       setField(name, field, value){ (this._edits[name]=this._edits[name]||{})[field]=value; },
       async saveIPC(){
         const body={}; if(this._edits.diamond) body.diamond=this._edits.diamond;
         if(this._edits.member) body.member=this._edits.member;
+        if(this._edits.member_backup) body.member_backup=this._edits.member_backup;
         this.cfg=await this.api("PUT","/config",body);
         if(this._edits.ops_agent) this.opsCfg=await this.api("PUT","/api/ops/config",this._edits.ops_agent);
         this._edits={}; this._removedMembers=[]; this.flash("config saved");

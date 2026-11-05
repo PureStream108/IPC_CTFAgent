@@ -1,18 +1,32 @@
 log_enabled: true
+# Hot switch for automatic writeups. The WP page toggles it at runtime and the
+# value is persisted here; IPC_WP_ENABLED overrides it at startup.
+wp_enabled: true
 diamond:
-  api_format: deepseek
-  api_surface: auto
-  reasoning_effort: high
-  api_key: 
-  base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-member:
   api_format: deepseek
   api_surface: auto
   reasoning_effort: high
   api_key: ''
   base_url: https://api.deepseek.com
   model: deepseek-v4-flash
+member:
+  api_format: deepseek
+  api_surface: auto
+  reasoning_effort: high
+  api_key: ''''
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+# Optional second Member key. When set, the ten fixed Member seats split 5/5:
+# even indices (amber, topaz, ...) use `member`, odd indices (agate, ...) use
+# `member_backup`. Leave the block commented out to run all ten on `member`.
+# Empty model/api_surface/reasoning_effort values inherit from `member`.
+# member_backup:
+#   api_format: openai
+#   api_surface: auto
+#   reasoning_effort: max
+#   api_key: ''
+#   base_url: https://api.deepseek.com
+#   model: deepseek-v4.1-flash
 runtime:
   eval_interval_steps: 20
   interval: 2
@@ -22,7 +36,22 @@ runtime:
   sandbox_backend: docker
   max_member_steps: 60
   max_member_actions_per_task: 20
+  # Pentest mode: Diamond keeps its name and log prefix, but reads a board
+  # every tick and emits at most diamond_actions_per_tick actions.
+  diamond_pentest_mode: false
+  diamond_actions_per_tick: 2
+  ladder_help_minutes: 10
+  ladder_upgrade_minutes: 25
+  ladder_park_minutes: 40
+  # A benchmark slot is scarce: a challenge that holds one past this many
+  # minutes is parked, its container released, and it re-enters the queue with
+  # a backoff. Keep it well under the platform task window.
+  per_challenge_minutes: 45
+  # Must stay above compaction_trigger_ratio (0.75).
+  state_write_ratio: 0.85
 limits:
   total_cpu: 4
   max_concurrent_tasks: 10
   network: true
+  mem_limit: 2g
+  pids_limit: 512

@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 import requests
+import yaml
 
 DEFAULT_REPOSITORY = "ljagiello/ctf-skills"
 DEFAULT_REVISION = "c332c7be1b27cb64639a20124ac55ba916adef92"
@@ -32,6 +33,13 @@ CATEGORY_FOLDERS: dict[str, str] = {
     "osint": "Misc",
     "forensics": "Misc",
     "malware": "Reverse",
+    "web+pwn": "Web",
+}
+
+# A category that legitimately spans two folders. A remote challenge with no
+# usable classification can be either, so it receives both families.
+_CATEGORY_FOLDER_GROUPS: dict[str, tuple[str, ...]] = {
+    "web+pwn": ("Web", "Pwn"),
 }
 
 _BUNDLED_FOLDERS: dict[str, str] = {
@@ -76,6 +84,60 @@ def default_folder_for(directory: str) -> str:
         if re.search(pattern if pattern.startswith("^") else rf"\b{pattern}\b", name):
             return folder
     return "Misc"
+
+
+def skill_frontmatter(text: str) -> dict[str, str]:
+    """Read the `name` and `description` from a SKILL.md YAML header.
+
+    Upstream skill packages use frontmatter as the human-facing label; the
+    directory name is only a fallback. A malformed header must not make the
+    skill unreadable, so this returns an empty mapping instead of raising.
+    """
+    if not isinstance(text, str) or not text.startswith("---"):
+        return {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    end = next(
+        (index for index in range(1, len(lines)) if lines[index].strip() in {"---", "..."}),
+        None,
+    )
+    if end is None:
+        return {}
+    try:
+        data = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key in ("name", "description"):
+        value = data.get(key)
+        if isinstance(value, (str, int, float)):
+            normalized = " ".join(str(value).split())
+            if normalized:
+                result[key] = normalized
+    return result
+
+
+def skill_summary(text: str, *, limit: int = 240) -> str:
+    """Return one readable line from a SKILL.md body when it has no header."""
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        end = next(
+            (index for index in range(1, len(lines)) if lines[index].strip() in {"---", "..."}),
+            None,
+        )
+        if end is not None:
+            lines = lines[end + 1:]
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "```")):
+            continue
+        stripped = re.sub(r"^[-*+]\s+", "", stripped)
+        stripped = re.sub(r"^>\s*", "", stripped)
+        return stripped[:limit]
+    return ""
 
 
 class SkillStore:
@@ -192,11 +254,13 @@ class SkillStore:
         return target.read_text(encoding="utf-8")
 
     def for_category(self, category: str) -> list[dict]:
-        """Skills Diamond distributes for a challenge category.
+        """Package view of the skills selected for a challenge category.
 
-        Selection follows the Skill browser's folders, so moving a skill in the
-        UI changes what Members actually receive. ``Misc`` and ``Custom`` always
-        travel along: they hold cross-cutting and operator-authored skills.
+        Kept for the MCP `discover` tool; task assignment uses
+        :meth:`catalog` for the compact Member-facing list. Both follow the
+        Skill browser's folders, so moving a skill in the UI changes what the
+        next assignment receives. ``Misc`` and ``Custom`` always travel along:
+        they hold cross-cutting and operator-authored skills.
         """
         folder = CATEGORY_FOLDERS.get(str(category).strip().lower(), "Misc")
         wanted = {folder, "Misc", CUSTOM_FOLDER}
@@ -211,6 +275,122 @@ class SkillStore:
             for p in self.snapshot()
             if allowed.get(p["repository"])
         ]
+
+    def _folders_for(self, category: str) -> list[str]:
+        """Folder priority for one challenge category (specific, Misc, Custom)."""
+        key = str(category).strip().lower()
+        wanted = list(_CATEGORY_FOLDER_GROUPS.get(key, (CATEGORY_FOLDERS.get(key, "Misc"),)))
+        for name in ("Misc", CUSTOM_FOLDER):
+            if name not in wanted:
+                wanted.append(name)
+        return wanted
+
+    def _entries(self, category: str | None = None) -> list[dict]:
+        """Enabled skill entries for a category, without reading their bodies."""
+        grouped = self.tree()
+        folders = self._folders_for(category) if category is not None else list(grouped)
+        entries: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for folder in folders:
+            for item in grouped.get(folder, []):
+                key = (item["repository"], item["path"])
+                if key in seen or not item["enabled"]:
+                    continue
+                seen.add(key)
+                entries.append(item)
+        return entries
+
+    def _named_entries(self, category: str | None = None):
+        """Yield (entry, body, frontmatter, display_name) for selected skills."""
+        for item in self._entries(category):
+            try:
+                body = self.read(item["repository"], item["revision"], item["path"])
+            except (OSError, ValueError):
+                body = ""
+            meta = skill_frontmatter(body)
+            name = (meta.get("name") or item["name"]).strip()
+            yield item, body, meta, name
+
+    def catalog(self, category: str) -> list[dict]:
+        """Compact skill catalogue injected when a task is assigned.
+
+        Only metadata travels with the assignment: the SKILL.md body stays on
+        disk and is read on demand through :meth:`read_skill`. Selection is
+        folder-based, so moving a skill in the UI changes what the next
+        assignment of that category receives.
+        """
+        wanted = self._folders_for(category)
+        entries: list[dict] = []
+        for item, body, meta, name in self._named_entries(category):
+            description = (meta.get("description") or skill_summary(body)).strip()
+            entries.append({
+                "name": name,
+                "description": description[:240],
+                "path": item["path"],
+                "repository": item["repository"],
+                "revision": item["revision"],
+                "folder": item["folder"],
+            })
+        entries.sort(key=lambda entry: (
+            wanted.index(entry["folder"]) if entry["folder"] in wanted else len(wanted),
+            entry["name"].lower(),
+        ))
+        return entries
+
+    def read_skill(
+        self, name: str, relative: str = "SKILL.md", category: str | None = None
+    ) -> dict:
+        """Read one injected skill's body or a text resource in its directory.
+
+        `name` accepts the frontmatter name, the directory name, or the
+        package-relative path. `relative` is confined to that one skill
+        directory; traversal and non-text resources are rejected.
+        """
+        raw = (name or "").strip().replace("\\", "/").strip("/")
+        if not raw:
+            raise ValueError("a skill name is required")
+        matches: list[tuple[dict, str]] = []
+        for item, _body, _meta, display_name in self._named_entries(category):
+            directory = str(Path(item["path"]).parent).replace("\\", "/").strip("/")
+            if raw in {display_name, item["name"], item["path"], directory}:
+                matches.append((item, display_name))
+        if not matches:
+            raise KeyError(f"unknown skill: {raw}")
+        if len(matches) > 1:
+            choices = ", ".join(
+                sorted(f"{item['repository']}:{item['path']}" for item, _ in matches)
+            )
+            raise ValueError(f"ambiguous skill {raw!r}; choose one of: {choices}")
+        item, display_name = matches[0]
+        directory = str(Path(item["path"]).parent).replace("\\", "/").strip("/")
+        parts = [
+            part for part in (relative or "SKILL.md").strip().replace("\\", "/").split("/")
+            if part not in {"", "."}
+        ]
+        if not parts or any(part == ".." or ":" in part for part in parts):
+            raise ValueError("invalid skill resource path")
+        relative_path = "/".join(parts)
+        key = hashlib.sha256(f"{item['repository']}@{item['revision']}".encode()).hexdigest()
+        package_root = (self.root / key).resolve()
+        skill_root = (package_root / directory).resolve()
+        target = (skill_root / relative_path).resolve()
+        if not target.is_relative_to(skill_root):
+            raise ValueError("invalid skill resource path")
+        if not target.is_file():
+            raise KeyError(f"no such skill resource: {relative_path}")
+        if target.stat().st_size > 256 * 1024:
+            raise ValueError("skill resource exceeds 256 KiB")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("skill resource is not UTF-8 text") from exc
+        return {
+            "name": display_name,
+            "path": f"{directory}/{relative_path}" if directory else relative_path,
+            "content": content,
+            "repository": item["repository"],
+            "revision": item["revision"],
+        }
 
     def _placements(self, state: dict) -> dict:
         return state.setdefault("placements", {})
@@ -309,6 +489,164 @@ class SkillStore:
             self._save(state)
             return self._describe(repository, state["packages"][repository])
 
+    @staticmethod
+    def _npx_invocation() -> list[str]:
+        """Resolve npx to a spawnable command, including Windows .cmd shims."""
+        executable = shutil.which("npx") or shutil.which("npx.cmd")
+        if executable is None:
+            raise RuntimeError("npx is not available in this deployment")
+        if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat"}:
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/c", executable]
+        return [executable]
+
+    @staticmethod
+    def _npx_skill_name(name: str) -> str:
+        value = str(name or "").strip()
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or ":" in value
+        ):
+            raise ValueError(f"invalid skill name from npx: {name!r}")
+        return value
+
+    def _repository_for_spec(self, spec: str, source: str = "") -> str:
+        """Normalize an npx source to the owner/repository key used by state."""
+        for value in (source, spec):
+            text = str(value or "").strip()
+            text = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", text)
+            text = re.sub(r"\.git$", "", text).strip("/")
+            if _PACKAGE.fullmatch(text):
+                return text
+        digest = hashlib.sha256(str(spec).encode("utf-8")).hexdigest()[:12]
+        return f"local/npx-{digest}"
+
+    def _npx_skills(self, workdir: Path, stdout: str) -> list[dict]:
+        """Find the canonical skill directories produced by npx skills add.
+
+        The CLI writes the real files under .agents/skills and links or copies
+        them into per-agent directories. Prefer that canonical tree; fall back
+        to the JSON path fields or to a plain SKILL.md scan.
+        """
+        records: dict[str, dict] = {}
+        try:
+            parsed = json.loads(stdout)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            parsed = (
+                [parsed]
+                if parsed.get("name")
+                else (parsed.get("skills") or parsed.get("installed") or [])
+            )
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                if name:
+                    records[str(name)] = item
+
+        found: dict[str, dict] = {}
+        canonical = workdir / ".agents" / "skills"
+        if canonical.is_dir():
+            for directory in sorted(canonical.iterdir()):
+                if not (directory / "SKILL.md").is_file():
+                    continue
+                name = self._npx_skill_name(directory.name)
+                found[name] = {
+                    "name": name,
+                    "path": directory,
+                    "source": str(records.get(name, {}).get("source") or ""),
+                }
+
+        for name, record in records.items():
+            if name in found:
+                continue
+            raw_path = record.get("path")
+            if not raw_path:
+                continue
+            directory = Path(str(raw_path))
+            if (directory / "SKILL.md").is_file():
+                safe_name = self._npx_skill_name(name)
+                found[safe_name] = {
+                    "name": safe_name,
+                    "path": directory,
+                    "source": str(record.get("source") or ""),
+                }
+
+        if not found:
+            for skill_file in sorted(workdir.rglob("SKILL.md")):
+                if ".agents" in skill_file.parts:
+                    continue
+                directory = skill_file.parent
+                name = self._npx_skill_name(directory.name)
+                found.setdefault(name, {
+                    "name": name,
+                    "path": directory,
+                    "source": str(records.get(name, {}).get("source") or ""),
+                })
+
+        if not found:
+            raise RuntimeError("npx skills add produced no SKILL.md")
+        return [found[name] for name in sorted(found)]
+
+    def _import_npx_skills(self, repository: str, skills: list[dict]) -> dict:
+        """Copy canonical npx skill directories into the store package layout."""
+        with _LOCK:
+            state = self._state()
+            previous = state["packages"].get(repository)
+            with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                stage = Path(temporary) / "package"
+                stage.mkdir()
+                if previous is not None:
+                    existing = self.root / str(previous.get("directory") or "")
+                    if existing.is_dir():
+                        shutil.copytree(existing, stage, dirs_exist_ok=True)
+                        (stage / "manifest.json").unlink(missing_ok=True)
+                for skill in skills:
+                    target = stage / skill["name"]
+                    if target.exists():
+                        shutil.rmtree(target)
+                    shutil.copytree(skill["path"], target)
+                skill_paths = sorted(
+                    str(path.relative_to(stage)).replace("\\", "/")
+                    for path in stage.rglob("SKILL.md")
+                )
+                if not skill_paths:
+                    raise ValueError("npx skills add produced no SKILL.md")
+                digest = hashlib.sha256()
+                for path in sorted(item for item in stage.rglob("*") if item.is_file()):
+                    digest.update(
+                        str(path.relative_to(stage)).replace("\\", "/").encode("utf-8")
+                    )
+                    digest.update(b"\0")
+                    digest.update(path.read_bytes())
+                revision = digest.hexdigest()[:40]
+                manifest = {
+                    "repository": repository,
+                    "revision": revision,
+                    "skills": skill_paths,
+                    "archive_sha256": digest.hexdigest(),
+                }
+                (stage / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+                key = hashlib.sha256(f"{repository}@{revision}".encode()).hexdigest()
+                destination = self.root / key
+                if destination.exists():
+                    shutil.rmtree(destination)
+                stage.replace(destination)
+            state["packages"][repository] = {
+                "revision": revision,
+                "enabled": True,
+                "directory": key,
+            }
+            self._save(state)
+        return {"repository": repository, "revision": revision, "skills": skill_paths}
+
     def npx_spec(self, value: str) -> str:
         """Validate the argument for ``npx skills add``.
 
@@ -323,22 +661,57 @@ class SkillStore:
         return spec
 
     def install_with_npx(self, spec: str, *, timeout: int = 300) -> dict:
-        """Run ``npx skills add <spec>`` so the CLI's own resolution is used."""
+        """Run npx skills add and import the result into this store.
+
+        The CLI resolves packages itself, so this is the only path that can
+        install by repository slug or URL. Its canonical files live under
+        .agents/skills in the working directory; run it in a temporary
+        directory and copy those directories into the content-addressed
+        package layout the rest of the application reads.
+        """
         import subprocess
 
         spec = self.npx_spec(spec)
         self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            completed = subprocess.run(
-                ["npx", "--yes", "skills", "add", spec],
-                cwd=str(self.root), capture_output=True, text=True,
-                timeout=timeout, check=False,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError("npx is not available in this deployment") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"npx skills add timed out after {timeout}s") from exc
-        output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
-        if completed.returncode != 0:
-            raise RuntimeError(f"npx skills add failed: {output[-2000:] or completed.returncode}")
-        return {"spec": spec, "output": output[-4000:], "tree": self.tree()}
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            workdir = Path(temporary)
+            try:
+                completed = subprocess.run(
+                    [
+                        *self._npx_invocation(),
+                        "--yes", "skills", "add", spec,
+                        "--json", "-y", "--copy", "--skill", "*",
+                    ],
+                    cwd=str(workdir), capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=timeout, check=False,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError("npx is not available in this deployment") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"npx skills add timed out after {timeout}s") from exc
+            except OSError as exc:
+                raise RuntimeError(f"npx skills add could not start: {exc}") from exc
+            output = ((completed.stdout or "") + "\n" + (completed.stderr or "")).strip()
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"npx skills add failed: {output[-2000:] or completed.returncode}"
+                )
+            try:
+                skills = self._npx_skills(workdir, completed.stdout or "")
+            except RuntimeError as exc:
+                raise RuntimeError(f"{exc}: {output[-1000:]}") from exc
+            repository = self._repository_for_spec(spec, skills[0].get("source", ""))
+            try:
+                imported = self._import_npx_skills(repository, skills)
+            except (OSError, shutil.Error) as exc:
+                raise RuntimeError(f"could not import npx skills: {exc}") from exc
+        return {
+            "spec": spec,
+            "output": output[-4000:],
+            "installed": [
+                {"name": skill["name"], "path": skill["name"]} for skill in skills
+            ],
+            **imported,
+            "tree": self.tree(),
+        }

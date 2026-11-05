@@ -1,46 +1,45 @@
 # strings
 
-Extract Ghidra-defined strings with addresses through reverse MCP.
+使用 GNU strings 从二进制和 blob 中提取可打印字符串。
 
 ## 用途与适用场景
 
-Quick look for flags, hints, hardcoded data.
+需要快速查找 flag、路径、URL、错误信息、格式字符串或硬编码密钥时使用。
 
 ## 版本检查
 
 ```bash
-ipc-mcp-server --help
+strings --version | head -1
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`ipc-mcp-server reverse`
-- 镜像路径：`task-container`
+- 常用入口：`strings`
+- 镜像路径：`/usr/bin/strings`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `ipc-mcp-server reverse` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先默认扫描，再用 `-n 6`、`-t x` 调整长度和偏移；对宽字符用 `-el`。把偏移带回 xxd/r2 定位引用。
 
 ## 可执行示例
 
 ```bash
-ipc-mcp-server reverse --help
+strings -a -n 6 -t x /tmp/challenge | head -120
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+每行包含文件偏移和字符串；关注 flag{、http、/bin/sh、password、secret 以及异常长的 base64/blob。
 
 ## 常见错误与限制
 
-仅在合法授权的 CTF、靶场和研究环境中使用。
+strings 只提取连续可打印字节，压缩/加密数据不会直接出现；UPX 样本先 `upx -d`。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [xxd](/memory/catalog/tool_xxd/document)
+- [radare2](/memory/catalog/tool_radare2/document)
 
 ## 官方参考
 
-- 使用镜像内 `--help`、语言内置帮助或工具上游仓库作为版本对应参考。
+- [https://sourceware.org/binutils/docs/binutils/strings.html](https://sourceware.org/binutils/docs/binutils/strings.html)

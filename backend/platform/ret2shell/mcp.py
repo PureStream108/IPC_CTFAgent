@@ -228,6 +228,20 @@ class WsrxTunnelManager:
             self.stop(challenge_id)
 
 
+_DEFAULT_TUNNEL_MANAGER: WsrxTunnelManager | None = None
+_DEFAULT_TUNNEL_MANAGER_LOCK = threading.Lock()
+
+
+def default_tunnel_manager() -> WsrxTunnelManager:
+    """Return the process-wide manager shared by the MCP and the workflow adapter."""
+
+    global _DEFAULT_TUNNEL_MANAGER
+    with _DEFAULT_TUNNEL_MANAGER_LOCK:
+        if _DEFAULT_TUNNEL_MANAGER is None:
+            _DEFAULT_TUNNEL_MANAGER = WsrxTunnelManager()
+        return _DEFAULT_TUNNEL_MANAGER
+
+
 def build_ret2shell_mcp(
     client: Ret2ShellClient, *, tunnel_manager: WsrxTunnelManager | None = None
 ) -> MCPServer:
@@ -236,10 +250,10 @@ def build_ret2shell_mcp(
     Credentials stay in the backend process; Members only ever see instance
     endpoints and challenge state.  Flag submission is deliberately NOT
     exposed here — the shared 10-per-5-minutes quota is spent only by the
-    operator through scripts/ret2shell_submit.py.
+    operator through ``python -m backend.platform.ret2shell.submit``.
     """
 
-    manager = tunnel_manager or WsrxTunnelManager()
+    manager = tunnel_manager or default_tunnel_manager()
 
     server = create_mcp_server(
         name="ret2shell",

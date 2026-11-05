@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -30,6 +31,8 @@ from backend.sandbox.webui_proxy import webui_proxy_manager
 _recovery_logger = logging.getLogger(__name__)
 
 WORKSPACE = "/workspace"
+MAX_CONCURRENT_EXECS = 8
+DEFAULT_CONTAINER_ENV: dict[str, str] = {"MALLOC_ARENA_MAX": "2"}
 ATTACHMENTS_DIR = f"{WORKSPACE}/attachments"
 SHARED_DIR = f"{WORKSPACE}/shared"
 JOBS_DIR = f"{WORKSPACE}/.ipc/jobs"
@@ -175,11 +178,15 @@ class TaskSandbox:
         env: dict[str, str] | None = None,
         network: bool = True,
         attachments_dir: str | Path | None = None,
+        mem_limit: str | None = None,
+        pids_limit: int | None = None,
     ):
         self.project_id = project_id
         self.image = image
-        self.env = env or {}
+        self.env = {**DEFAULT_CONTAINER_ENV, **(env or {})}
         self.network = network
+        self.mem_limit = mem_limit
+        self.pids_limit = pids_limit
         self.attachments_dir = Path(attachments_dir) if attachments_dir is not None else None
         self._container = None
         self._client = None
@@ -190,7 +197,7 @@ class TaskSandbox:
         self._shared_network: str | None = None
         self._lock = threading.RLock()
         self._member_dirs: set[str] = set()
-
+        self._exec_slots = threading.BoundedSemaphore(MAX_CONCURRENT_EXECS)
 
     def _docker(self):
         if self._client is None:
@@ -272,7 +279,12 @@ class TaskSandbox:
                         "working_dir": "/",
                         "extra_hosts": {"host.docker.internal": "host-gateway"},
                         "volumes": {self._volume_name: {"bind": WORKSPACE, "mode": "rw"}},
+                        "environment": dict(self.env) or None,
                     }
+                    if self.mem_limit:
+                        run_kwargs["mem_limit"] = self.mem_limit
+                    if self.pids_limit:
+                        run_kwargs["pids_limit"] = int(self.pids_limit)
                     if self.network:
                         self._shared_network = self._shared_network_name()
                         if self._shared_network:
@@ -328,6 +340,8 @@ class TaskSandbox:
             f"mkdir -p {shlex.quote(ATTACHMENTS_DIR)} {shlex.quote(SHARED_DIR)} "
             f"&& if [ -d /opt/ipc-tools/tools ] && [ ! -e {WORKSPACE}/tools ]; then "
             f"ln -s /opt/ipc-tools/tools {WORKSPACE}/tools; fi "
+            f"&& if [ -d /opt/ipc-tools/wordlists ] && [ ! -e {WORKSPACE}/wordlists ]; then "
+            f"ln -s /opt/ipc-tools/wordlists {WORKSPACE}/wordlists; fi "
             f"&& if [ -f /tools.txt ]; then cp /tools.txt {WORKSPACE}/tools.txt; fi"
         )
         res = container.exec_run(["bash", "-lc", setup], workdir="/")
@@ -346,6 +360,22 @@ class TaskSandbox:
         if isinstance(output, bytes):
             return output.decode(errors="replace")
         return str(output)
+
+    def put_paths(self, paths, dest: str = ATTACHMENTS_DIR) -> int:
+        """Copy host files into the running container under dest."""
+
+        files = [Path(p) for p in paths if Path(p).is_file()]
+        if not files:
+            return 0
+        if self._container is None:
+            self.start()
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as tar:
+            for path in files:
+                tar.add(path, arcname=path.name, recursive=False)
+        stream.seek(0)
+        self._container.put_archive(dest, stream.getvalue())
+        return len(files)
 
     def _copy_attachments(self) -> None:
         if self._container is None or self.attachments_dir is None:
@@ -391,9 +421,13 @@ class TaskSandbox:
     def _raw_exec(self, command: str, workdir: str, timeout: int = 60) -> ExecResult:
         wrapped = f"timeout -k 5s {timeout}s bash -lc {shlex.quote(command)}"
         env = self.env or None
-        res = self._container.exec_run(
-            ["bash", "-lc", wrapped], workdir=workdir, demux=True, environment=env
-        )
+        container = self._container
+        if container is None:
+            raise RuntimeError("task container is not running")
+        with self._exec_slots:
+            res = container.exec_run(
+                ["bash", "-lc", wrapped], workdir=workdir, demux=True, environment=env
+            )
         out, err = res.output if isinstance(res.output, tuple) else (res.output, None)
         stdout = out.decode(errors="replace") if out else ""
         stderr = err.decode(errors="replace") if err else ""
@@ -425,6 +459,41 @@ class TaskSandbox:
                               payload["artifacts"], round(time.monotonic() - started, 6))
         except (ValueError, KeyError, TypeError):
             raise RuntimeError("sandbox output finalizer returned an invalid envelope") from None
+
+    async def aexec(self, command: str, workdir: str, timeout: int = 60) -> ExecResult:
+        return await asyncio.to_thread(self.exec, command, workdir=workdir, timeout=timeout)
+
+    async def aexec_bounded(self, command: str, workdir: str, timeout: int = 60) -> ExecResult:
+        return await asyncio.to_thread(
+            self.exec_bounded, command, workdir=workdir, timeout=timeout
+        )
+
+    async def aread_page(
+        self, path: str, *, workdir: str, offset: int = 0, limit: int = 8192
+    ) -> dict:
+        return await asyncio.to_thread(
+            self.read_page, path, workdir=workdir, offset=offset, limit=limit
+        )
+
+    async def aexec_detached(self, job_id: str, command: str, workdir: str) -> int:
+        return await asyncio.to_thread(self.exec_detached, job_id, command, workdir)
+
+    async def ajob_state(self, job_id: str) -> dict:
+        return await asyncio.to_thread(self.job_state, job_id)
+
+    async def ajob_output(
+        self, job_id: str, stream: str = "stdout", *, offset: int = 0,
+        limit: int = 32_768,
+    ) -> tuple[str, int]:
+        return await asyncio.to_thread(
+            self.job_output, job_id, stream, offset=offset, limit=limit
+        )
+
+    async def ajob_cancel(self, job_id: str) -> bool:
+        return await asyncio.to_thread(self.job_cancel, job_id)
+
+    async def awrite_file(self, workdir: str, rel_path: str, content: str) -> None:
+        await asyncio.to_thread(self.write_file, workdir, rel_path, content)
 
 
     def read_page(self, path: str, *, workdir: str, offset: int = 0, limit: int = 8192) -> dict:
@@ -557,6 +626,35 @@ class MemberSandbox:
     def read_page(self, path: str, *, offset: int = 0, limit: int = 8192) -> dict:
         return self._task.read_page(path, workdir=self.workdir, offset=offset, limit=limit)
 
+    async def aexec(self, command: str, timeout: int = 60) -> ExecResult:
+        return await self._task.aexec_bounded(
+            command, workdir=self.workdir, timeout=timeout
+        )
+
+    async def aread_page(
+        self, path: str, *, offset: int = 0, limit: int = 8192
+    ) -> dict:
+        return await self._task.aread_page(
+            path, workdir=self.workdir, offset=offset, limit=limit
+        )
+
+    async def aexec_detached(self, job_id: str, command: str) -> int:
+        return await self._task.aexec_detached(job_id, command, self.workdir)
+
+    async def ajob_state(self, job_id: str) -> dict:
+        return await self._task.ajob_state(job_id)
+
+    async def ajob_output(
+        self, job_id: str, stream: str = "stdout", *, offset: int = 0,
+        limit: int = 32_768,
+    ) -> tuple[str, int]:
+        return await self._task.ajob_output(
+            job_id, stream, offset=offset, limit=limit
+        )
+
+    async def ajob_cancel(self, job_id: str) -> bool:
+        return await self._task.ajob_cancel(job_id)
+
 
     def exec_detached(self, job_id: str, command: str) -> int:
         return self._task.exec_detached(job_id, command, workdir=self.workdir)
@@ -572,6 +670,11 @@ class MemberSandbox:
 
     def job_cancel(self, job_id: str) -> bool:
         return self._task.job_cancel(job_id)
+
+    def publish(self, paths) -> int:
+        """Copy host files into /workspace/attachments of this task container."""
+
+        return self._task.put_paths(paths)
 
     def write_file(self, rel_path: str, content: str) -> None:
         self._task.write_file(self.workdir, rel_path, content)

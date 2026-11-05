@@ -20,6 +20,7 @@ _recovery_logger = logging.getLogger(__name__)
 ACTION_KINDS = (
     "pentest_board", "pentest_add_goal", "pentest_register_asset", "pentest_record_evidence",
     "pentest_report_finding", "pentest_verify_finding", "pentest_prove_goal", "pentest_plan_work", "pentest_record_coverage",
+    "pentest_report_blocked", "pentest_repair_tool",
     "fact",
     "message",
     "artifact_read",
@@ -29,6 +30,9 @@ ACTION_KINDS = (
     "install",
     "memory",
     "tool_search",
+    "list_tools",
+    "get_tool",
+    "skill_read",
     "report",
     "intent",
     "conclude",
@@ -191,7 +195,7 @@ def make_adapter(config: LLMConfig, name: str = "agent", script: list | None = N
 _SYSTEM_PROMPT = (
     "You are an expert CTF solver agent. Respond with EXACTLY ONE JSON object describing "
     "your next action and nothing else. Schema: "
-    '{"thought": "...", "action": "tool|bash|install|memory|tool_search|report|intent|conclude|flag|done", ...}. '
+    '{"thought": "...", "action": "tool|skill_read|bash|install|memory|tool_search|report|intent|conclude|flag|done", ...}. '
     "For bash actions, include a non-empty `command` string exactly; do not use `cmd`, `shell`, "
     "or prose-only bash actions. For tool actions, include non-empty `server` and `tool` strings plus "
     "an `args` object when arguments are needed. "
@@ -232,7 +236,9 @@ _SYSTEM_PROMPT = (
     "payload variations as distinct evidence. If two consecutive evaluations find the same difficulty level, do "
     "not report again unless there is new evidence or a changed direction. "
     "Use bash to run sandbox commands, install to add a missing package to this container "
-    "{manager,packages}, tool to call an MCP tool {server,tool,args}, memory to recall "
+    "{manager,packages}, skill_read to load one skill from the injected skills list "
+    "{name,path,offset,limit} when its details are needed; 目录式SKILLS可以根据需要查看具体内容. "
+    "tool to call an MCP tool {server,tool,args}, memory to recall "
     "past experience {query}, report to escalate difficulty to Diamond "
     "{progress,difficulty,steps,directions,knowledge}, conclude to record a confirmed fact for your "
     "assigned intent {description}, flag when you have the real flag {flag,description,from}. "
@@ -307,6 +313,51 @@ class OpenAICompatibleAdapter(BaseAdapter):
         headers.update(opencode_provider_headers(self.config.base_url, self._provider_session))
         return headers
 
+    def model_catalog(self, *, timeout: float = 15) -> dict:
+        """Ask the gateway which models exist, so a typo cannot hide as 400s.
+
+        OpenCode's /zen/go/v1 is a plan catalogue, not a model selector: the
+        model in the request body still decides the route. Listing it here
+        turns a silent "wrong model id" into an explicit health failure.
+        """
+
+        if not self.config.base_url.strip() or self.config.api_format == "mock":
+            return {"checked": False, "reason": "no endpoint"}
+        import requests
+
+        url = _models_endpoint(self.config.base_url)
+        try:
+            response = requests.get(
+                url, headers=self._headers(), timeout=timeout,
+            )
+        except Exception as exc:
+            _recovery_logger.debug("model catalog request failed", exc_info=True)
+            return {"checked": False, "reason": f"{type(exc).__name__}: {exc}"[:200], "url": url}
+        if int(getattr(response, "status_code", 0) or 0) >= 400:
+            return {
+                "checked": False,
+                "reason": f"HTTP {response.status_code}",
+                "url": url,
+            }
+        try:
+            payload = response.json()
+        except ValueError:
+            return {"checked": False, "reason": "non-JSON model list", "url": url}
+        entries = payload.get("data") if isinstance(payload, dict) else payload
+        ids = {
+            str(item.get("id"))
+            for item in entries or []
+            if isinstance(item, dict) and item.get("id")
+        }
+        wanted = str(self.config.model or "").strip()
+        return {
+            "checked": True,
+            "url": url,
+            "model": wanted,
+            "model_listed": bool(wanted) and wanted in ids,
+            "count": len(ids),
+        }
+
     def health(self) -> dict:
         try:
             self._request_compatible(
@@ -319,12 +370,21 @@ class OpenAICompatibleAdapter(BaseAdapter):
                 thinking=None,
                 timeout=15,
             )
-            return {
+            catalog = self.model_catalog()
+            result = {
                 "ok": True,
                 "status": self._last_response_meta.get("http_status", 200),
                 "format": self.config.api_format,
                 "surface": self._last_response_meta.get("surface"),
+                "resolved_model": self.config.model,
+                "catalog": catalog,
             }
+            if catalog.get("checked") and not catalog.get("model_listed"):
+                result["ok"] = False
+                result["error"] = (
+                    f"model {self.config.model!r} is not listed by {catalog.get('url')}"
+                )
+            return result
         except ProviderError as exc:
             return {
                 "ok": False,
@@ -1001,6 +1061,20 @@ def _openai_endpoint(base_url: str, surface: str) -> str:
         path = "/v1"
     suffix = "/responses" if surface == "responses" else "/chat/completions"
     return urlunsplit((parsed.scheme, parsed.netloc, f"{path}{suffix}", parsed.query, ""))
+
+
+def _models_endpoint(base_url: str) -> str:
+    """Return the model-catalogue URL for an OpenAI-compatible base URL."""
+
+    parsed = urlsplit(base_url.strip())
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/responses"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    if not path.endswith("/models"):
+        path = f"{path}/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
 
 
 def _anthropic_endpoint(base_url: str) -> str:

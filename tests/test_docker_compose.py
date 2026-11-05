@@ -32,18 +32,29 @@ def test_compose_persists_app_exports_and_postgres_state():
         assert legacy not in env
 
 
-def test_task_image_contains_ctf_and_container_mcp_runtimes():
+def test_task_image_contains_ctf_cli_runtimes():
     task_dockerfile = Path("docker/member/Dockerfile").read_text(encoding="utf-8")
     app_dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
     inventory = Path("backend/tools/member_tools.txt").read_text(encoding="utf-8")
 
-    assert "ripgrep" in task_dockerfile
-    assert "pyghidra" in task_dockerfile
-    assert "pip3 install --no-cache-dir playwright" in task_dockerfile
-    assert "playwright install" not in task_dockerfile
+    for token in (
+        "gcc", "g++", "make", "gdbserver", "strace", "socat", "musl-tools",
+        "foremost", "elfutils", "tshark", "tcpdump", "upx", "playwright-cli",
+        "jwcrypto", "scapy", "dpkt", "wordlists", "rockyou",
+        "NODE_VERSION=22.23.4", "PLAYWRIGHT_CLI_VERSION=0.1.22",
+    ):
+        assert token in task_dockerfile
+    assert "pip3 install --no-cache-dir playwright" not in task_dockerfile
     assert "IPC_CHROME_BIN" not in task_dockerfile
-    assert "GHIDRA_DIRECT_URL=https://github.com/NationalSecurityAgency/ghidra" in task_dockerfile
-    assert 'for url in "${GHIDRA_DIRECT_URL}" "${GHIDRA_URL}"' in task_dockerfile
+    assert "GHIDRA_DIRECT_URL" not in task_dockerfile
+    assert "ARG MAVEN_VERSION" in task_dockerfile
+    assert "apache-maven-${MAVEN_VERSION}-bin.tar.gz" in task_dockerfile
+    assert "radare2" in task_dockerfile
+    assert "upx-ucl" in task_dockerfile
+    assert "kalilinux/kali-rolling" in task_dockerfile
+    assert "sagemath cmake" not in task_dockerfile
+    assert "golang-go" not in task_dockerfile
+    assert "RsaCtfTool" not in task_dockerfile
     assert "COPY backend /opt/ipc/backend" in task_dockerfile
     assert "docker.io" in app_dockerfile
     assert "COPY alembic.ini /app/alembic.ini" in app_dockerfile

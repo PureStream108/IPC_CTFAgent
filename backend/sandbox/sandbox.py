@@ -20,6 +20,32 @@ from backend.sandbox.output import (
 )
 from backend.sandbox.webui_proxy import webui_proxy_manager
 
+_SCRUB_PREFIXES = (
+    "BENCHMARK_",
+    "IPC_LLM_",
+    "IPC_DIAMOND_",
+    "IPC_OPS_",
+    "IPC_R2S_",
+    "IPC_GZ_",
+)
+_SCRUB_NAMES = frozenset({
+    "IPC_DATABASE_URL",
+    "IPC_RUNNER_TOKEN",
+})
+
+
+def is_secret_environment_name(name: str) -> bool:
+    """True when the variable must not reach a solver shell."""
+
+    return name in _SCRUB_NAMES or name.startswith(_SCRUB_PREFIXES)
+
+
+def child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The application environment minus everything a solver must not read."""
+
+    merged = {**os.environ, **(extra or {})}
+    return {name: value for name, value in merged.items() if not is_secret_environment_name(name)}
+
 
 def _git_bash_executable() -> Path | None:
     """Return a Git Bash executable for Windows local sandboxes, if present.
@@ -42,7 +68,17 @@ def _git_bash_executable() -> Path | None:
     if git:
         git_path = Path(git).resolve()
         if len(git_path.parents) >= 2:
-            candidates.append(git_path.parents[1] / "bin" / "bash.exe")
+            # Git for Windows ships bash next to git; MSYS2 distributions
+            # (and the bundled toolchains) keep it under usr/bin instead.
+            root = git_path.parents[1]
+            candidates.append(root / "bin" / "bash.exe")
+            candidates.append(root / "usr" / "bin" / "bash.exe")
+
+    which_bash = shutil.which("bash")
+    if which_bash and "\\system32\\" not in which_bash.casefold():
+        # System32\\bash.exe is the WSL stub, not a POSIX shell for local
+        # sandboxes; anything else is a real MSYS/Cygwin bash.
+        candidates.append(Path(which_bash))
 
     for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432")):
         if base:
@@ -145,7 +181,7 @@ class LocalSandbox:
     def exec(self, command: str, timeout: int = 60) -> ExecResult:
         if not self._started:
             self.start()
-        full_env = {**os.environ, **self.env}
+        full_env = child_environment(self.env)
         full_env.setdefault("PYTHONIOENCODING", "utf-8")
         full_env.setdefault("PYTHONUTF8", "1")
         bash = _git_bash_executable()
@@ -199,7 +235,7 @@ class LocalSandbox:
     def exec_detached(self, job_id: str, command: str) -> int:
         directory = self._job_dir(job_id)
         directory.mkdir(parents=True, exist_ok=True)
-        full_env = {**os.environ, **self.env}
+        full_env = child_environment(self.env)
         full_env.setdefault("PYTHONIOENCODING", "utf-8")
         full_env.setdefault("PYTHONUTF8", "1")
         bash = _git_bash_executable()

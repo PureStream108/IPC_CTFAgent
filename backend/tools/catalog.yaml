@@ -13,8 +13,6 @@ groups:
   languages/bash: Bash / Shell
   languages/python: Python
   languages/java: Java
-  languages/go: Go
-  languages/rust: Rust
   languages/php: PHP
   languages/nodejs: JavaScript / Node.js
   languages/ruby: Ruby
@@ -49,33 +47,13 @@ entries:
     kind: language
     group: languages/java
     title: Java 21 / Maven
-    summary: 用于 Java 题目、反序列化工具、JAR 工程以及 Ghidra 运行时。
-    tags: [java, javac, maven, jdk]
+    summary: 用于 Java 题目、反序列化分析、JAR 工程和 Maven 依赖构建。
+    tags: [java, javac, maven, jdk, deserialization]
     command: java
-    install_path: /opt/java21
-    workflow: 使用 javac 编译单文件，使用 Maven 构建依赖工程，并确认 JAVA_HOME=/opt/java21。
+    install_path: /opt/java21、/opt/maven/bin/mvn
+    workflow: 使用 javac 编译单文件，使用 Maven 构建依赖工程，并确认 JAVA_HOME=/opt/java21；反编译使用 r2/gdb/objdump，而不是已移除的 Ghidra。
     example: "java -version && javac -version && mvn -version"
     official: https://docs.oracle.com/en/java/javase/21/
-  - id: lang_go
-    kind: language
-    group: languages/go
-    title: Go
-    summary: 用于构建或审计 Go 题目、网络服务和静态二进制辅助工具。
-    tags: [go, golang]
-    command: go
-    install_path: /usr/bin/go
-    example: "go version"
-    official: https://go.dev/doc/
-  - id: lang_rust
-    kind: language
-    group: languages/rust
-    title: Rust / Cargo
-    summary: 用于构建 Rust 题目、分析依赖和编写高性能辅助程序。
-    tags: [rust, cargo]
-    command: rustc
-    install_path: /usr/bin/rustc
-    example: "rustc --version && cargo --version"
-    official: https://doc.rust-lang.org/
   - id: lang_php
     kind: language
     group: languages/php
@@ -93,7 +71,8 @@ entries:
     summary: 用于运行 Node.js 题目、审计 npm 项目和编写 JavaScript 探针。
     tags: [javascript, nodejs, npm]
     command: node
-    install_path: /usr/bin/node
+    install_path: /usr/local/bin/node（Node 22.23.4）
+    workflow: 官方 Node 22 安装在 /usr/local；npm 全局目录随 Node 版本管理。CLI 与题目脚本都从 current PATH 调用 node/npm。
     example: "node --version && npm --version"
     official: https://nodejs.org/docs/latest/api/
   - id: lang_ruby
@@ -135,27 +114,6 @@ entries:
     command: ipc-mcp-server tools
     install_path: backend/tools/tool_mcp.py
     example: "ipc-mcp-server tools --category pwn --transport stdio"
-  - id: mcp_browser
-    kind: mcp
-    group: mcps
-    title: browser MCP
-    summary: 在外部提供浏览器运行时的 Playwright 会话中进行结构化页面交互、有界脱敏诊断，以及截图和下载产物留存；任务镜像只提供 Playwright 包。
-    tags: [mcp, browser, playwright]
-    command: ipc-mcp-server browser
-    install_path: backend/mcp/shared.py
-    workflow: 优先使用 wait_for、click、fill 等结构化工具；先开始有界网络记录，再交互并按 after_id 增量读取诊断事件，最后用 artifact ID 留存证据。
-    example: "ipc-mcp-server browser --transport stdio"
-  - id: mcp_reverse
-    kind: mcp
-    group: mcps
-    title: reverse MCP
-    summary: 通过隔离的 PyGhidra worker 和 radare2 完成反编译与二进制分析。
-    tags: [mcp, reverse, ghidra, radare2]
-    command: ipc-mcp-server reverse
-    install_path: backend/mcp/reverse_mcp.py
-    workflow: 优先调用 file_info/list_functions，再按函数调用 decompile；超时会自动降级到 r2。
-    example: "ipc-mcp-server reverse --transport stdio"
-    related: [lib_pyghidra, tool_radare2]
   - id: core_ripgrep
     kind: tool
     group: tools/core
@@ -207,12 +165,13 @@ entries:
   - id: core_build
     kind: tool
     group: tools/core
-    title: GCC / G++ / Make / CMake
-    summary: 编译题目源码、利用程序和本地复现所需的原生辅助代码。
-    tags: [gcc, g++, make, cmake, build]
+    title: GCC / G++ / Make / Musl / CMake
+    summary: 编译题目源码、利用程序和本地复现所需的原生辅助代码，并用 musl-gcc 生成静态二进制。
+    tags: [gcc, g++, make, musl, cmake, build]
     command: gcc
-    install_path: /usr/bin/gcc
-    example: "gcc -O0 -g -o sample sample.c"
+    install_path: /usr/bin/gcc、/usr/bin/musl-gcc
+    workflow: 动态链接程序直接用 gcc/g++ 编译；需要跨环境搬运的利用程序用 musl-gcc -static。make/cmake 用于题目自带构建系统。
+    example: "gcc -O0 -g -o sample sample.c && musl-gcc -static -O2 -o sample-static sample.c"
   - id: core_netcat
     kind: tool
     group: tools/core
@@ -327,12 +286,14 @@ entries:
   - id: lib_web_python
     kind: library
     group: libraries/python
-    title: Requests / Flask / PyJWT / Jinja2
-    summary: 用于 HTTP 请求、本地 Web 复现、JWT 分析和模板注入研究。
-    tags: [python, web, requests, flask, jwt, jinja2]
-    command: "python3 -c \"import requests,flask,jwt,jinja2\""
+    title: Requests / Flask / PyJWT / jwcrypto / Jinja2
+    summary: 用于 HTTP 请求、本地 Web 复现、JWT/JWS/JWE 分析和模板注入研究。
+    tags: [python, web, requests, flask, jwt, jwcrypto, jinja2]
+    command: 'python3 -c "import requests,flask,jwt,jwcrypto,jinja2; print(jwt.__version__)"'
     install_path: Python site-packages
-    example: "python3 -c \"import requests; print(requests.get('http://target').status_code)\""
+    workflow: PyJWT 负责 JWT 编解码与签名校验，jwcrypto 负责 JWS/JWE 与 JWK；测试 alg=none、弱密钥和 kid 注入时先在本地脚本验证，再发给目标。
+    example: 'python3 -c "import jwt; print(jwt.encode({\"sub\":\"alice\"}, \"secret\", algorithm=\"HS256\"))"'
+    related: [lib_jwt]
   - id: lib_numpy_scipy
     kind: library
     group: libraries/python
@@ -402,46 +363,17 @@ entries:
     install_path: Python site-packages
     example: "python3 -c \"import h5py; f=h5py.File('model.h5'); print(list(f.keys()))\""
     official: https://keras.io/api/
-  - id: lib_pyghidra
-    kind: library
-    group: libraries/python
-    title: PyGhidra
-    summary: 从 Python 启动 Ghidra、分析程序并调用反编译 API。
-    tags: [python, ghidra, reverse]
-    command: "python3 -c \"import importlib.metadata,pyghidra; print(importlib.metadata.version('pyghidra'))\""
-    install_path: /opt/ghidra/Ghidra/Features/PyGhidra
-    workflow: 项目通过 reverse MCP 的隔离 worker 调用 PyGhidra，避免直接启动无法回收的 JVM。
-    example: "python3 -c \"import pyghidra; print(pyghidra)\""
-    official: https://github.com/NationalSecurityAgency/ghidra/tree/master/Ghidra/Features/PyGhidra
   - id: lib_r2pipe
     kind: library
     group: libraries/python
     title: r2pipe
-    summary: 从 Python 驱动 radare2 并获取文本或 JSON 分析结果。
-    tags: [python, radare2, reverse]
+    summary: 从 Python 驱动 radare2 CLI 并获取文本或 JSON 分析结果。
+    tags: [python, radare2, reverse, cli]
     command: "python3 -c \"import r2pipe; print(r2pipe)\""
     install_path: Python site-packages/r2pipe
+    workflow: 用 r2pipe.open() 启动独立 r2 进程，执行 aaa/afl/pdf/izz 等命令；退出时调用 quit()，避免遗留 r2 进程。
     example: "python3 -c \"import r2pipe; r=r2pipe.open('./challenge'); print(r.cmd('aaa; afl')); r.quit()\""
     official: https://github.com/radareorg/radare2-r2pipe
-  - id: lib_playwright
-    kind: library
-    group: libraries/python
-    title: Playwright browser automation
-    summary: 使用 Playwright 包自动化页面、JavaScript、Cookie、截图和前端交互；浏览器可执行文件由部署环境显式提供。
-    tags: [python, browser, playwright]
-    command: "python3 -c \"import playwright; print(playwright)\""
-    install_path: Python site-packages/playwright
-    example: "IPC_PLAYWRIGHT_EXECUTABLE=/path/to/browser python3 -c \"import os; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, executable_path=os.environ['IPC_PLAYWRIGHT_EXECUTABLE']); print(b.version); b.close(); p.stop()\""
-    official: https://playwright.dev/python/
-  - id: lib_typhonbreaker
-    kind: library
-    group: libraries/python
-    title: TyphonBreaker
-    summary: 为 Python pyjail、黑名单和受限 builtins 场景生成读取或 RCE payload。
-    tags: [python, pyjail, sandbox, web]
-    command: "python3 -c \"from Typhon import bypassREAD,bypassRCE; print(bypassREAD,bypassRCE)\""
-    install_path: Python site-packages/Typhon
-    example: "python3 -c \"from Typhon import bypassREAD; print(bypassREAD)\""
   - id: lib_tqdm
     kind: library
     group: libraries/python
@@ -452,6 +384,172 @@ entries:
     install_path: Python site-packages/tqdm
     example: "python3 -c \"from tqdm import tqdm; [None for _ in tqdm(range(100))]\""
     official: https://tqdm.github.io/
+  - id: core_wordlists
+    kind: tool
+    group: tools/core
+    title: 常用字典
+    summary: 预装 rockyou 与 SecLists 精选目录，供口令、目录和用户名爆破使用。
+    tags: [wordlist, rockyou, seclists, brute-force, password]
+    command: ls
+    install_path: /opt/ipc-tools/wordlists、/workspace/wordlists
+    workflow: 先用小字典验证流程，再换更大的列表；注意任务时限和账号锁定策略，避免无界爆破。
+    example: "test -s /workspace/wordlists/rockyou.txt && wc -l /workspace/wordlists/SecLists/Discovery/Web-Content/common.txt"
+    official: https://github.com/danielmiessler/SecLists
+  - id: lib_jwt
+    kind: library
+    group: libraries/python
+    title: PyJWT / jwcrypto
+    summary: JWT 编解码、签名校验、JWS/JWE 与 JWK 操作。
+    tags: [python, jwt, jws, jwe, jwk, web]
+    command: 'python3 -c "import jwt; print(jwt.__version__)"'
+    install_path: Python site-packages（PyJWT、jwcrypto）
+    workflow: 先解析 header/payload 与算法，再验证密钥、kid、alg 混淆和 JWK 注入；不要用未校验的 decode 结果直接做授权判断。
+    example: 'python3 -c "import jwt; print(jwt.decode(jwt.encode({\"a\":1}, \"k\", algorithm=\"HS256\"), \"k\", algorithms=[\"HS256\"]))"'
+    related: [lib_web_python]
+    official: https://pyjwt.readthedocs.io/
+  - id: lib_scapy
+    kind: library
+    group: libraries/python
+    title: Scapy / dpkt
+    summary: 构造、解析和重放网络数据包，读取 pcap 并做协议层分析。
+    tags: [python, pcap, packet, network, scapy, dpkt]
+    command: 'python3 -c "import scapy, dpkt; print(scapy.__version__)"'
+    install_path: Python site-packages
+    workflow: 用 rdpcap 读取 pcap 后按协议分层过滤；需要重放或构造畸形包时使用 Scapy 的 layer 组合，并在容器内的 lo 接口测试。
+    example: 'python3 -c "from scapy.all import rdpcap; print(len(rdpcap(\"capture.pcap\")))"'
+    related: [tool_tshark]
+    official: https://scapy.readthedocs.io/
+  - id: tool_playwright_cli
+    kind: tool
+    group: tools/web
+    parents: [tools/core]
+    title: playwright-cli
+    summary: 通过 @playwright/cli 按需启动无头 Chromium，执行页面打开、快照、截图和交互。
+    tags: [browser, playwright, javascript, screenshot, web]
+    command: playwright-cli
+    install_path: /opt/ipc-tools/tools/playwright-cli/playwright-cli、/usr/local/bin/playwright-cli
+    workflow: 为每个 project/member 使用唯一 -s 会话名；先 open，再 snapshot 或 screenshot，最后 close。CLI 空闲会退出，不存在常驻 Chrome 或 Browser MCP。
+    example: "playwright-cli -s=demo-amber open http://127.0.0.1:8000 && playwright-cli -s=demo-amber snapshot && playwright-cli -s=demo-amber close"
+    related: [tool_curl]
+    official: https://playwright.dev/
+  - id: tool_upx
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: upx
+    summary: UPX 4.2.4 检测、压缩和解压可执行文件，固定使用 4.2.4 而不是旧版 upx-ucl。
+    tags: [upx, packer, unpack, reverse, elf]
+    command: upx
+    install_path: /usr/local/bin/upx
+    workflow: 先 upx -t 测试，再对副本执行 upx -d；压缩时保留原始备份，避免破坏题目附件。
+    example: "upx -t ./challenge && cp ./challenge ./challenge.upx && upx -d ./challenge.upx -o ./challenge.unpacked"
+    related: [tool_radare2, tool_objdump]
+    official: https://upx.github.io/
+  - id: tool_tshark
+    kind: tool
+    group: tools/misc
+    parents: [tools/core]
+    title: tshark
+    summary: 用 tshark 解析 pcap，用 tcpdump 做轻量抓包和流量过滤。
+    tags: [pcap, packet, network, tshark, tcpdump, forensics]
+    command: tshark
+    install_path: /usr/bin/tshark、/usr/bin/tcpdump
+    workflow: 有 pcap 时先 tshark -r 读取协议层级和 HTTP/DNS 字段；需要现场抓包时用 tcpdump -i lo -w 写入，再用 tshark 读取。
+    example: "tshark -r capture.pcap -Y http.request -T fields -e http.host -e http.request.uri | head"
+    related: [lib_scapy, core_file_triage]
+    official: https://www.wireshark.org/docs/man-pages/tshark.html
+  - id: tool_strace
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: strace
+    summary: 跟踪进程的系统调用、信号、文件与网络行为。
+    tags: [strace, syscall, linux, dynamic-analysis, reverse]
+    command: strace
+    install_path: /usr/bin/strace
+    workflow: 用 -f 跟随子进程，用 -e trace=file,network,process 缩小范围，把输出写到文件避免污染终端。
+    example: "strace -f -e trace=execve,openat,connect -o /tmp/trace.log ./challenge"
+    related: [tool_gdb, tool_strace]
+    official: https://strace.io/
+  - id: tool_gdbserver
+    kind: tool
+    group: tools/pwn
+    parents: [tools/core]
+    title: gdbserver
+    summary: 在本地或容器内启动远程调试 stub，并用 gdb 连接。
+    tags: [gdb, gdbserver, remote, debug, pwn]
+    command: gdbserver
+    install_path: /usr/bin/gdbserver
+    workflow: 用 gdbserver 127.0.0.1:1234 ./target 启动，再在另一个进程运行 gdb -q ./target -ex 'target remote 127.0.0.1:1234'；调试结束关闭监听。
+    example: "gdbserver 127.0.0.1:1234 ./challenge"
+    related: [tool_gdb, tool_socat]
+    official: https://sourceware.org/gdb/current/onlinedocs/gdb.html/Server.html
+  - id: tool_foremost
+    kind: tool
+    group: tools/misc
+    parents: [tools/core]
+    title: foremost
+    summary: 按文件头尾签名从磁盘镜像或二进制 blob 中 carving 文件。
+    tags: [foremost, carving, forensics, recovery, misc]
+    command: foremost
+    install_path: /usr/bin/foremost
+    workflow: 用 -i 指定输入、-o 指定空输出目录、-T 加时间戳；先看审计文件，再检查按类型分目录的结果。
+    example: "foremost -i disk.img -o /tmp/foremost-out -T"
+    related: [tool_binwalk]
+    official: https://foremost.sourceforge.net/
+  - id: tool_elfutils
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: elfutils
+    summary: eu-readelf、eu-objdump、eu-nm、eu-stack 等 ELF/DWARF 工具。
+    tags: [elfutils, elf, readelf, dwarf, reverse]
+    command: eu-readelf
+    install_path: /usr/bin/eu-readelf
+    workflow: 用 eu-readelf -a 查看节、符号、重定位和注释；binutils readelf 失败时用 elfutils 做交叉验证。
+    example: "eu-readelf -h -S -s ./challenge | head -120"
+    related: [tool_objdump]
+    official: https://sourceware.org/elfutils/
+  - id: tool_socat
+    kind: tool
+    group: tools/pwn
+    parents: [tools/core]
+    title: socat
+    summary: 通用 TCP/UDP/UNIX socket 与进程端点转发工具。
+    tags: [socat, relay, tunnel, network, pwn]
+    command: socat
+    install_path: /usr/bin/socat
+    workflow: 用 TCP-LISTEN 转发到本地服务，或用 EXEC 把程序暴露到端口；测试结束及时终止监听。
+    example: "socat TCP-LISTEN:9000,reuseaddr,fork TCP:127.0.0.1:8000"
+    related: [core_netcat, tool_gdbserver]
+    official: http://www.dest-unreach.org/socat/doc/socat.html
+  - id: tool_file
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: file
+    summary: 根据魔数和结构识别文件类型、架构与容器格式。
+    tags: [file, triage, magic, reverse]
+    command: file
+    install_path: /usr/bin/file
+    workflow: 对未知附件先运行 file -k，再结合 xxd 和 binwalk 判断是否需要解包或反编译。
+    example: "file -k ./challenge && file -k ./attachment.bin"
+    related: [core_file_triage, tool_xxd]
+    official: https://www.darwinsys.com/file/
+  - id: tool_xxd
+    kind: tool
+    group: tools/reverse
+    parents: [tools/core]
+    title: xxd
+    summary: 十六进制查看、偏移定位和 hex 反转。
+    tags: [xxd, hex, binary, reverse]
+    command: xxd
+    install_path: /usr/bin/xxd
+    workflow: 用 -l 限制长度、-s 跳转偏移、-r 把编辑后的 hex 还原；修改题目文件前先复制。
+    example: "xxd -l 128 ./challenge && xxd -s 0x40 -l 64 ./challenge"
+    related: [core_file_triage, tool_file]
+    official: https://linux.die.net/man/1/xxd
+
   - id: lib_one_gadget
     kind: library
     group: libraries/ruby

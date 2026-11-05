@@ -68,6 +68,15 @@ def create_app(root: str | Path | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         state = AppState(root=app_root)
         app.state.ipc = state
+        try:
+            state.logger.project(
+                "member.key_slot", "startup",
+                slots=state.config.member_key_slots(),
+            )
+            for warning in state.config.startup_warnings():
+                state.logger.project("config.warning", "startup", message=warning)
+        except Exception:
+            _recovery_logger.debug("Error handled in startup key-slot log", exc_info=True)
         telemetry = RuntimeTelemetry(state.artifact_root)
         app.state.telemetry = telemetry
         telemetry.start()

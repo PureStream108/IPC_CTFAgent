@@ -1,10 +1,10 @@
 # steghide
 
-Hide/extract data in JPEG/BMP/WAV.
+在 JPEG/BMP/WAV 中检测、提取和嵌入隐藏数据。
 
 ## 用途与适用场景
 
-Suspected steghide-embedded data in media.
+怀疑图片或音频使用 steghide 隐写，且可能需要空口令或已知口令时使用。
 
 ## 版本检查
 
@@ -15,32 +15,31 @@ steghide --version
 ## 命令、导入与镜像路径
 
 - 常用入口：`steghide`
-- 镜像路径：`system`
+- 镜像路径：`/usr/bin/steghide`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `steghide` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先 `steghide info file` 判断是否含嵌入数据；提取时先试空口令（直接回车），再用题目线索中的口令。嵌入只对副本操作。
 
 ## 可执行示例
 
 ```bash
-steghide
+steghide info /tmp/cover.jpg && steghide extract -sf /tmp/cover.jpg -p '' -xf /tmp/steghide.out
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+成功时输出写入的文件名和大小；失败会提示口令错误或文件格式不支持。提取物用 `file` 和 `xxd` 继续检查。
 
 ## 常见错误与限制
 
-仅在合法授权的 CTF、靶场和研究环境中使用。
+steghide 只支持特定 JPEG/BMP/WAV 编码；PNG 用 zsteg，音频也可试 sox/spectrogram。口令错误不会破坏原文件。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [zsteg](/memory/catalog/lib_zsteg/document)
+- [exiftool](/memory/catalog/tool_exiftool/document)
 
 ## 官方参考
 
-- 使用镜像内 `--help`、语言内置帮助或工具上游仓库作为版本对应参考。
+- [https://steghide.sourceforge.net/](https://steghide.sourceforge.net/)

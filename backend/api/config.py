@@ -30,12 +30,6 @@ class LLMUpdate(BaseModel):
 
 class RuntimeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    browser_event_limit: int | None = None
-    browser_console_limit: int | None = None
-    browser_error_limit: int | None = None
-    browser_response_preview_bytes: int | None = None
-    browser_allowed_origins: list[str] | None = None
-    browser_artifact_max_bytes: int | None = None
 
 
 class LimitsUpdate(BaseModel):
@@ -50,6 +44,8 @@ class ConfigUpdate(BaseModel):
     log_enabled: bool | None = None
     diamond: LLMUpdate | None = None
     member: LLMUpdate | None = None
+    member_backup: LLMUpdate | None = None
+    clear_member_backup: bool = False
     use_legacy_member: str | None = None
     members: dict[str, LLMUpdate] | None = None
     remove_members: list[str] | None = None
@@ -63,9 +59,15 @@ def _redact(value: str) -> str:
     return value[:3] + "***" if len(value) > 4 else "***"
 
 
+def _member_key_slots(cfg: AppConfig) -> dict[str, str]:
+    """Which key each fixed Member seat uses (odd index -> backup)."""
+    return cfg.member_key_slots()
+
+
 def _config_view(state: AppState) -> dict:
     cfg = state.config
     shared = cfg.member or LLMConfig()
+    backup = cfg.member_backup
     return {
         "member_config_conflict": cfg.member_config_conflict,
         "member": {
@@ -74,6 +76,17 @@ def _config_view(state: AppState) -> dict:
             "api_key_preview": _redact(shared.api_key),
             "configured": shared.configured,
         },
+        "member_backup": (
+            {
+                **backup.model_dump(exclude={"api_key"}),
+                "api_key_set": bool(backup.api_key),
+                "api_key_preview": _redact(backup.api_key),
+                "configured": backup.configured,
+            }
+            if backup is not None
+            else None
+        ),
+        "member_key_slots": _member_key_slots(cfg),
         "log_enabled": cfg.log_enabled,
         "categories": list(CATEGORIES),
         "diamond": {
@@ -100,14 +113,7 @@ def _config_view(state: AppState) -> dict:
             }
             for m in cfg.members
         ],
-        "runtime": {
-            "browser_event_limit": cfg.runtime.browser_event_limit,
-            "browser_console_limit": cfg.runtime.browser_console_limit,
-            "browser_error_limit": cfg.runtime.browser_error_limit,
-            "browser_response_preview_bytes": cfg.runtime.browser_response_preview_bytes,
-            "browser_allowed_origins": cfg.runtime.browser_allowed_origins,
-            "browser_artifact_max_bytes": cfg.runtime.browser_artifact_max_bytes,
-        },
+        "runtime": {},
         "limits": cfg.limits.model_dump(),
         "startup_errors": cfg.startup_errors(),
         "startup_warnings": cfg.startup_warnings(),
@@ -178,6 +184,8 @@ def update_config(body: ConfigUpdate, state: AppState = _GET_STATE_DEPENDENCY):
         raise HTTPException(400, "The ten Member identities are fixed.")
     if body.members:
         raise HTTPException(400, "Use the shared member configuration instead of per-member endpoints.")
+    if body.clear_member_backup and body.member_backup is not None:
+        raise HTTPException(400, "Set or clear the Member backup slot, not both.")
     if body.use_legacy_member is not None:
         if body.member is not None or not cfg.member_config_conflict:
             raise HTTPException(400, "Select a legacy endpoint only while resolving a migration conflict.")
@@ -191,6 +199,12 @@ def update_config(body: ConfigUpdate, state: AppState = _GET_STATE_DEPENDENCY):
         _apply(shared, body.member)
         cfg.member = shared
         cfg.member_config_conflict = False
+    if body.clear_member_backup:
+        cfg.member_backup = None
+    elif body.member_backup is not None:
+        backup = cfg.member_backup.model_copy(deep=True) if cfg.member_backup else LLMConfig()
+        _apply(backup, body.member_backup)
+        cfg.member_backup = backup
     if body.log_enabled is not None:
         cfg.log_enabled = body.log_enabled
     if body.diamond is not None:
@@ -241,4 +255,13 @@ def health_check(state: AppState = _GET_STATE_DEPENDENCY):
             results["member"] = adapter_health(m)
         else:
             results["member"] = {"ok": False, "skipped": True, "reason": "API key/base URL not configured"}
+    backup = state.config.member_backup
+    if backup is not None and backup.configured:
+        results["member_backup"] = adapter_health(backup)
+    else:
+        results["member_backup"] = {
+            "ok": False,
+            "skipped": True,
+            "reason": "API key/base URL not configured" if backup is not None else "Backup slot not configured",
+        }
     return {"results": results, "startup_errors": state.config.startup_errors()}

@@ -8,6 +8,12 @@ import psycopg.errors
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from backend.api.deps import get_state
+from backend.api.project_groups import project_competition_groups
+from backend.api.project_ownership import (
+    project_ownership,
+    project_ownership_for,
+    standalone,
+)
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.models import (
     ConcludeRequest,
@@ -23,6 +29,11 @@ from backend.blackboard.models import (
     ReasonClaimRequest,
 )
 from backend.core.config import CATEGORIES
+from backend.core.project_cache import (
+    invalidate_project,
+    project_detail_cache,
+    project_list_cache,
+)
 from backend.core.redaction import redact_object
 from backend.core.state import AppState
 
@@ -30,9 +41,6 @@ router = APIRouter(tags=["projects"])
 MAX_PROJECT_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
 _T = TypeVar("_T")
-
-_last_project_detail: dict[str, ProjectDetail] = {}
-_last_project_list: dict[str, list[ProjectSummary]] = {}
 
 
 def _with_deadlock_retry(operation: Callable[[], _T]) -> _T:
@@ -78,11 +86,18 @@ def list_projects(state: AppState = _GET_STATE_DEPENDENCY, category: str | None 
     try:
         summaries = _with_deadlock_retry(read)
     except psycopg.errors.OperationalError:
-        if "all" in _last_project_list:
-            return [p for p in _last_project_list["all"] if category is None or p.category == category]
+        cached = project_list_cache.get("all")
+        if cached is not None:
+            return [p for p in cached if category is None or p.category == category]
         raise
-    _last_project_list["all"] = summaries
-    return [p for p in summaries if category is None or p.category == category]
+    project_list_cache.put("all", summaries)
+    selected = [p for p in summaries if category is None or p.category == category]
+    with state.db.connect() as conn:
+        owned = project_ownership(conn)
+    return [
+        p.model_copy(update={"ownership": owned.get(p.id) or standalone(p.id)})
+        for p in selected
+    ]
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
@@ -99,10 +114,27 @@ def create_project(body: CreateProjectRequest, state: AppState = _GET_STATE_DEPE
             raise HTTPException(400, "pentest setup requires pentest category")
     hints = [(h.content, h.creator) for h in (body.hints or [])]
     with state.db.connect() as conn:
-        pid = graph_store.create_project(conn, body.title, body.origin, body.goal, body.category, hints, pentest_setup=body.pentest)
+        pid = graph_store.create_project(
+            conn,
+            body.title,
+            body.origin,
+            body.goal,
+            body.category,
+            hints,
+            external_id=(body.external_id or "").strip()[:240] or None,
+            pentest_setup=body.pentest,
+        )
     state.logger.project("project_created", pid, title=body.title, category=body.category)
+    project_list_cache.clear()
     with state.db.connect() as conn:
         return _public_detail(graph_store.project_detail(conn, pid))
+
+
+@router.get("/projects/competitions")
+def list_project_competitions(state: AppState = _GET_STATE_DEPENDENCY):
+    with state.db.connect() as conn:
+        competitions = project_competition_groups(conn)
+    return {"competitions": competitions}
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
@@ -115,19 +147,34 @@ def get_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
     try:
         detail = _with_deadlock_retry(read)
     except psycopg.errors.OperationalError:
-        cached = _last_project_detail.get(project_id)
+        cached = project_detail_cache.get(project_id)
         if cached is not None:
             return cached
         raise
     if detail is None:
+        project_detail_cache.pop(project_id)
         raise HTTPException(404, "Project not found")
     public = _public_detail(detail)
-    _last_project_detail[project_id] = public
+    public = public.model_copy(
+        update={"ownership": project_ownership_for(state, project_id)}
+    )
+    project_detail_cache.put(project_id, public)
     return public
 
 
 @router.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    ownership = project_ownership_for(state, project_id)
+    if ownership["ownership"] == "competition":
+        raise HTTPException(
+            409,
+            detail={
+                "message": "run-owned projects keep their competition history",
+                "run_id": ownership["run_id"],
+                "challenge_id": ownership["challenge_id"],
+                "control": f"/api/runs/{ownership['run_id']}/stop",
+            },
+        )
     state.pool.stop_project(project_id)
     state.network.stop(project_id)
     with state.db.connect() as conn:
@@ -135,7 +182,11 @@ def delete_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
             raise HTTPException(404, "Project not found")
     state.delete_project_files(project_id)
     with state.db.connect() as conn:
+        conn.execute(
+            "DELETE FROM workflow_challenges WHERE project_id = %s", (project_id,)
+        )
         graph_store.delete_project(conn, project_id)
+    invalidate_project(project_id)
 
 
 
