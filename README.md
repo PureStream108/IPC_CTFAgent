@@ -9,6 +9,7 @@
   <img src="https://img.shields.io/badge/Runtime-PostgreSQL_16-4169E1.svg?logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED.svg?logo=docker&logoColor=white" alt="Docker Compose" />
 </p>
+
 ## 📖 目前成绩
 
 [TSecBench · 自主 Agent 评测与验证基础设施](https://tsecbench.zc.tencent.com/agent/40226)
