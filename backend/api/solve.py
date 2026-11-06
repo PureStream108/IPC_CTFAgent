@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.api.deps import get_state
+from backend.api.project_ownership import project_ownership_for
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.blackboard.models import (
     Broadcast,
@@ -11,6 +12,7 @@ from backend.blackboard.models import (
     Report,
     ReportRequest,
 )
+from backend.competition.store import CompetitionConflict
 from backend.core.ipc import FlagConflictError, submit_flag_candidate
 from backend.core.postprocess_store import enqueue_postprocess
 from backend.core.redaction import redact_flag
@@ -19,11 +21,62 @@ from backend.core.state import AppState
 router = APIRouter(tags=["solve"])
 
 
+def _run_owned_conflict(ownership: dict, action: str, message: str) -> HTTPException:
+    """Refuse a per-project control that cannot be safely mapped onto a run."""
+
+    return HTTPException(
+        409,
+        detail={
+            "message": message,
+            "ownership": ownership["ownership"],
+            "run_id": ownership["run_id"],
+            "challenge_id": ownership["challenge_id"],
+            "control": f"/api/runs/{ownership['run_id']}/{action}",
+        },
+    )
+
+
+
+def _revive_local_run(state: AppState, ownership: dict) -> dict | None:
+    """Restart the stopped one-challenge local run that owns this Project."""
+
+    if str(ownership.get("run_status") or "") not in {"stopped", "finished", "paused", "blocked"}:
+        return None
+    service = getattr(state, "competition", None)
+    if service is None:
+        return None
+    try:
+        return service.resume_local(str(ownership.get("project_id") or ""))
+    except (CompetitionConflict, KeyError, ValueError):
+        return None
+
+def _competition_service(state: AppState):
+    service = getattr(state, "competition", None)
+    if service is None:
+        raise HTTPException(503, "Competition service is not running")
+    return service
+
+
 
 _GET_STATE_DEPENDENCY = Depends(get_state)
 
 @router.post("/projects/{project_id}/start")
 def start_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    ownership = project_ownership_for(state, project_id)
+    if ownership["ownership"] == "competition":
+        snapshot = _revive_local_run(state, ownership)
+        if snapshot is not None:
+            return {
+                "project_id": project_id,
+                "run_id": (snapshot.get("run") or {}).get("id"),
+                "status": (snapshot.get("run") or {}).get("status"),
+                "phase": "queued",
+            }
+        raise _run_owned_conflict(
+            ownership,
+            "resume",
+            "this challenge is scheduled by its competition run; control the run instead",
+        )
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -35,10 +88,23 @@ def start_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
         raise HTTPException(400, "; ".join(errors))
     if state.orchestrator is None:
         raise HTTPException(503, "Orchestrator not running")
-    try:
+    if str(row["category"]) == "pentest":
         return state.orchestrator.start_project_async(project_id)
+    service = _competition_service(state)
+    try:
+        snapshot = service.start_local(project_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Project not found") from exc
+    except CompetitionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "run_id": (snapshot.get("run") or {}).get("id"),
+        "status": (snapshot.get("run") or {}).get("status"),
+        "phase": "queued",
+    }
 
 
 @router.post("/projects/{project_id}/reopen")
@@ -54,6 +120,13 @@ def reopen_project(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
 
 @router.post("/projects/{project_id}/stop")
 def stop_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    ownership = project_ownership_for(state, project_id)
+    if ownership["ownership"] == "competition":
+        raise _run_owned_conflict(
+            ownership,
+            "stop",
+            "stopping one run-owned challenge would end its competition run; use the run control",
+        )
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -76,6 +149,13 @@ def stop_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
 
 @router.post("/projects/{project_id}/pause")
 def pause_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    ownership = project_ownership_for(state, project_id)
+    if ownership["ownership"] == "competition":
+        raise _run_owned_conflict(
+            ownership,
+            "pause",
+            "pausing one run-owned challenge would pause its competition run; use the run control",
+        )
     result = stop_solving(project_id, state)
     with state.db.connect() as conn:
         graph_store.set_runtime_phase(conn, project_id, "paused")
@@ -84,6 +164,20 @@ def pause_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
 
 @router.post("/projects/stop-all")
 def stop_all(state: AppState = _GET_STATE_DEPENDENCY):
+    stopped_runs: list[str] = []
+    service = getattr(state, "competition", None)
+    if service is not None:
+        with state.db.connect() as conn:
+            runs = conn.execute(
+                "SELECT id, revision FROM competition_runs "
+                "WHERE status IN ('running','paused','draining','importing')"
+            ).fetchall()
+        for run in runs:
+            try:
+                service.control(run["id"], "stop", run["revision"])
+                stopped_runs.append(str(run["id"]))
+            except (CompetitionConflict, KeyError, ValueError):
+                continue
     stopped = []
     with state.db.connect() as conn:
         rows = conn.execute(
@@ -96,11 +190,26 @@ def stop_all(state: AppState = _GET_STATE_DEPENDENCY):
             stopped.append(pid)
         except HTTPException:
             pass
-    return {"stopped": stopped}
+    return {"stopped": stopped, "stopped_runs": stopped_runs}
 
 
 @router.post("/projects/{project_id}/resume")
 def resume_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
+    ownership = project_ownership_for(state, project_id)
+    if ownership["ownership"] == "competition":
+        snapshot = _revive_local_run(state, ownership)
+        if snapshot is not None:
+            return {
+                "project_id": project_id,
+                "run_id": (snapshot.get("run") or {}).get("id"),
+                "status": (snapshot.get("run") or {}).get("status"),
+                "phase": "queued",
+            }
+        raise _run_owned_conflict(
+            ownership,
+            "resume",
+            "this challenge is scheduled by its competition run; resume the run instead",
+        )
     with state.db.connect() as conn:
         row = graph_store.get_project_row(conn, project_id)
         if row is None:
@@ -114,10 +223,21 @@ def resume_solving(project_id: str, state: AppState = _GET_STATE_DEPENDENCY):
         raise HTTPException(400, "; ".join(errors))
     if state.orchestrator is None:
         raise HTTPException(503, "Orchestrator not running")
+    service = _competition_service(state)
     try:
-        return state.orchestrator.start_project_async(project_id)
+        snapshot = service.start_local(project_id, idempotency_key=f"local:{project_id}")
+    except KeyError as exc:
+        raise HTTPException(404, "Project not found") from exc
+    except CompetitionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "project_id": project_id,
+        "run_id": (snapshot.get("run") or {}).get("id"),
+        "status": (snapshot.get("run") or {}).get("status"),
+        "phase": "queued",
+    }
 
 
 @router.post("/projects/{project_id}/reports", response_model=Report, status_code=201)

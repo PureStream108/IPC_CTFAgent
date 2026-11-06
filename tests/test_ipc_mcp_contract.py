@@ -120,6 +120,11 @@ def test_ipc_mcp_exposes_question_probe_and_requires_valid_session_header():
         for tool in asyncio.run(_list_tools(server))
     }
     assert {"ipc_question", "ipc_question_result"} <= names
+    assert {
+        "ipc_gzctf_workflow",
+        "ipc_tsecbench_workflow",
+        "ipc_ret2shell_workflow",
+    } <= names
 
     valid = SimpleNamespace(
         request_context=SimpleNamespace(

@@ -172,6 +172,25 @@ def _confirmed_workflow(client):
     return workflow_id
 
 
+def test_draft_workflow_preflights_and_starts_without_a_confirmation_phrase(client, monkeypatch):
+    """Start is the operator's own click, so a CONFIRM phrase must not gate it."""
+    _two_challenge_platform(monkeypatch)
+    created = client.post("/api/ops/workflows", json={"workflow": workflow()})
+    assert created.status_code == 201
+    assert created.json()["status"] == "draft"
+    workflow_id = created.json()["id"]
+
+    preflight = client.post(f"/api/workflows/{workflow_id}/preflight")
+    assert preflight.status_code == 200
+    assert preflight.json()["challenge_count"] == 2
+
+    started = client.post(
+        f"/api/workflows/{workflow_id}/start",
+        json={"idempotency_key": "api-draft-start"},
+    )
+    assert started.status_code == 201
+    assert started.json()["run"]["status"] == "running"
+
 def test_start_passes_the_challenge_selection_through(client, monkeypatch):
     """Starting by challenge needed service support the API never exposed."""
     _two_challenge_platform(monkeypatch)

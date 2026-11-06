@@ -77,6 +77,9 @@ AGENT_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS agent_jobs (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+        project_id TEXT,
+        member TEXT,
+        intent_id TEXT,
         kind TEXT NOT NULL,
         command TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'running'
@@ -88,6 +91,11 @@ AGENT_SCHEMA = (
         pid INTEGER,
         stdout_offset BIGINT NOT NULL DEFAULT 0,
         stderr_offset BIGINT NOT NULL DEFAULT 0,
+        digest_state TEXT NOT NULL DEFAULT 'none',
+        digest_json JSONB,
+        digest_at TIMESTAMPTZ,
+        delivered_at TIMESTAMPTZ,
+        digest_attempts INTEGER NOT NULL DEFAULT 0,
         started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         last_progress_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         finished_at TIMESTAMPTZ
@@ -96,6 +104,10 @@ AGENT_SCHEMA = (
        ON agent_jobs(session_id, started_at DESC)""",
     """CREATE INDEX IF NOT EXISTS ix_agent_jobs_running
        ON agent_jobs(session_id) WHERE state='running'""",
+    """CREATE INDEX IF NOT EXISTS ix_agent_jobs_curator
+       ON agent_jobs(project_id,digest_state,finished_at)""",
+    """CREATE INDEX IF NOT EXISTS ix_agent_jobs_member_digest
+       ON agent_jobs(project_id,member,digest_state,finished_at)""",
     "DROP VIEW IF EXISTS agent_session_health",
     """CREATE OR REPLACE VIEW agent_session_health AS
        SELECT s.id AS session_id,

@@ -44,6 +44,36 @@ def wait_for(predicate, timeout=20.0):
     return None
 
 
+def test_job_digest_lifecycle_and_member_delivery(jobs, session):
+    job = jobs.start(
+        session["id"], "nmap -p- target",
+        project_id="proj_001", member="amber", intent_id="i001",
+    )
+    jobs.finish(job["id"], "exited", exit_code=0)
+    pending = jobs.pending_digests("proj_001")
+    assert [row["id"] for row in pending] == [job["id"]]
+    assert pending[0]["digest_state"] == "pending"
+
+    claimed = jobs.claim_digest(job["id"])
+    assert claimed["digest_state"] == "curating"
+    saved = jobs.save_digest(job["id"], {"summary_zh": "ok", "verdict": "success"})
+    assert saved["digest_state"] == "curated"
+    assert saved["digest_json"]["summary_zh"] == "ok"
+
+    curated = jobs.curated_digests("proj_001", "amber")
+    assert [row["id"] for row in curated] == [job["id"]]
+    assert jobs.mark_digests_delivered([job["id"]]) == 1
+    assert jobs.curated_digests("proj_001", "amber") == []
+
+
+def test_jobs_without_project_do_not_enter_curation(jobs, session):
+    job = jobs.start(session["id"], "echo hi")
+    jobs.finish(job["id"], "exited", exit_code=0)
+    row = jobs.job(job["id"])
+    assert row["digest_state"] == "none"
+    assert jobs.pending_digests("proj_001") == []
+
+
 def test_detached_start_failure_never_leaves_a_running_job(jobs, session):
     def unavailable(*_args):
         raise ConnectionError("sandbox disconnected during launch")
@@ -73,6 +103,28 @@ def test_detached_status_recovers_after_a_temporary_probe_failure(jobs, session)
     assert service.status(job["id"])["exit_code"] == 7
     assert service.jobs(active_only=True)["jobs"] == []
     assert service.status("missing")["ok"] is False
+
+
+def test_job_service_wait_handles_terminal_timeout_and_cancellation(jobs, session):
+    import threading
+
+    job = jobs.start(session["id"], "sleep 300", pid=9999)
+    sandbox = SimpleNamespace(job_state=lambda _job_id: {"state": "running"})
+    service = JobService(jobs, sandbox, session["id"])
+
+    timed_out = service.wait(job["id"], timeout=1)
+    assert timed_out["wait_timed_out"] is True
+
+    cancelled = threading.Event()
+    cancelled.set()
+    assert service.wait(job["id"], cancel=cancelled)["wait_cancelled"] is True
+
+    not_cancelled = threading.Event()
+    assert service.wait(job["id"], timeout=1, cancel=not_cancelled)["wait_timed_out"] is True
+
+    jobs.finish(job["id"], "exited", exit_code=3)
+    finished = service.wait(job["id"], timeout=1)
+    assert finished["state"] == "exited" and finished["exit_code"] == 3
 
 
 def test_detached_log_read_failure_preserves_the_retry_cursor(jobs, session):

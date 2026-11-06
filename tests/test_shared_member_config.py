@@ -54,21 +54,11 @@ def test_new_reasoning_api_disallows_removed_values():
             LLMUpdate(reasoning_effort=value)
 
 
-def test_rejected_runtime_config_does_not_echo_credentials_or_change_state():
-    original = AppConfig()
-    saved = []
-    state = SimpleNamespace(config=original, save_config=lambda: saved.append(True))
-    body = ConfigUpdate(runtime=RuntimeUpdate(
-        browser_allowed_origins=["https://user:private-password@example.test"],
-    ))
-    with pytest.raises(HTTPException) as caught:
-        update_config(body, state)
-    assert caught.value.status_code == 400
-    assert "browser_allowed_origins" in caught.value.detail
-    assert "private-password" not in caught.value.detail
-    assert "https://user" not in caught.value.detail
-    assert state.config is original
-    assert saved == []
+def test_removed_browser_runtime_update_is_rejected():
+    with pytest.raises(ValueError):
+        RuntimeUpdate(browser_allowed_origins=["https://legacy.test"])
+    with pytest.raises(ValueError):
+        ConfigUpdate(runtime={"browser_response_preview_bytes": 8192})
 
 
 def test_removed_runtime_setting_is_rejected_by_new_api():

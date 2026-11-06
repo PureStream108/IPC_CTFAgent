@@ -7,11 +7,17 @@ tools:
     tags: [pwn, rop, shellcode, exploit]
     when_to_use: Build/automate binary exploits, interact with remote services.
   - name: gdb
-    description: GNU debugger (pwndbg/gef-style workflows).
+    description: GNU debugger for crash triage, breakpoints, registers, and memory inspection.
     path: system
     exec: gdb
     tags: [debug, pwn, dynamic-analysis]
     when_to_use: Inspect crashes, set breakpoints, examine memory/registers.
+  - name: gdbserver
+    description: Remote debugging stub for gdb, useful for detached or containerized targets.
+    path: system
+    exec: gdbserver
+    tags: [debug, remote, gdb, pwn]
+    when_to_use: Launch a target under gdbserver and attach gdb over localhost.
   - name: ropgadget
     description: ROP gadget finder.
     path: system
@@ -30,3 +36,15 @@ tools:
     exec: checksec
     tags: [recon, mitigations, pwn]
     when_to_use: First triage of a pwn binary.
+  - name: socat
+    description: Multipurpose relay for TCP, UDP, UNIX sockets, and process endpoints.
+    path: system
+    exec: socat
+    tags: [network, relay, pwn, tunnel]
+    when_to_use: Forward a local port to a remote service, expose a container process, or create a quick listener.
+  - name: strace
+    description: Trace system calls and signals made by a process.
+    path: system
+    exec: strace
+    tags: [syscall, debug, pwn, linux]
+    when_to_use: See how a target opens files, reads input, or talks to the network before crafting an exploit.

@@ -26,14 +26,79 @@ def read_page_file(path: Path, *, offset: int = 0, limit: int = 8192) -> dict:
         raw = raw[:max(1, len(raw) // 2)]
 
 
+def _clip_marker(omitted: int, total: int, hint: str) -> str:
+    detail = f"; {hint}" if hint else ""
+    return f"\n...[truncated {omitted} chars of {total}{detail}]\n"
+
+
+def clip(text: str, budget: int, hint: str = "", *, head_ratio: float = 0.6) -> str:
+    """Keep the head and tail of *text* with an explicit omission marker.
+
+    "budget" is measured in characters, the unit the Member tool surface
+    uses. Text that already fits is returned unchanged, so callers can apply
+    the helper unconditionally. Otherwise the result is head + marker + tail
+    and never longer than "budget" - unless the budget is smaller than the
+    marker itself, because an explicit marker is always better than a silent
+    cut.
+
+    "head_ratio" decides how much of the kept content comes from the start;
+    the rest comes from the end, so a trailing error message or continuation
+    hint survives. Slicing a str cannot split a UTF-8 code point, so the
+    result always re-encodes cleanly. The marker reports the exact number of
+    omitted characters so a reader can decide whether to fetch the full text.
+    """
+
+    if budget <= 0:
+        raise ValueError("clip budget must be positive")
+    total = len(text)
+    if total <= budget:
+        return text
+    ratio = min(1.0, max(0.0, float(head_ratio)))
+    # The marker length changes with the number of digits in the omitted
+    # count. kept + len(marker(total - kept)) is non-decreasing in kept (the
+    # marker can lose at most one digit per kept character), so a binary
+    # search finds the largest body that still fits the budget.
+    low, high = 0, total - 1
+    kept = 0
+    while low <= high:
+        mid = (low + high) // 2
+        if mid + len(_clip_marker(total - mid, total, hint)) <= budget:
+            kept = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    if kept == 0 and len(_clip_marker(total, total, hint)) > budget:
+        return _clip_marker(total, total, hint)
+    head = int(kept * ratio)
+    tail = kept - head
+    marker = _clip_marker(total - kept, total, hint)
+    return text[:head] + marker + (text[total - tail:] if tail else "")
+
+
+def _clip_bytes(value: bytes, limit: int, hint: str) -> bytes:
+    total = len(value)
+    low, high = 0, total - 1
+    kept = 0
+    while low <= high:
+        mid = (low + high) // 2
+        marker = f"\n...[truncated {total - mid} bytes of {total}; {hint}]\n"
+        if mid + len(marker) <= limit:
+            kept = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    marker = f"\n...[truncated {total - kept} bytes of {total}; {hint}]\n".encode()
+    head = kept // 2
+    tail = kept - head
+    return value[:head] + marker + value[total - tail:]
+
+
 def preview_bytes(value: bytes, limit: int = DEFAULT_OUTPUT_BYTES) -> str:
     limit = max(512, limit)
     if len(value) <= limit:
         return value.decode("utf-8", "replace")
-    marker = f"\n[output truncated; {len(value)} bytes total; read the output artifact in pages]\n".encode()
-    side = max(1, (limit - len(marker)) // 2)
-    return (value[:side].decode("utf-8", "ignore") + marker.decode()
-            + value[-side:].decode("utf-8", "ignore"))
+    raw = _clip_bytes(value, limit, "read the output artifact in pages")
+    return raw.decode("utf-8", "ignore")
 
 
 def preview_text(value: str, limit: int = DEFAULT_OUTPUT_BYTES) -> str:

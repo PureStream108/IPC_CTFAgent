@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from backend.blackboard import edge_store, graph_store, node_store
 from backend.core.config import AppConfig, MemberConfig
+from backend.core.curator import SUGILITE, is_curator_project
 from backend.core.difficulty import extra_members_for_difficulty, normalize_difficulty
 from backend.core.logging_util import IPCLogger
 from backend.core.wp_writer import WRITEUP_SYSTEM_PROMPT, generate_wp_content, write_wp
@@ -27,10 +28,17 @@ class Diamond:
         self.db = db
         self.config = config
         self.logger = logger
+        self._pentest_tick_logged_at = 0.0
 
 
     def available_member_configs(self) -> list[MemberConfig]:
         return self.config.available_members()
+
+    def _solver_members(self, project_id: str) -> list[MemberConfig]:
+        members = self.available_member_configs()
+        if is_curator_project(self.db, project_id):
+            members = [member for member in members if member.name != SUGILITE]
+        return members
 
     def _idle_members(self, project_id: str) -> list[MemberConfig]:
         """Members free to take new work on this project.
@@ -42,7 +50,7 @@ class Diamond:
         with self.db.connect() as conn:
             active = set(graph_store.active_member_names(conn, project_id))
         occupied = active | self._members_seated_elsewhere(project_id)
-        return [m for m in self.available_member_configs() if m.name not in occupied]
+        return [m for m in self._solver_members(project_id) if m.name not in occupied]
 
     def _members_seated_elsewhere(self, project_id: str) -> set[str]:
         """Members holding a durable competition seat on another challenge.
@@ -82,7 +90,7 @@ class Diamond:
     ) -> Assignment | None:
         excluded = excluded_members or set()
         avail = [
-            member for member in self.available_member_configs()
+            member for member in self._solver_members(project_id)
             if member.name not in excluded
         ]
         if not avail:
@@ -96,9 +104,8 @@ class Diamond:
             if not graph_store.link_exists(conn, project_id, "ipc", "diamond", "start"):
                 graph_store.add_link(conn, project_id, "ipc", "diamond", "start")
             row = graph_store.get_project_row(conn, project_id)
-            description = ("Read pentest_board, inspect the explicit scope and constraints, decompose the user objectives, "
-                           "then persist focused work with pentest_plan_work. Record discovered assets and actual evidence. "
-                           "Use only the existing task harness and do not treat a candidate finding as verified."
+            description = ("读取渗透任务板，核对明确的范围与约束，分解用户目标，然后用 pentest_plan_work 登记聚焦工作；"
+                           "登记发现的资产与实际证据。只使用现有任务执行环境，不得把候选发现当作已验证结论。"
                            if row and row["category"] == "pentest" else BOOTSTRAP_DESC)
             intent = edge_store.create_intent(conn, project_id, ["origin"], description, "diamond")
             graph_store.add_agent(conn, project_id, initial.name, "member", state="active", start_fact_id="origin")
@@ -219,6 +226,47 @@ class Diamond:
         )
         return intent
 
+
+
+
+    def tick_pentest(self, board, *, ladder=None) -> list:
+        """Plan this tick's Pentest actions from a Board.
+
+        Diamond keeps its name and its log prefix.  The CTF entry points
+        (assign_initial / decide_reinforcements / plan_next_intent) are
+        untouched; this method is only reached for category=pentest projects
+        while runtime.diamond_pentest_mode is enabled.
+        """
+
+        from backend.pentest.diamond_policy import plan_pentest_actions
+
+        runtime = self.config.runtime
+        steps = ladder or (
+            (runtime.ladder_help_minutes, "help"),
+            (runtime.ladder_upgrade_minutes, "upgrade"),
+            (runtime.ladder_park_minutes, "park"),
+        )
+        actions = plan_pentest_actions(
+            board,
+            max_actions=runtime.diamond_actions_per_tick,
+            ladder=tuple(steps),
+            per_project_seats=board.caps.per_project,
+        )
+        from time import monotonic
+
+        quiet = not actions and (monotonic() - self._pentest_tick_logged_at) < 60
+        if not quiet:
+            self._pentest_tick_logged_at = monotonic()
+            self.logger.project(
+                "diamond_pentest_tick",
+                "system",
+                mode="pentest",
+                projects=len(board.projects),
+                queue=len(board.queue),
+                actions=len(actions),
+                kinds=[action.kind for action in actions],
+            )
+        return actions
 
     def write_wp(self, project_id: str, wp_dir) -> str:
         """Generate Diamond's final WP from graph state and the relevant execution evidence."""

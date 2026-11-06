@@ -42,32 +42,85 @@ def test_catalog_covers_registry_mcps_languages_and_direct_libraries():
         "core_bash",
         "lang_python",
         "lang_java",
-        "lang_go",
-        "lang_rust",
         "lang_php",
         "lang_nodejs",
         "lang_ruby",
     } <= ids
+    assert "lang_rust" not in ids
     assert set(LANGUAGES) >= {
         "bash",
         "python",
         "java",
         "go",
-        "rust",
         "php",
         "nodejs",
         "ruby",
         "maven",
     }
+    assert "rust" not in LANGUAGES
     assert {
         "lib_pwntools",
         "lib_pycryptodome",
         "lib_z3",
         "lib_angr",
+        "lib_torch",
+        "lib_jwt",
+        "lib_scapy",
+        "core_wordlists",
+        "tool_playwright_cli",
+        "tool_upx",
+        "tool_tshark",
+        "tool_gdbserver",
+        "tool_strace",
+        "tool_foremost",
+        "tool_elfutils",
+        "tool_socat",
+    } <= ids
+    assert not {
+        "lang_go",
+        "tool_flask_unsign",
+        "tool_flask_session_cookie",
+        "tool_rsactftool",
+        "tool_rsa_sign2n",
+        "tool_sage",
+        "tool_blindwatermark",
         "lib_pyghidra",
         "lib_playwright",
-        "lib_torch",
-    } <= ids
+        "mcp_browser",
+        "mcp_reverse",
+    } & ids
+
+
+def test_by_category_unions_web_and_pwn_for_web_plus_pwn():
+    registry = ToolRegistry(cache_db=None).load()
+    web = registry.by_category("web")
+    pwn = registry.by_category("pwn")
+    composite = registry.by_category("web+pwn")
+
+    assert web and pwn
+    expected = []
+    seen = set()
+    for tool in registry.all_tools():
+        if tool.category in {"web", "pwn"} and tool.name not in seen:
+            seen.add(tool.name)
+            expected.append(tool.name)
+    assert [tool.name for tool in composite] == expected
+    assert len([tool.name for tool in composite]) == len({tool.name for tool in composite})
+    assert {tool.name for tool in composite} == {
+        tool.name for tool in (*web, *pwn)
+    }
+    assert {tool.category for tool in composite} == {"web", "pwn"}
+    assert [tool.name for tool in registry.by_category("web+pwn")] == expected
+    # pentest targets a live service, so it opens web + pwn + reverse.
+    pentest_expected = []
+    pentest_seen: set[str] = set()
+    for tool in registry.all_tools():
+        if tool.category in {"web", "pwn", "reverse"} and tool.name not in pentest_seen:
+            pentest_seen.add(tool.name)
+            pentest_expected.append(tool.name)
+    assert [tool.name for tool in registry.by_category("pentest")] == pentest_expected
+    assert {tool.category for tool in registry.by_category("pentest")} <= {"web", "pwn", "reverse"}
+    assert {tool.category for tool in registry.by_category("crypto")} == {"crypto"}
 
 
 def test_every_catalog_entry_has_one_valid_complete_markdown_document():
@@ -128,8 +181,9 @@ def test_catalog_mcp_search_browse_and_read(tmp_path):
     try:
         for query, expected in (
             ("sqlmap", "tool_sqlmap"),
-            ("PyGhidra", "lib_pyghidra"),
+            ("playwright", "tool_playwright_cli"),
             ("Java", "lang_java"),
+            ("jwcrypto", "lib_jwt"),
         ):
             hits = _call_tool(server, "memory_search", query=query, limit=10)
             assert any(hit["doc_id"] == expected for hit in hits)
@@ -144,8 +198,8 @@ def test_catalog_mcp_search_browse_and_read(tmp_path):
             "mcps",
             "tools",
         }
-        document = _call_tool(server, "memory_doc", id="lib_pyghidra")
-        assert document["doc_url"].endswith("/lib_pyghidra/document")
+        document = _call_tool(server, "memory_doc", id="lib_jwt")
+        assert document["doc_url"].endswith("/lib_jwt/document")
         assert "## 可执行示例" in document["markdown"]
         assert _call_tool(server, "memory_doc", id="../catalog.yaml")["error"]
     finally:
@@ -162,15 +216,15 @@ def test_catalog_web_api_and_path_traversal(tmp_path, monkeypatch):
         assert tree.status_code == 200
         assert len(tree.json()["children"]) == 4
 
-        detail = client.get("/memory/catalog/lib_pyghidra")
+        detail = client.get("/memory/catalog/lib_jwt")
         assert detail.status_code == 200
-        assert "<h1>PyGhidra</h1>" in detail.json()["html"]
+        assert "<h1>PyJWT / jwcrypto</h1>" in detail.json()["html"]
         assert "## 官方参考" in detail.json()["markdown"]
 
-        raw = client.get("/memory/catalog/lib_pyghidra/document")
+        raw = client.get("/memory/catalog/lib_jwt/document")
         assert raw.status_code == 200
         assert raw.headers["content-type"].startswith("text/markdown")
-        assert 'filename="lib_pyghidra.md"' in raw.headers["content-disposition"]
+        assert 'filename="lib_jwt.md"' in raw.headers["content-disposition"]
         assert client.get("/memory/catalog/not_found").status_code == 404
         assert client.get("/memory/catalog/%2E%2E%2Fcatalog.yaml").status_code in {
             404,

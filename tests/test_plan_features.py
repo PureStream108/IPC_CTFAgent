@@ -515,7 +515,7 @@ def test_member_message_job_wait_and_artifact_read_actions_are_bounded():
     deps = SimpleNamespace(
         sandbox=sandbox, logger=Logger(), db=None, memory=None,
         registry=SimpleNamespace(search=lambda _query, **_kwargs: []),
-        mcps=SimpleNamespace(names=list), container_mcps={},
+        mcps=SimpleNamespace(names=list),
         runtime=SimpleNamespace(tool_output_bytes=4096), on_message=lambda *args: {"ok": True},
         on_fact=None, lease_owner=None, lease_token=None, competition_store=None,
     )
@@ -550,14 +550,14 @@ def test_member_message_job_wait_and_artifact_read_actions_are_bounded():
     class MCP:
         async def call_tool(self, *_args): raise RuntimeError("mcp unavailable")
     mcp_error = asyncio.run(member._dispatch(
-        "project", "intent", "misc", MemberAction.from_obj({"action": "tool", "server": "browser", "tool": "fetch", "args": {}}),
+        "project", "intent", "misc", MemberAction.from_obj({"action": "tool", "server": "memory", "tool": "search", "args": {}}),
         1, MCP(), allow_intent=True,
     ))
     assert "mcp unavailable" in mcp_error.observation
-    member._probe_cli_tools = lambda: {"readelf": True, "ghidra": False}
+    member._probe_cli_tools = lambda: {"readelf": True, "upx": False}
     note = member._runtime_tool_inventory_note()
     assert "available now: readelf" in note
-    assert "missing now: ghidra" in note
+    assert "missing now: upx" in note
     member.deps.sandbox = SimpleNamespace()
     no_reader = asyncio.run(dispatch(MemberAction.from_obj({"action": "artifact_read", "path": "/workspace/shared/a"})))
     assert no_reader.invalid_action is True

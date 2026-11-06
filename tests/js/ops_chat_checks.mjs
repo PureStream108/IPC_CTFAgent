@@ -74,8 +74,10 @@ const app = {
   opsNextCalls: [],
   opsCfg: { configured: true },
   interruptCalls: 0,
+  compacted: [],
   resetOpsInputHeight() {},
   async interruptOpsRun() { this.interruptCalls += 1; },
+  async compactOpsSession(instructions) { this.compacted.push(instructions); },
   async runOpsMessage(message) {
     started.push(message);
     this.opsBusy = true;
@@ -121,11 +123,32 @@ check(app.opsNextCalls.length === 0, 'a queued message was not removed');
 await app.drainOpsNextCalls();
 check(started.join() === 'first,second', 'a removed message was still sent');
 
+app.opsBusy = false;
+app.opsStreaming = false;
+app.opsInput = '/compact keep the workflow id';
+await app.sendOpsMessage();
+check(
+  app.compacted.join() === 'keep the workflow id',
+  'the /compact argument was not passed through: ' + JSON.stringify(app.compacted)
+);
+check(started.join() === 'first,second', '/compact was sent to the chat model');
+check(app.opsInput === '', 'the input box was not cleared after /compact');
+
+app.opsInput = '/COMPACT';
+await app.sendOpsMessage();
+check(
+  app.compacted.join() === 'keep the workflow id,',
+  'a bare /compact was not accepted: ' + JSON.stringify(app.compacted)
+);
+check(app.opsNextCalls.length === 0, '/compact was queued instead of running on its own');
+
 
 const pentestFactory = new Function(fs.readFileSync(path.join(root, 'frontend/pentest.js'), 'utf8') + '\nreturn pentestWorkspace;')();
 const sidebar = {
   ...pentestFactory(),
   projectStatusFilter: [],
+  competitionFilterId: "",
+  competitions: [],
   projects: [],
   projectStatusGroups: new Function(
     'return ' + html.match(/projectStatusGroups: (\[[\s\S]*?\]),/)[1]
@@ -136,6 +159,7 @@ for (const [name, signature] of [
   ['projectStatusRank', 'projectStatusRank(status)'],
   ['projectStatusGroupCount', 'projectStatusGroupCount(key)'],
   ['toggleProjectStatusFilter', 'toggleProjectStatusFilter(key)'],
+  ['competitionProjects', 'competitionProjects()'],
   ['filteredProjects', 'filteredProjects()'],
 ]) {
   const argument = signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')'));
@@ -182,9 +206,57 @@ check(sidebar.filteredProjects().map((p) => p.id).join() === 'proj_003', 'desele
 check(sidebar.projectStatusGroupCount('stopped') === 2, 'stopped count should include failed');
 
 sidebar.projectStatusFilter = [];
+sidebar.competitions = [{ id: 'workflow:w1', label: 'Demo competition', project_ids: ['proj_003', 'proj_005'] }];
+sidebar.competitionFilterId = 'workflow:w1';
+check(sidebar.filteredProjects().map((p) => p.id).join() === 'proj_003,proj_005', 'competition filter wrong');
+sidebar.toggleProjectStatusFilter('running');
+check(sidebar.filteredProjects().map((p) => p.id).join() === 'proj_003', 'competition + status filter wrong');
+sidebar.projectStatusFilter = [];
+sidebar.competitionFilterId = '';
+
+sidebar.projectStatusFilter = [];
 sidebar.projects.push({id: 'pentest-1', category: 'pentest', status: 'completed'});
 check(!sidebar.filteredProjects().some(p=>p.category==='pentest'), 'CTF workspace leaked pentest task');
 sidebar.workspaceMode = 'pentest';
 check(sidebar.filteredProjects().map(p=>p.id).join() === 'pentest-1', 'Pentest workspace leaked CTF task');
 check(sidebar.projectStatusGroupCount('solved') === 1, 'completed pentest not counted');
+// The log catalog is metadata-first: counts come from the summary payload and
+// the legacy entries shape is still understood.
+const logHelpers = {
+  logKinds() { return ["project_log", "llm_log", "tool_log", "memory_log"]; },
+};
+logHelpers.logKindCount = new Function('item', 'kind', extract('logKindCount(item, kind)'));
+logHelpers.logEntryCount = new Function('item', extract('logEntryCount(item)')).bind(logHelpers);
+logHelpers.defaultLogKind = new Function('item', extract('defaultLogKind(item)')).bind(logHelpers);
+logHelpers.logCompetitionChoices = new Function(extract('logCompetitionChoices()')).bind(logHelpers);
+
+const summaryItem = {
+  entry_count: 7,
+  project_log: { count: 5 },
+  llm_log: { count: 2 },
+  tool_log: { count: 0 },
+  memory_log: { count: 0 },
+};
+check(logHelpers.logKindCount(summaryItem, 'project_log') === 5, 'summary count not used');
+check(logHelpers.logKindCount(summaryItem, 'tool_log') === 0, 'zero kind must report zero');
+check(logHelpers.logEntryCount(summaryItem) === 7, 'entry_count must win over recomputation');
+check(logHelpers.defaultLogKind(summaryItem) === 'project_log', 'first non-empty kind must win');
+
+const llmOnly = { entry_count: 3, project_log: { count: 0 }, llm_log: { count: 3 }, tool_log: { count: 0 }, memory_log: { count: 0 } };
+check(logHelpers.defaultLogKind(llmOnly) === 'llm_log', 'selection must skip empty kinds');
+check(logHelpers.defaultLogKind({ entry_count: 0 }) === 'project_log', 'empty project falls back');
+
+const legacyItem = { project_log: { entries: [1, 2] }, llm_log: { entries: [] } };
+check(logHelpers.logKindCount(legacyItem, 'project_log') === 2, 'legacy entries shape broken');
+check(logHelpers.logEntryCount(legacyItem) === 2, 'legacy entry total broken');
+
+logHelpers.competitions = [
+  { id: 'workflow:w1', project_ids: ['a', 'b'] },
+  { id: 'workflow:w2', project_ids: [] },
+];
+check(
+  logHelpers.logCompetitionChoices().map((item) => item.id).join() === 'workflow:w1',
+  'the log filter must offer every competition that owns a project'
+);
+
 console.log('ok');

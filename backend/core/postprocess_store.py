@@ -42,7 +42,15 @@ def claim_next_job(
     worker_id: str,
     *,
     lease_seconds: int = 120,
+    writeups_enabled: bool = True,
 ) -> PostprocessJob | None:
+    """Claim one due job.
+
+    writeups_enabled is the WP hot switch: when false, writeup jobs stay
+    pending (their lease untouched) so they run as soon as it is turned back
+    on instead of being failed or skipped permanently.
+    """
+
     row = connection.execute(
         """
         SELECT job.id, job.project_id
@@ -51,6 +59,7 @@ def claim_next_job(
         WHERE job.status IN ('pending', 'retry')
           AND job.next_attempt_at <= now()
           AND (job.lease_expires_at IS NULL OR job.lease_expires_at < now())
+          AND (%s::boolean OR job.kind <> 'writeup')
           AND (
               job.kind <> 'archive'
               OR EXISTS (
@@ -62,7 +71,8 @@ def claim_next_job(
         ORDER BY job.created_at, job.id
         FOR NO KEY UPDATE OF project SKIP LOCKED
         LIMIT 1
-        """
+        """,
+        (bool(writeups_enabled),),
     ).fetchone()
     if row is None:
         return None

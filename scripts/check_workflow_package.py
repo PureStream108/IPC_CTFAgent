@@ -22,12 +22,16 @@ def main():
         code = """
 import pathlib, sys
 from backend.platform.gzctf import workflow as gz
+from backend.platform.ichunqiu import workflow as icq
+from backend.platform.ret2shell import workflow as r2s
 from backend.platform.tsecbench import workflow as ts
 from backend.ops.presets import workflow_templates
 assert pathlib.Path(gz.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())
-assert {t['id'] for t in workflow_templates()} == {'gzctf', 'tsecbench'}
+assert {t['id'] for t in workflow_templates()} == {'gzctf', 'tsecbench', 'ret2shell', 'ichunqiu', 'nestctf'}
 assert gz.GZCTFWorkflowInput(base_url='https://ctf.example', game_id=1).workflow_spec().template_id == 'gzctf'
 assert ts.TSECBenchWorkflowInput(base_url='https://benchmark.example').workflow_spec().template_id == 'tsecbench'
+assert r2s.Ret2ShellWorkflowInput(base_url='https://r2s.example', game_id=1).workflow_spec().template_id == 'ret2shell'
+assert icq.IchunqiuWorkflowInput(url_key='2026qwbs10').workflow_spec().template_id == 'ichunqiu'
 print('Installed workflow package smoke passed')
 """
         environment = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}

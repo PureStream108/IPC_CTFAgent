@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 PLATFORM_CATEGORIES: tuple[str, ...] = (
-    "pwn", "reverse", "crypto", "web", "misc", "ai", "osint", "pentest",
+    "pwn", "reverse", "crypto", "web", "misc", "ai", "osint", "pentest", "web+pwn",
 )
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 

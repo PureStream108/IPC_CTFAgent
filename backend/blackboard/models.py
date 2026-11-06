@@ -56,7 +56,7 @@ class ProjectReason(BaseModel):
 
 class Agent(BaseModel):
     name: str
-    role: Literal["ipc", "diamond", "member"]
+    role: Literal["ipc", "diamond", "member", "curator"]
     state: Literal["idle", "active", "paused", "done"] = "idle"
     start_fact_id: str | None = None
     created_at: str | None = None
@@ -66,7 +66,7 @@ class AgentLink(BaseModel):
     id: int
     src: str
     dst: str
-    kind: Literal["assign", "report", "explore", "flag", "wp", "return", "start"]
+    kind: Literal["assign", "report", "explore", "flag", "wp", "return", "start", "curate"]
     created_at: str
 
 
@@ -124,9 +124,11 @@ class ProjectSummary(ProjectMeta):
     unclaimed_intent_count: int
     hint_count: int
     member_count: int
+    ownership: dict | None = None
 
 
 class ProjectDetail(BaseModel):
+    ownership: dict | None = None
     project: ProjectMeta
     facts: list[Fact]
     intents: list[Intent]
@@ -160,6 +162,7 @@ class CreateProjectRequest(BaseModel):
     category: str = "misc"
     hints: list[CreateHintInline] | None = None
     pentest: dict | None = None
+    external_id: str | None = None
 
     _v = field_validator("title", "origin", "goal")(lambda cls, v: _non_empty(v))
 

@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.blackboard import edge_store, graph_store
+from backend.core.config import MEMBER_NAMES
 from backend.server.app import create_app
 from tests.helpers import setup_test_auth, write_mock_config
 
@@ -97,11 +98,9 @@ def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
         "/projects",
         json={"title": "Async", "origin": "o", "goal": "g", "category": "web"},
     ).json()["project"]["id"]
-    entered = threading.Event()
     release = threading.Event()
 
     def slow_start(_project_id):
-        entered.set()
         release.wait(5)
 
     orchestrator = client.app.state.ipc.orchestrator
@@ -112,13 +111,23 @@ def test_start_returns_before_slow_sandbox_bootstrap(client, monkeypatch):
 
     assert response.status_code == 200
     assert elapsed < 1
-    assert response.json()["phase"] in {"queued", "workspace", "challenge_environment"}
-    assert entered.wait(1)
+    body = response.json()
+    assert body["phase"] == "queued"
+    assert body["run_id"]
+    assert body["status"] in {"preflight", "importing", "running"}
+
+    # The one-challenge local run now owns the project, so the legacy
+    # per-project stop is refused with an actionable run control instead of
+    # silently ending a competition.
+    detail = client.get(f"/projects/{pid}").json()
+    assert detail["ownership"]["ownership"] == "competition"
+    assert detail["ownership"]["run_id"] == body["run_id"]
 
     stopped = client.post(f"/projects/{pid}/stop")
     release.set()
-    assert stopped.status_code == 200
-    assert stopped.json()["status"] == "stopped"
+    assert stopped.status_code == 409
+    assert stopped.json()["detail"]["run_id"] == body["run_id"]
+    assert stopped.json()["detail"]["control"].endswith("/stop")
 
 
 def test_intent_protocol_flow(client):
@@ -425,27 +434,13 @@ def test_config_api_update_and_redaction(client):
     assert "secretkey" not in str(r.json())
 
 
-def test_config_api_updates_validated_browser_runtime(client):
-    response = client.put(
-        "/config",
-        json={
-            "runtime": {
-                "browser_event_limit": 300,
-                "browser_response_preview_bytes": 8192,
-                "browser_allowed_origins": ["HTTPS://Target.Test:443/"],
-            }
-        },
-    )
-    assert response.status_code == 200
-    runtime = response.json()["runtime"]
-    assert runtime["browser_event_limit"] == 300
-    assert runtime["browser_response_preview_bytes"] == 8192
-    assert runtime["browser_allowed_origins"] == ["https://target.test"]
+def test_config_api_has_no_browser_runtime_fields(client):
+    body = client.get("/config").json()
+    assert body["runtime"] == {}
+    assert not any(key.startswith("browser_") for key in body["runtime"])
 
-    response = client.put(
-        "/config", json={"runtime": {"browser_response_preview_bytes": 20000}}
-    )
-    assert response.status_code == 400
+    response = client.put("/config", json={"runtime": {"browser_event_limit": 300}})
+    assert response.status_code in (400, 422)
 
 
 def test_config_runtime_api(client):
@@ -606,3 +601,306 @@ def test_export_and_replay(client):
     r = client.get(f"/projects/{pid}/replay")
     assert r.status_code == 200
     assert any(e["kind"] == "project_created" for e in r.json()["events"])
+
+def test_config_view_exposes_the_member_backup_slot_and_key_slots(client):
+    body = client.get("/config").json()
+    assert body["member_backup"] is None
+    assert set(body["member_key_slots"]) == set(MEMBER_NAMES)
+    assert set(body["member_key_slots"].values()) == {"primary"}
+
+
+def test_config_update_sets_and_clears_the_member_backup(client):
+    response = client.put(
+        "/config",
+        json={
+            "member_backup": {
+                "api_format": "openai",
+                "api_key": "backupsecret",
+                "base_url": "https://backup.test/v1",
+                "model": "deepseek-v4.1-flash",
+                "api_surface": "auto",
+                "reasoning_effort": "max",
+            }
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["member_backup"]["api_key_set"] is True
+    assert body["member_backup"]["configured"] is True
+    assert body["member_backup"]["api_key_preview"] == "bac***"
+    assert "backupsecret" not in str(body)
+    slots = body["member_key_slots"]
+    assert slots["amber"] == "primary"
+    assert slots["agate"] == "backup"
+    assert sorted(slots.values()) == ["backup"] * 5 + ["primary"] * 5
+    assert client.app.state.ipc.config.members[1].api_key == "backupsecret"
+
+    cleared = client.put("/config", json={"clear_member_backup": True})
+    assert cleared.status_code == 200
+    assert cleared.json()["member_backup"] is None
+    assert set(cleared.json()["member_key_slots"].values()) == {"primary"}
+    assert all(m.api_key != "backupsecret" for m in client.app.state.ipc.config.members)
+
+
+def test_config_update_allows_a_partial_backup_that_fails_startup_validation(client):
+    body = client.put(
+        "/config",
+        json={"member_backup": {"base_url": "https://backup.test/v1"}},
+    ).json()
+    assert body["member_backup"]["configured"] is False
+    assert any("Member backup requires" in error for error in body["startup_errors"])
+
+
+def test_config_update_rejects_clearing_and_setting_the_backup_together(client):
+    response = client.put(
+        "/config",
+        json={"member_backup": {"api_key": "k"}, "clear_member_backup": True},
+    )
+    assert response.status_code == 400
+
+
+def test_config_update_validates_member_backup_fields(client):
+    response = client.put("/config", json={"member_backup": {"api_format": "claudecode"}})
+    assert response.status_code == 422
+
+
+def test_config_health_reports_the_member_backup_slot(client):
+    result = client.post("/config/health").json()["results"]
+    assert result["member_backup"]["skipped"] is True
+
+
+def _write_log_archive(state, archive_id: str, title: str, per_kind: int = 3) -> dict:
+    manifest_dir = state.log_export_dir / ".ipc-archives"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    state.wp_export_dir.mkdir(parents=True, exist_ok=True)
+    wp_filename = f"{title}.md"
+    (state.wp_export_dir / wp_filename).write_text("# Writeup\n", encoding="utf-8")
+    log_filename = f"{title}.log"
+    log_counts = {}
+    for kind, folder_name in state.logger.KINDS.items():
+        folder = state.log_export_dir / folder_name
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / log_filename
+        target.write_text(
+            "".join(
+                json.dumps({"ts": "2024-01-01T00:00:00Z", "event": "archived", "index": index}) + "\n"
+                for index in range(per_kind)
+            ),
+            encoding="utf-8",
+        )
+        log_counts[kind] = per_kind
+    manifest = {
+        "version": 1,
+        "archive_id": archive_id,
+        "project_id": "proj_gone",
+        "title": title,
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z",
+        "archived_at": "2024-01-01T00:00:00Z",
+        "wp_filename": wp_filename,
+        "log_filename": log_filename,
+        "log_counts": log_counts,
+    }
+    (manifest_dir / f"{archive_id}.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def test_log_catalog_summary_mode_omits_entries_and_empty_projects(client):
+    state = client.app.state.ipc
+    client.put("/logs/status", json={"enabled": False})
+    quiet = client.post(
+        "/projects",
+        json={"title": "Quiet", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()["project"]["id"]
+    client.put("/logs/status", json={"enabled": True})
+    busy = client.post(
+        "/projects",
+        json={"title": "Busy", "origin": "o", "goal": "g", "category": "misc"},
+    ).json()["project"]["id"]
+
+    calls = []
+    original = state.logger.read_log
+
+    def tracked(kind, project_id, limit=500):
+        calls.append((kind, project_id))
+        return original(kind, project_id, limit)
+
+    state.logger.read_log = tracked
+    try:
+        response = client.get("/logs/projects", params={"include_entries": "false"})
+    finally:
+        state.logger.read_log = original
+    assert response.status_code == 200
+    logs = response.json()["logs"]
+    project_ids = [item["project_id"] for item in logs]
+    assert busy in project_ids
+    assert quiet not in project_ids
+    assert calls == []
+
+    item = next(value for value in logs if value["project_id"] == busy)
+    assert item["entry_count"] >= 1
+    assert item["project_log"]["count"] >= 1
+    assert item["llm_log"]["count"] == 0
+    assert "entries" not in item["project_log"]
+    assert item["archived"] is False
+
+    legacy = client.get("/logs/projects").json()["logs"]
+    legacy_item = next(value for value in legacy if value["project_id"] == busy)
+    assert legacy_item["project_log"]["entries"][0]["event"] == "project_created"
+    assert "count" not in legacy_item["project_log"]
+
+
+def test_log_catalog_competition_filter(client):
+    state = client.app.state.ipc
+    run_project = client.post(
+        "/projects",
+        json={"title": "Run challenge", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    manual_project = client.post(
+        "/projects",
+        json={"title": "Manual challenge", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    with state.db.connect() as conn:
+        conn.execute(
+            "INSERT INTO workflows (id, source, name, spec_json, spec_digest, status, created_at, updated_at) "
+            "VALUES ('wf-logs', 'test', 'Log Competition', '{}'::jsonb, 'digest-logs', 'confirmed', now(), now())"
+        )
+        conn.execute(
+            "INSERT INTO competition_runs (id, workflow_id, identity_key, idempotency_key, config_snapshot) "
+            "VALUES ('run-logs', 'wf-logs', 'https://ctf.example/game/9/team/1', 'idem-logs', '{}'::jsonb)"
+        )
+        conn.execute(
+            "INSERT INTO competition_challenges "
+            "(id, identity_key, external_id, run_id, project_id, state, metadata) "
+            "VALUES ('chal-logs', 'https://ctf.example/game/9/team/1', 'ext-logs', "
+            "'run-logs', %s, 'discovered', '{}'::jsonb)",
+            (run_project,),
+        )
+
+    params = {"include_entries": "false", "competition_id": "workflow:wf-logs"}
+    filtered = client.get("/logs/projects", params=params).json()["logs"]
+    assert [item["project_id"] for item in filtered] == [run_project]
+
+    everything = client.get("/logs/projects", params={"include_entries": "false"}).json()["logs"]
+    all_ids = {item["project_id"] for item in everything}
+    assert {run_project, manual_project} <= all_ids
+
+    assert client.get(
+        "/logs/projects", params={"competition_id": "workflow:missing"}
+    ).status_code == 404
+    assert client.get(
+        "/logs/projects", params={"competition_id": "not-a-competition"}
+    ).status_code == 404
+
+
+def test_log_catalog_archive_summary_and_detail(client):
+    state = client.app.state.ipc
+    _write_log_archive(state, "arch-demo", "Archived Demo", per_kind=3)
+
+    summary = client.get("/logs/projects", params={"include_entries": "false"}).json()["logs"]
+    item = next(value for value in summary if value["project_id"] == "archive:arch-demo")
+    assert item["archived"] is True
+    assert item["source_project_id"] == "proj_gone"
+    assert item["entry_count"] == 12
+    assert item["project_log"] == {"filename": "Archived Demo.log", "count": 3}
+
+    page = client.get(
+        "/logs/archive:arch-demo", params={"limit": 500}
+    )
+    assert page.status_code == 200
+    assert [entry["index"] for entry in page.json()["entries"]] == [0, 1, 2]
+
+    incremental = client.get(
+        "/logs/archive:arch-demo", params={"after": 0, "limit": 2}
+    ).json()
+    assert [entry["index"] for entry in incremental["entries"]] == [0, 1]
+    assert incremental["file_id"]
+    assert incremental["has_more"] is True
+
+    assert client.get("/logs/archive:missing").status_code == 404
+    assert client.get("/logs/archive:..%2F..%2Fetc%2Fpasswd").status_code == 404
+
+
+def test_log_archive_manifest_rejects_unsafe_filenames(client):
+    state = client.app.state.ipc
+    manifest = _write_log_archive(state, "arch-unsafe", "Unsafe", per_kind=1)
+    manifest["log_filename"] = "../escape.log"
+    (state.log_export_dir / ".ipc-archives" / "arch-unsafe.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    summary = client.get("/logs/projects", params={"include_entries": "false"}).json()["logs"]
+    assert all(item["project_id"] != "archive:arch-unsafe" for item in summary)
+    assert client.get("/logs/archive:arch-unsafe").status_code == 404
+
+
+def test_run_owned_flag_submission_is_queued_for_the_run(client):
+    from backend.core.ipc import submit_flag_candidate
+
+    state = client.app.state.ipc
+    pid = client.post(
+        "/projects",
+        json={"title": "Run owned", "origin": "o", "goal": "g", "category": "web"},
+    ).json()["project"]["id"]
+    started = client.post(f"/projects/{pid}/start").json()
+    assert started["run_id"]
+
+    with state.db.connect() as conn:
+        result = submit_flag_candidate(conn, pid, "flag{local}", source="test")
+        rows = conn.execute(
+            "SELECT status FROM flag_submissions WHERE project_id = %s", (pid,)
+        ).fetchall()
+    assert result["mode"] != "verified"
+    assert [row["status"] for row in rows] == ["pending"]
+
+    with state.db.connect() as conn:
+        conn.execute("DELETE FROM flag_submissions WHERE project_id = %s", (pid,))
+
+
+def test_log_catalog_summary_stays_small_with_many_projects(client):
+    """100 projects x 600 entries must not turn the catalog into a body dump."""
+
+    state = client.app.state.ipc
+    created = []
+    for index in range(100):
+        detail = client.post(
+            "/projects",
+            json={
+                "title": f"Scale {index:03d}",
+                "origin": "o",
+                "goal": "g",
+                "category": "misc",
+            },
+        ).json()
+        created.append(detail["project"])
+
+    payload = "".join(
+        json.dumps({"ts": "2026-01-01T00:00:00Z", "event": "tick", "index": line}) + "\n"
+        for line in range(600)
+    )
+    for project in created:
+        for folder in state.logger.KINDS.values():
+            path = state.logger.root / folder / project["log_filename"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload, encoding="utf-8")
+
+    calls = []
+    original = state.logger.read_log
+
+    def tracked(kind, project_id, limit=500):
+        calls.append((kind, project_id))
+        return original(kind, project_id, limit)
+
+    state.logger.read_log = tracked
+    try:
+        response = client.get("/logs/projects", params={"include_entries": "false"})
+    finally:
+        state.logger.read_log = original
+
+    assert response.status_code == 200
+    logs = response.json()["logs"]
+    assert len(logs) >= 100
+    assert calls == []
+    item = next(entry for entry in logs if entry["project_id"] == created[0]["id"])
+    assert item["entry_count"] == 2400
+    assert all("entries" not in item[key] for key in ("project_log", "llm_log", "tool_log", "memory_log"))
+    assert len(response.content) < 200_000

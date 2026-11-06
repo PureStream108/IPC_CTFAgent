@@ -12,8 +12,6 @@ MCPServer = FastMCP
 MCPTransport = Literal["stdio", "sse", "streamable-http"]
 
 SERVER_NAMES = (
-    "browser",
-    "reverse",
     "memory",
     "tool_search",
     "tools",
@@ -47,14 +45,6 @@ def build_mcp_server(name: str, root: str | Path = ".", category: str = "misc") 
     """Build one IPC MCP server for an external stdio/HTTP client."""
 
     del root
-    if name == "browser":
-        from backend.mcp.shared import build_browser_mcp
-
-        return build_browser_mcp()
-    if name == "reverse":
-        from backend.mcp.reverse_mcp import build_reverse_mcp
-
-        return build_reverse_mcp()
     if name == "memory":
         from backend.memory.memory_mcp import build_memory_mcp
         from backend.memory.memory_store import MemoryStore

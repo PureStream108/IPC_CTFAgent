@@ -7,7 +7,9 @@ import shutil
 import socket
 import threading
 import uuid
+from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from backend.blackboard import graph_store
 from backend.blackboard.db import Database
@@ -16,8 +18,7 @@ from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPRegistry
 from backend.memory.memory_mcp import build_memory_mcp
 from backend.memory.memory_store import MemoryStore
-from backend.platform.ret2shell import Ret2ShellClient
-from backend.platform.ret2shell.mcp import build_ret2shell_mcp
+from backend.platform.presets import deployment_presets
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
@@ -88,21 +89,32 @@ class AppState:
             workspace_root=self.projects_dir,
             limiter=self.limiter,
             network=self.config.limits.network,
+            mem_limit=self.config.limits.mem_limit,
+            pids_limit=self.config.limits.pids_limit,
         )
+        # One inspect proves the task image exists and warms Docker's unpacked
+        # layer before the first challenge pays for it.
+        with suppress(Exception):
+            self.pool.warm()
         self.network = NetworkManager(backend=self.config.runtime.sandbox_backend)
 
         self.mcps = MCPRegistry()
         from backend.skills.mcp import build_skills_mcp
         from backend.skills.store import SkillStore
-        self.skills = SkillStore(self.artifact_root / "skills", Path("/opt/ipc-skills"))
+        self.skills = SkillStore(self.artifact_root / "skills")
         self.skills.bootstrap()
         self.mcps.register(build_skills_mcp(self.skills))
         self.mcps.register(build_memory_mcp(self.memory, catalog=self.catalog))
         self.mcps.register(build_tool_search_mcp(self.registry))
-        self.ret2shell_client: Ret2ShellClient | None = None
-        if os.getenv("IPC_R2S_USERNAME") or os.getenv("IPC_R2S_TOKEN"):
-            self.ret2shell_client = Ret2ShellClient()
-            self.mcps.register(build_ret2shell_mcp(self.ret2shell_client))
+        # Deployment-level platform clients back the Member MCPs and the legacy
+        # /api/platform import path.  They are optional: a competition that is
+        # configured through an IPC workflow owns its own authenticated adapter,
+        # and Members receive target addresses from the CompetitionRun.
+        self.platform_clients: dict[str, Any] = {}
+        for deployment in deployment_presets():
+            self.platform_clients[deployment["platform"]] = deployment["client"]
+            if deployment.get("mcp") is not None:
+                self.mcps.register(deployment["mcp"])
 
         self.orchestrator = None
 
@@ -175,7 +187,7 @@ class AppState:
                 return graph_store.project_log_filename(conn, project_id)
         except Exception:
             _recovery_logger.debug('Error handled in project_log_filename', exc_info=True)
-            return project_id
+            return None
 
     def attachments_dir(self, project_id: str) -> Path:
         d = self.projects_dir / project_id / "attachments"

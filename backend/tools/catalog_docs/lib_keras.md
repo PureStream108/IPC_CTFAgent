@@ -9,18 +9,18 @@
 ## 版本检查
 
 ```bash
-python3 -c "import keras,h5py; print(keras.__version__)"
+KERAS_BACKEND=torch python3 -c "import keras,h5py; print(keras.__version__)"
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`python3 -c "import keras,h5py; print(keras.__version__)"`
+- 常用入口：`KERAS_BACKEND=torch KERAS_BACKEND=torch python3 -c "import keras,h5py; print(keras.__version__)"`
 - 镜像路径：`Python site-packages`
 
 ## 常用工作流
 
 1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `python3 -c "import keras,h5py; print(keras.__version__)"` 进行最小化探测。
+2. 按题目类型使用 `KERAS_BACKEND=torch python3 -c "import keras,h5py; print(keras.__version__)"` 进行最小化探测。
 3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
 
 ## 可执行示例

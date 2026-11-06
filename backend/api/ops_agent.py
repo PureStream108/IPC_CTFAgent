@@ -22,12 +22,9 @@ from backend.core.config import ApiFormat, ApiSurface, SelectedReasoningEffort
 from backend.core.state import AppState
 from backend.ops.attachments import MAX_UPLOAD_BYTES, OpsAttachmentStore
 from backend.ops.network import NetworkPolicyError
-from backend.ops.presets import (
-    GZCTFWorkflowInput,
-    TSECBenchWorkflowInput,
-    workflow_templates,
-)
+from backend.ops.presets import DEFAULT_WORKFLOW_TEMPLATE, workflow_templates
 from backend.ops.service import (
+    OpsAgentBusy,
     OpsAgentNotConfigured,
     OpsAgentService,
     OpsAgentUpstreamError,
@@ -66,6 +63,12 @@ class ChatRequest(BaseModel):
         if any(not isinstance(value, str) or not value.startswith("upload_") for value in values):
             raise ValueError("invalid attachment id")
         return values
+
+
+class CompactRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instructions: str = Field(default="", max_length=2_000)
 
 
 class ChatInterruptRequest(BaseModel):
@@ -227,6 +230,21 @@ async def upload_attachment(
     return result
 
 
+@router.post("/sessions/{session_id}/compact")
+def compact_session(
+    session_id: str,
+    body: CompactRequest | None = None,
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
+):
+    """Summarize this conversation now (Codex-style manual compaction)."""
+
+    return _call(
+        service.compact_session,
+        session_id=session_id,
+        instructions=(body.instructions if body else ""),
+    )
+
+
 @router.post("/chat/interrupt")
 def interrupt_chat(body: ChatInterruptRequest, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.interrupt_chat, session_id=body.session_id, run_id=body.run_id)
@@ -239,29 +257,22 @@ def list_workflows(service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
 
 @router.get("/workflow-templates")
 def list_workflow_templates():
-    return {"default": "gzctf", "templates": workflow_templates()}
+    return {"default": DEFAULT_WORKFLOW_TEMPLATE, "templates": workflow_templates()}
 
 
-@router.post("/workflows/gzctf", status_code=status.HTTP_201_CREATED)
-def create_gzctf_workflow(body: GZCTFWorkflowInput, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
-    return _call(service.configure_gzctf_workflow, {**body.model_dump(), "secrets": body.secrets})
+@router.post("/workflows/{template_id}", status_code=status.HTTP_201_CREATED)
+def create_preset_workflow(
+    template_id: str,
+    body: dict[str, Any],
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
+):
+    """Create one workflow from a built-in platform preset.
 
+    The preset input model and its identity rules live in
+    backend/platform/<name>/workflow.py and validate inside the service.
+    """
 
-@router.put("/workflows/{workflow_id}/gzctf")
-def update_gzctf_workflow(workflow_id: str, body: GZCTFWorkflowInput,
-                         service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
-    return _call(service.configure_gzctf_workflow, {**body.model_dump(), "secrets": body.secrets}, workflow_id=workflow_id)
-
-
-@router.post("/workflows/tsecbench", status_code=status.HTTP_201_CREATED)
-def create_tsecbench_workflow(body: TSECBenchWorkflowInput, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
-    return _call(service.configure_tsecbench_workflow, {**body.model_dump(), "secrets": body.secrets})
-
-
-@router.put("/workflows/{workflow_id}/tsecbench")
-def update_tsecbench_workflow(workflow_id: str, body: TSECBenchWorkflowInput,
-                              service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
-    return _call(service.configure_tsecbench_workflow, {**body.model_dump(), "secrets": body.secrets}, workflow_id=workflow_id)
+    return _call(service.configure_preset_workflow, template_id, body)
 
 
 @router.post("/workflows", status_code=status.HTTP_201_CREATED)
@@ -312,6 +323,23 @@ def update_workflow_secrets(
     return _call(service.set_workflow_secrets, workflow_id, body.secrets)
 
 
+@router.put("/workflows/{workflow_id}/{template_id}")
+def update_preset_workflow(
+    workflow_id: str,
+    template_id: str,
+    body: dict[str, Any],
+    service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY,
+):
+    """Update one workflow with the platform preset's latest settings."""
+
+    return _call(
+        service.configure_preset_workflow,
+        template_id,
+        body,
+        workflow_id=workflow_id,
+    )
+
+
 @router.get("/workflows/{workflow_id}/confirmation")
 def confirmation_preview(workflow_id: str, service: OpsAgentService = _GET_OPS_SERVICE_DEPENDENCY):
     return _call(service.confirmation_preview, workflow_id)
@@ -356,6 +384,8 @@ def _call(function, *args: Any, **kwargs: Any):
         raise HTTPException(404, "IPC resource not found") from exc
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
+    except OpsAgentBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
     except OpsAgentNotConfigured as exc:
         raise HTTPException(409, str(exc)) from exc
     except OpsAgentUpstreamError as exc:

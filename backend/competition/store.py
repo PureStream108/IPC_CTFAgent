@@ -281,6 +281,32 @@ class CompetitionStore:
                    WHERE id=%s RETURNING *""", (status, run_id),
             ).fetchone()
 
+    def revive_run(self, run_id: str) -> dict:
+        """Return a stopped/finished run to running without rewriting history.
+
+        A local one-challenge run is the durable record of one Project: the
+        operator may stop it and start the challenge again.  The run keeps its
+        id, events and challenge rows, so nothing is duplicated.
+        """
+
+        with self.db.connect() as connection:
+            self._lock(connection, run_id)
+            row = connection.execute(
+                """UPDATE competition_runs
+                   SET status='running', revision=revision+1, updated_at=now()
+                   WHERE id=%s AND status IN ('stopped','finished','paused','blocked')
+                   RETURNING *""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise CompetitionConflict("run cannot be revived")
+            connection.execute(
+                """UPDATE competition_challenges SET state='ready'
+                   WHERE run_id=%s AND state IN ('stopped','expired','blocked','failed')""",
+                (run_id,),
+            )
+            return row
+
     def mark_ready(self, challenge_id: str) -> bool:
         """Call only after attachments and required instance are prepared."""
         with self.db.connect() as connection:
@@ -357,6 +383,7 @@ class CompetitionStore:
             connection.execute(
                 """UPDATE competition_challenges SET state='solving',
                    first_assigned_at=COALESCE(first_assigned_at,now()),
+                   attempt_started_at=now(),
                    deadline_at=COALESCE(deadline_at,now()+interval '5 hours') WHERE id=%s""", (challenge_id,),
             )
             assignment = connection.execute(
@@ -366,7 +393,25 @@ class CompetitionStore:
                 (new_id(), run_id, challenge_id, session_id, member, role, position, owner),
             ).fetchone()
             self._sync_assignment_writer(connection, assignment)
-            return assignment
+            # A seated challenge is no longer waiting in the park queue: clear
+            # its rank so a later park is the only thing that can reorder it.
+            connection.execute(
+                """UPDATE competition_challenges
+                   SET metadata = metadata || '{"parked_rank": 0}'::jsonb WHERE id=%s""",
+                (challenge_id,),
+            )
+        if previous is not None:
+            metadata = row.get("metadata") or {}
+            self.append_run_event(
+                run_id, "session.resumed",
+                {
+                    "challenge_id": challenge_id,
+                    "member": member,
+                    "session_id": session_id,
+                    "attempts": int(metadata.get("attempts") or 0),
+                },
+            )
+        return assignment
 
     @staticmethod
     def _sync_assignment_writer(
@@ -1329,6 +1374,27 @@ class CompetitionStore:
             )
             return rows
 
+    def release_challenge_assignments(self, run_id: str, challenge_id: str) -> list[dict]:
+        """Release the seats of one challenge only.
+
+        Parking needs this: the run keeps going, so the run-wide release would
+        take the other seats with it, but a parked challenge must not keep a
+        Member that can no longer write to it.
+        """
+
+        with self.db.connect() as connection:
+            self._lock(connection, run_id)
+            rows = connection.execute(
+                """UPDATE competition_assignments SET released_at=now(),epoch=epoch+1
+                   WHERE run_id=%s AND challenge_id=%s AND released_at IS NULL
+                   RETURNING *""",
+                (run_id, challenge_id),
+            ).fetchall()
+            self._expire_assignment_writers(
+                connection, [row["session_id"] for row in rows]
+            )
+            return rows
+
     def renew_assignment_writer(
         self, assignment: dict, *, seconds: int = WRITER_LEASE_SECONDS
     ) -> bool:
@@ -1686,10 +1752,6 @@ class CompetitionStore:
             previous.pop("sequence", None)
             candidate = dict(data)
             candidate.pop("sequence", None)
-            # Callers stamp created_at/deadline_at at publish time; a retry after
-            # a restart regenerates them. They are not part of the message's
-            # identity, so comparing them would turn every retry into a
-            # spurious "request id reused" conflict.
             for field in ("created_at", "deadline_at"):
                 previous.pop(field, None)
                 candidate.pop(field, None)

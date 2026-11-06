@@ -9,24 +9,24 @@ Build Java deser payloads (also useful for web/pwn).
 ## 版本检查
 
 ```bash
-java -jar ysoserial.jar --version
+test -s /workspace/tools/ysoserial-master/ysoserial.jar
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`java -jar ysoserial.jar`
-- 镜像路径：`tools/ysoserial-master`
+- 常用入口：`java -jar /workspace/tools/ysoserial-master/ysoserial.jar`
+- 镜像路径：`/workspace/tools/ysoserial-master/ysoserial.jar`
 
 ## 常用工作流
 
 1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `java -jar ysoserial.jar` 进行最小化探测。
+2. 使用预构建 jar 生成 payload；例如 `java -jar /workspace/tools/ysoserial-master/ysoserial.jar CommonsCollections6 'touch /tmp/pwned'`。
 3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
 
 ## 可执行示例
 
 ```bash
-java -jar ysoserial.jar
+java -jar /workspace/tools/ysoserial-master/ysoserial.jar CommonsCollections6 'id'
 ```
 
 ## 输出解释

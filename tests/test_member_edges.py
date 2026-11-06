@@ -37,10 +37,117 @@ def member(**changes):
         "memory": None,
         "competition_store": None,
         "competition_assignment": None,
-        "container_mcps": {},
     }
     values.update(changes)
     return BaseMember("amber", Adapter(), MemberDeps(**values)), logger
+
+
+def test_streaming_enabled_prefers_native_competition():
+    solver, _logger = member(
+        competition_native=True,
+        competition_store=object(),
+        competition_assignment={"session_id": "session-1"},
+    )
+    solver.adapter.config = SimpleNamespace(api_format="openai")
+    assert solver._streaming_enabled() == (True, "competition_native")
+
+
+def test_skill_read_dispatch_returns_body_and_next_offset():
+    class Store:
+        def read_skill(self, name, relative, category=None):
+            return {
+                "name": name,
+                "path": "ctf-web/SKILL.md",
+                "content": "abcdef",
+                "repository": "acme/skills",
+                "revision": "a" * 40,
+            }
+
+    solver, logger = member(skills=Store())
+    result = solver._dispatch_skill_read(
+        "proj_001",
+        "intent-1",
+        "web",
+        MemberAction(kind="skill_read", args={"name": "web-expert", "limit": 4}),
+    )
+
+    assert result.invalid_action is False
+    assert result.observation.startswith("[skill:web-expert] ctf-web/SKILL.md")
+    assert "abcd" in result.observation
+    assert "offset=4" in result.observation
+    assert any(event[0] == "skill_read" for event in logger.events)
+
+
+def test_skill_read_dispatch_reports_unknown_skill():
+    class Store:
+        def read_skill(self, name, relative, category=None):
+            raise KeyError("unknown skill: nope")
+
+    solver, _logger = member(skills=Store())
+    result = solver._dispatch_skill_read(
+        "proj_001", "intent-1", "web", MemberAction(kind="skill_read", args={"name": "nope"})
+    )
+
+    assert result.invalid_action is True
+    assert "unknown skill" in result.observation
+
+
+def test_member_before_turn_delivers_job_digest():
+    solver, _logger = member()
+    solver._drain_competition_recon = lambda runner: []
+
+    class Store:
+        def curated_digests(self, project_id, member, limit=3):
+            return [{
+                "id": "job-2",
+                "member": member,
+                "command": "sleep 120",
+                "state": "exited",
+                "exit_code": 0,
+                "digest_json": {"summary_zh": "长任务完成", "key_findings": []},
+            }]
+
+        def mark_digests_delivered(self, ids):
+            return len(ids)
+
+    solver.deps.job_store = Store()
+    messages = solver._drain_before_turn(None, "proj_001")
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert "Sugilite" in messages[0]["content"]
+    assert "长任务完成" in messages[0]["content"]
+
+
+def test_member_consumes_sugilite_job_digests():
+    solver, _logger = member()
+    delivered = []
+
+    class Store:
+        def curated_digests(self, project_id, member, limit=3):
+            return [{
+                "id": "job-1",
+                "member": member,
+                "command": "nmap -p- target",
+                "state": "exited",
+                "exit_code": 0,
+                "digest_json": {
+                    "summary_zh": "扫描完成",
+                    "key_findings": [{"type": "endpoint", "value": "22/tcp open ssh"}],
+                    "suggested_next": ["继续验证"],
+                },
+            }]
+
+        def mark_digests_delivered(self, ids):
+            delivered.extend(ids)
+            return len(ids)
+
+    solver.deps.job_store = Store()
+    digests = solver._consume_job_digests("proj_001")
+    assert len(digests) == 1
+    assert "Sugilite" in digests[0]
+    assert "扫描完成" in digests[0]
+    assert "22/tcp open ssh" in digests[0]
+    assert delivered == ["job-1"]
 
 
 def test_member_session_job_and_recovery_seams(monkeypatch):

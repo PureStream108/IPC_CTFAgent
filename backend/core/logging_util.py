@@ -31,6 +31,9 @@ class IPCLogger:
         self.root = Path(root)
         self._enabled = enabled
         self._lock = threading.Lock()
+        self._file_locks: dict[Path, threading.RLock] = {}
+        self._stats_cache: dict[Path, dict] = {}
+        self._filename_cache: dict[str, str] = {}
         self._project_filename_resolver = project_filename_resolver
 
     @property
@@ -40,6 +43,10 @@ class IPCLogger:
     def set_enabled(self, value: bool) -> None:
         self._enabled = value
 
+    def _path_lock(self, path: Path) -> threading.RLock:
+        with self._lock:
+            return self._file_locks.setdefault(path, threading.RLock())
+
     def _file(self, kind: str, project_id: str | None) -> Path:
         sub = self.KINDS.get(kind, "project_logs")
         folder = self.root / sub
@@ -48,11 +55,93 @@ class IPCLogger:
         return folder / name
 
     def _project_filename(self, project_id: str) -> str:
-        if self._project_filename_resolver is not None:
-            filename = self._project_filename_resolver(project_id)
-            if filename:
-                return filename if filename.endswith((".jsonl", ".json")) else f"{filename}.jsonl"
-        return f"{project_id}.jsonl"
+        with self._lock:
+            cached = self._filename_cache.get(project_id)
+        if cached:
+            return cached
+        resolved = self._project_filename_resolver(project_id) if self._project_filename_resolver else None
+        if not resolved:
+            return f"{project_id}.jsonl"
+        filename = resolved if resolved.endswith((".jsonl", ".json")) else f"{resolved}.jsonl"
+        with self._lock:
+            self._filename_cache[project_id] = filename
+        return filename
+
+    @staticmethod
+    def _file_id(stat) -> str:
+        return f"{stat.st_dev}:{stat.st_ino}"
+
+    @staticmethod
+    def _public_stats(stats: dict) -> dict:
+        return {
+            "entry_count": stats["entry_count"],
+            "file_id": stats["file_id"],
+            "size": stats["size"],
+            "scan_offset": stats["scan_offset"],
+        }
+
+    def file_stats(self, path: str | Path) -> dict:
+        path = Path(path)
+        with self._path_lock(path):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                self._stats_cache.pop(path, None)
+                return {"entry_count": 0, "file_id": "", "size": 0, "scan_offset": 0}
+            identity = self._file_id(stat)
+            cached = self._stats_cache.get(path)
+            if (
+                cached
+                and cached["file_id"] == identity
+                and cached["size"] == stat.st_size
+                and cached["mtime_ns"] == stat.st_mtime_ns
+            ):
+                return self._public_stats(cached)
+
+            if path.suffix == ".json":
+                entries = self._read_array(path)
+                stats = {
+                    "entry_count": len(entries),
+                    "file_id": identity,
+                    "size": stat.st_size,
+                    "scan_offset": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+                self._stats_cache[path] = stats
+                return self._public_stats(stats)
+
+            offset = 0
+            count = 0
+            if (
+                cached
+                and cached["file_id"] == identity
+                and stat.st_size > cached["size"]
+            ):
+                offset = cached["scan_offset"]
+                count = cached["entry_count"]
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                data = handle.read(stat.st_size - offset)
+            complete_end = data.rfind(b"\n") + 1
+            for line in data[:complete_end].splitlines():
+                try:
+                    entry = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(entry, dict):
+                    count += 1
+            stats = {
+                "entry_count": count,
+                "file_id": identity,
+                "size": stat.st_size,
+                "scan_offset": offset + complete_end,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+            self._stats_cache[path] = stats
+            return self._public_stats(stats)
+
+    def count_file(self, path: str | Path) -> int:
+        return self.file_stats(path)["entry_count"]
 
     def log(self, log_kind: str, event: str, project_id: str | None = None, **fields) -> None:
         """Append one log record.
@@ -69,10 +158,34 @@ class IPCLogger:
             if key in safe_fields and safe_fields[key] is not None:
                 safe_fields[key] = redact_flag(str(safe_fields[key]))
         record = {"ts": _utcnow(), "event": event, "project_id": project_id, **safe_fields}
-        with self._lock:
-            path = self._file(log_kind, project_id)
+        payload = json.dumps(record, ensure_ascii=False) + "\n"
+        path = self._file(log_kind, project_id)
+        with self._path_lock(path):
+            try:
+                before = path.stat()
+            except FileNotFoundError:
+                before = None
             with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.write(payload)
+            cached = self._stats_cache.get(path)
+            if cached is None:
+                return
+            after = path.stat()
+            if (
+                before is not None
+                and cached["file_id"] == self._file_id(before)
+                and cached["size"] == before.st_size
+                and cached["scan_offset"] == before.st_size
+            ):
+                self._stats_cache[path] = {
+                    **cached,
+                    "entry_count": cached["entry_count"] + 1,
+                    "size": after.st_size,
+                    "scan_offset": after.st_size,
+                    "mtime_ns": after.st_mtime_ns,
+                }
+            else:
+                self._stats_cache.pop(path, None)
 
     def project(self, event: str, project_id: str, **f) -> None:
         self.log("project", event, project_id, **f)
@@ -101,10 +214,14 @@ class IPCLogger:
         return IPCLogger._tail(Path(path), limit)
 
     def delete_project_logs(self, project_id: str) -> None:
-        with self._lock:
-            for sub in self.KINDS.values():
-                path = self.root / sub / self._project_filename(project_id)
+        filename = self._project_filename(project_id)
+        for sub in self.KINDS.values():
+            path = self.root / sub / filename
+            with self._path_lock(path):
                 path.unlink(missing_ok=True)
+                self._stats_cache.pop(path, None)
+        with self._lock:
+            self._filename_cache.pop(project_id, None)
 
     @staticmethod
     def _read_array(path: Path) -> list[dict]:
@@ -161,12 +278,19 @@ class IPCLogger:
 
     def read_since(self, kind: str, project_id: str, *, after: int = 0,
                    limit: int = 500, file_id: str = "") -> dict:
-        path = self._file(kind, project_id)
+        return self.read_file_since(
+            self._file(kind, project_id), after=after, limit=limit, file_id=file_id
+        )
+
+    @staticmethod
+    def read_file_since(path: str | Path, *, after: int = 0,
+                        limit: int = 500, file_id: str = "") -> dict:
+        path = Path(path)
         if not path.is_file():
             return {"entries": [], "next_offset": 0, "file_id": "", "has_more": False}
         stat = path.stat()
-        identity = f"{stat.st_dev}:{stat.st_ino}"
-        if file_id and file_id != identity or after > stat.st_size:
+        identity = IPCLogger._file_id(stat)
+        if (file_id and file_id != identity) or after > stat.st_size:
             after = 0
         records = []
         with path.open("rb") as handle:

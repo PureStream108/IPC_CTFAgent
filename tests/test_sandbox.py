@@ -15,7 +15,68 @@ from backend.sandbox import docker_manager, task_sandbox
 from backend.sandbox.container_pool import ContainerPool
 from backend.sandbox.network_manager import NetworkManager
 from backend.sandbox.resource_limiter import TaskSlotLimiter
-from backend.sandbox.sandbox import LocalSandbox
+from backend.sandbox.sandbox import LocalSandbox, child_environment
+
+
+def test_solver_shell_cannot_read_platform_credentials(monkeypatch):
+    """The hosted sandbox injects the task token into the app, not the solver.
+
+    BENCHMARK_TOKEN lets its holder start and close containers and submit
+    flags, and the IPC_* model keys are billable. A Member that can read them
+    from its shell can drive the platform outside the audited path.
+    """
+
+    monkeypatch.setenv("BENCHMARK_TOKEN", "task-token")
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "https://tsecbench.example.com")
+    monkeypatch.setenv("IPC_LLM_API_KEY", "sk-member")
+    monkeypatch.setenv("IPC_DIAMOND_API_KEY", "sk-diamond")
+    monkeypatch.setenv("IPC_OPS_API_KEY", "sk-ops")
+    monkeypatch.setenv("IPC_R2S_PASSWORD", "r2s")
+    monkeypatch.setenv("IPC_DATABASE_URL", "postgresql://ipc:ipc@127.0.0.1:5432/ipc")
+    monkeypatch.setenv("PATH_KEEP", "/usr/bin")
+
+    env = child_environment({"IPC_GZ_TOKEN": "gz", "EXTRA": "1"})
+    assert "BENCHMARK_TOKEN" not in env
+    assert "BENCHMARK_BASE_URL" not in env
+    assert "IPC_LLM_API_KEY" not in env
+    assert "IPC_DIAMOND_API_KEY" not in env
+    assert "IPC_OPS_API_KEY" not in env
+    assert "IPC_R2S_PASSWORD" not in env
+    assert "IPC_DATABASE_URL" not in env
+    assert "IPC_GZ_TOKEN" not in env
+    assert env["EXTRA"] == "1"
+    assert env["PATH_KEEP"] == "/usr/bin"
+    assert "PATH" in env
+
+
+def test_local_sandbox_hands_the_child_a_scrubbed_environment(tmp_path, monkeypatch):
+    """The scrub has to reach the real Popen call, not just the helper."""
+
+    import os
+    import subprocess
+
+    monkeypatch.setenv("BENCHMARK_TOKEN", "task-token")
+    monkeypatch.setenv("IPC_LLM_API_KEY", "sk-member")
+    monkeypatch.setenv("KEEP_ME", "visible")
+    captured: dict[str, str] = {}
+    real_popen = subprocess.Popen
+    keep_alive = "cmd /c exit 0" if os.name == "nt" else "true"
+
+    def fake_popen(args, **kwargs):
+        captured.update(kwargs.pop("env", None) or {})
+        kwargs["shell"] = True
+        return real_popen(keep_alive, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    sandbox = LocalSandbox("m1", tmp_path / "ws")
+    sandbox.start()
+    sandbox.exec("echo hi")
+
+    assert captured, "the sandbox did not spawn a process"
+    assert "BENCHMARK_TOKEN" not in captured
+    assert "IPC_LLM_API_KEY" not in captured
+    assert captured["KEEP_ME"] == "visible"
+    assert "PATH" in captured
 
 
 def test_local_sandbox_exec_echo(tmp_path):
@@ -160,7 +221,7 @@ def test_container_pool_docker_shares_one_task_container_between_members(tmp_pat
             self.started = False
 
     class FakeTaskSandbox:
-        def __init__(self, project_id, image, env, network, attachments_dir=None):
+        def __init__(self, project_id, image, env, network, attachments_dir=None, **_kwargs):
             self.project_id = project_id
             self.image = image
             self.env = env
@@ -361,8 +422,76 @@ def test_task_sandbox_initializes_shared_workspace_and_copies_attachments(tmp_pa
     pearl = sandbox.member_view("pearl")
 
     assert containers.run_kwargs["name"] == "ipc-task-proj_001"
+    assert containers.run_kwargs["environment"]["MALLOC_ARENA_MAX"] == "2"
     assert "mem_limit" not in containers.run_kwargs
+    assert "pids_limit" not in containers.run_kwargs
     assert container.archives and container.archives[0][0] == "/workspace/attachments"
     assert aventurine._task is pearl._task is sandbox
     assert aventurine.workdir == "/workspace/shared"
     assert pearl.workdir == "/workspace/shared"
+
+
+def _fake_sandbox_client():
+    from docker.errors import NotFound
+
+    class FakeContainer:
+        attrs: ClassVar[dict] = {"NetworkSettings": {"Networks": {"bridge": {}}}}
+
+        def exec_run(self, command, **kwargs):
+            return types.SimpleNamespace(exit_code=0, output=b"")
+
+        def put_archive(self, path, data):
+            return True
+
+        def remove(self, force=False):
+            return None
+
+    class FakeContainers:
+        def __init__(self):
+            self.run_kwargs = None
+
+        def get(self, name):
+            raise NotFound("missing")
+
+        def run(self, **kwargs):
+            self.run_kwargs = kwargs
+            return FakeContainer()
+
+    containers = FakeContainers()
+    return types.SimpleNamespace(containers=containers), containers
+
+
+def test_task_sandbox_applies_memory_and_pid_limits(monkeypatch):
+    client, containers = _fake_sandbox_client()
+    sandbox = task_sandbox.TaskSandbox(
+        project_id="proj_limits",
+        image="ipc-task:latest",
+        env={"IPC_TEST_MEMBER": "amber"},
+        mem_limit="2g",
+        pids_limit=512,
+    )
+    monkeypatch.setattr(sandbox, "_docker", lambda: client)
+    monkeypatch.setattr(sandbox, "_shared_network_name", lambda: None)
+
+    sandbox.start()
+
+    kwargs = containers.run_kwargs
+    assert kwargs["mem_limit"] == "2g"
+    assert kwargs["pids_limit"] == 512
+    assert kwargs["environment"] == {"MALLOC_ARENA_MAX": "2", "IPC_TEST_MEMBER": "amber"}
+
+
+def test_container_pool_passes_limits_to_task_sandbox():
+    from backend.sandbox.container_pool import ContainerPool
+
+    pool = ContainerPool(
+        backend="docker",
+        workspace_root="projects",
+        network=True,
+        mem_limit="1536m",
+        pids_limit=256,
+    )
+    task = pool._new_task("proj_pool", None)
+    assert task.mem_limit == "1536m"
+    assert task.pids_limit == 256
+    assert task.env["MALLOC_ARENA_MAX"] == "2"

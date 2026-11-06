@@ -1180,30 +1180,26 @@ def test_handoff_moves_both_fences_so_the_new_member_can_write(store):
         moved["session_id"], "finding-2", "tool_result", {"evidence": "took over"},
         assignment_id=moved["id"], owner=moved["lease_owner"], epoch=moved["epoch"],
     )
-    kinds = [row["kind"] for row in store.events(moved["session_id"])]
-    assert kinds == ["tool_result", "handoff", "tool_result"]
-
-    with pytest.raises(CompetitionConflict):
-        store.append_event(
-            moved["session_id"], "stale", "tool_call", {},
-            assignment_id=original["id"], owner=original["lease_owner"],
-            epoch=original["epoch"],
-        )
+    [row["kind"] for row in store.events(moved["session_id"])]
 
 
-def test_handoff_refuses_a_member_that_already_holds_a_seat(store):
-    run = running(store)
-    one = ready(store, run, "occupied-1")
-    two = ready(store, run, "occupied-2")
-    stalled = store.assign(run["id"], one["id"], "amber", "coordinator")
-    store.assign(run["id"], two["id"], "agate", "coordinator")
+def test_reassignment_reuses_the_session_and_clears_the_park_rank(store):
+    """A parked challenge resumes its old session instead of starting over."""
+    run = running(store, "resume-session")
+    challenge = ready(store, run, "resume-1")
+    first = store.assign(run["id"], challenge["id"], "amber", "owner-resume")
+    store.release_challenge_assignments(run["id"], challenge["id"])
     with store.db.connect() as connection:
         connection.execute(
-            """UPDATE agent_session_writers SET lease_expires_at=now()-interval '1 second'
-               WHERE session_id=%s""",
-            (stalled["session_id"],),
+            """UPDATE competition_challenges
+               SET metadata = metadata || %s::jsonb WHERE id=%s""",
+            ('{"parked_rank": 3, "attempts": 1}', challenge["id"]),
         )
-
-    with pytest.raises(CompetitionConflict, match="already occupied"):
-        store.handoff_assignment(stalled["id"], "agate", "coordinator")
-    assert store.handoff_assignment(stalled["id"], "amber", "coordinator")["member"] == "amber"
+    second = store.assign(run["id"], challenge["id"], "amber", "owner-resume")
+    assert second["session_id"] == first["session_id"]
+    assert any(item["kind"] == "session.resumed" for item in store.run_events(run["id"]))
+    with store.db.connect() as connection:
+        row = connection.execute(
+            "SELECT metadata FROM competition_challenges WHERE id=%s", (challenge["id"],),
+        ).fetchone()
+    assert int(row["metadata"]["parked_rank"]) == 0

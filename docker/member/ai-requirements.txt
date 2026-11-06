@@ -1,6 +1,8 @@
-numpy==1.26.4
-scipy==1.11.4
-scikit-learn==1.5.2
+# Python 3.14 (Kali rolling) compatibility pins. onnx and onnxruntime come
+# from the distro packages instead: onnx 1.23 has only free-threaded cp314
+# wheels on PyPI, while Kali ships python3-onnx / python3-onnxruntime built for
+# the distro interpreter.
+numpy==2.4.6
+scipy==1.18.1
+scikit-learn==1.9.1
 joblib==1.4.2
-onnx==1.17.0
-onnxruntime==1.20.1

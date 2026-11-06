@@ -5,12 +5,13 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-CATEGORIES: tuple[str, ...] = ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint", "pentest")
+CATEGORIES: tuple[str, ...] = (
+    "pwn", "reverse", "crypto", "web", "misc", "ai", "osint", "pentest", "web+pwn",
+)
 
 ApiFormat = Literal["openai", "anthropic", "deepseek", "pi", "mock"]
 ApiSurface = Literal["auto", "chat_completions", "responses"]
@@ -67,6 +68,8 @@ class LimitsConfig(BaseModel):
     total_cpu: int = 4
     max_concurrent_tasks: int = Field(default=10, gt=0, le=10)
     network: bool = True
+    mem_limit: str = Field(default="2g", pattern=r"^[0-9]+(\.[0-9]+)?[bkmgBKMG]?$")
+    pids_limit: int = Field(default=512, ge=16, le=65536)
 
 
 class RuntimeConfig(BaseModel):
@@ -92,37 +95,48 @@ class RuntimeConfig(BaseModel):
     context_bytes: int = Field(default=1_000_000, ge=16384, le=16_000_000)
     compaction_timeout: int = Field(default=30, ge=1, le=120)
     compaction_max_output_tokens: int = Field(default=2048, ge=256, le=8192)
-    browser_event_limit: int = Field(default=200, gt=0, le=1000)
-    browser_console_limit: int = Field(default=100, gt=0, le=1000)
-    browser_error_limit: int = Field(default=50, gt=0, le=1000)
-    browser_response_preview_bytes: int = Field(default=4096, gt=0, le=16384)
-    browser_allowed_origins: list[str] = Field(default_factory=list)
-    browser_artifact_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0, le=50 * 1024 * 1024)
+    diamond_pentest_mode: bool = Field(default=False)
+    diamond_actions_per_tick: int = Field(default=2, ge=1, le=8)
+    ladder_help_minutes: int = Field(default=10, ge=1, le=600)
+    ladder_upgrade_minutes: int = Field(default=25, ge=1, le=600)
+    ladder_park_minutes: int = Field(default=40, ge=1, le=1440)
+    per_challenge_minutes: int = Field(default=45, ge=10, le=1440)
+    # Local deadline guard. 0 disables it: the authority is the platform task
+    # window or the competition end, never a local constant that stops early.
+    run_deadline_guard_minutes: int = Field(default=0, ge=0, le=10080)
+    state_write_ratio: float = Field(default=0.85, gt=0.0, le=0.99)
 
-    @field_validator("browser_allowed_origins")
-    @classmethod
-    def _validate_browser_origins(cls, values: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for raw in values:
-            value = raw.strip()
-            parts = urlsplit(value)
-            if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-                raise ValueError("browser allowed origins must use HTTP(S)")
-            if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
-                raise ValueError("browser allowed origins must contain only scheme, host, and optional port")
-            try:
-                port = parts.port
-            except ValueError as exc:
-                raise ValueError("browser allowed origin contains an invalid port") from exc
-            host = parts.hostname.lower()
-            if ":" in host and not host.startswith("["):
-                host = f"[{host}]"
-            default_port = 80 if parts.scheme.lower() == "http" else 443
-            suffix = f":{port}" if port is not None and port != default_port else ""
-            origin = f"{parts.scheme.lower()}://{host}{suffix}"
-            if origin not in normalized:
-                normalized.append(origin)
-        return normalized
+    @model_validator(mode="after")
+    def _check_ladder_order(self) -> RuntimeConfig:
+        ladder = (self.ladder_help_minutes, self.ladder_upgrade_minutes, self.ladder_park_minutes)
+        if not ladder[0] < ladder[1] < ladder[2]:
+            raise ValueError(
+                "ladder thresholds must increase: help < upgrade < park "
+                f"(got {ladder[0]} / {ladder[1]} / {ladder[2]})"
+            )
+        if self.state_write_ratio <= self.compaction_trigger_ratio:
+            raise ValueError(
+                "state_write_ratio must be above compaction_trigger_ratio so STATE is "
+                "written after the automatic compaction, not before it"
+            )
+        return self
+
+
+class WatchConfig(BaseModel):
+    """Automatic platform polling for newly released challenges.
+
+    A CompetitionRun re-syncs its platform on ``sync_seconds`` and imports every
+    challenge it discovers, so this only has to bridge the window before the
+    first takeable challenge exists.  Disabled by default: watching a platform
+    is a per-deployment decision, not a property of the solver.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval_seconds: int = Field(default=60, ge=10, le=3600)
+    sync_seconds: int = Field(default=120, ge=5, le=3600)
+    workflows: list[str] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):
@@ -130,12 +144,15 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     log_enabled: bool = True
+    wp_enabled: bool = True
     diamond: LLMConfig = Field(default_factory=LLMConfig)
     member: LLMConfig | None = None
+    member_backup: LLMConfig | None = None
     member_config_conflict: bool = False
     members: list[MemberConfig] = Field(default_factory=list)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    watch: WatchConfig = Field(default_factory=WatchConfig)
 
     @field_validator("members")
     @classmethod
@@ -148,6 +165,31 @@ class AppConfig(BaseModel):
             raise ValueError("member names must be unique")
         return members
 
+    def _inherit_member_backup(self) -> None:
+        """A partial backup slot reuses the primary Member model/surface/effort."""
+        if self.member is None or self.member_backup is None:
+            return
+        backup = self.member_backup
+        if not backup.model:
+            backup.model = self.member.model
+        if backup.api_surface == "auto":
+            backup.api_surface = self.member.api_surface
+        if backup.reasoning_effort == "auto":
+            backup.reasoning_effort = self.member.reasoning_effort
+
+    def _rebuild_members(self) -> None:
+        """Fill the ten fixed seats, splitting them 5/5 when a backup is set."""
+        if self.member is None:
+            return
+        self._inherit_member_backup()
+        self.member_config_conflict = False
+        backup = self.member_backup
+        members: list[MemberConfig] = []
+        for idx, name in enumerate(MEMBER_NAMES):
+            source = self.member if idx % 2 == 0 or backup is None else backup
+            members.append(MemberConfig(name=name, **source.model_dump()))
+        self.members = members
+
     @model_validator(mode="after")
     def _check_unique(self) -> AppConfig:
         if self.member is None:
@@ -159,8 +201,7 @@ class AppConfig(BaseModel):
             elif not self.member_config_conflict:
                 self.member = LLMConfig.model_validate(candidates[0] if candidates else {})
         if self.member is not None:
-            self.member_config_conflict = False
-            self.members = [MemberConfig(name=name, **self.member.model_dump()) for name in MEMBER_NAMES]
+            self._rebuild_members()
         return self
 
     def startup_errors(self) -> list[str]:
@@ -168,11 +209,17 @@ class AppConfig(BaseModel):
         errors: list[str] = []
         if self.member_config_conflict:
             errors.append("Member configurations differ. Select one shared Member configuration in Config.")
-        for label, llm in (("Diamond", self.diamond), ("Member", self.member)):
+        for label, llm in (
+            ("Diamond", self.diamond),
+            ("Member", self.member),
+            ("Member backup", self.member_backup),
+        ):
             if llm and llm.configured and llm.api_format != "mock" and llm.reasoning_effort in {"auto", "none", "minimal"}:
                 errors.append(f"{label}: select low, medium, high, xhigh or max for the migrated reasoning setting.")
         if not self.diamond.configured:
             errors.append("Diamond requires api_key and base_url (or api_format: mock).")
+        if self.member_backup is not None and not self.member_backup.configured:
+            errors.append("Member backup requires api_key and base_url (or api_format: mock).")
         if not self.members:
             errors.append("At least one Member must be configured.")
         elif not any(m.configured for m in self.members):
@@ -187,11 +234,23 @@ class AppConfig(BaseModel):
                 "Sandbox backend 'local' runs solver commands on the host filesystem and was "
                 "upgraded to 'docker'. Set IPC_ALLOW_LOCAL_SANDBOX=1 only for offline development."
             )
+        backup = self.member_backup
+        if backup is not None and self.member is not None and backup.api_key == self.member.api_key:
+            warnings.append("backup key equals primary (no spread)")
         return warnings
 
     def available_members(self) -> list[MemberConfig]:
         """Members that have credentials — the upper bound on parallelism."""
         return [] if self.member_config_conflict else [m for m in self.members if m.configured]
+
+    def member_key_slots(self) -> dict[str, str]:
+        """Which key every fixed Member seat uses: even -> primary, odd -> backup."""
+
+        split = self.member is not None and self.member_backup is not None
+        return {
+            member.name: "backup" if split and index % 2 else "primary"
+            for index, member in enumerate(self.members)
+        }
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -210,9 +269,25 @@ def _apply_models_defaults(cfg: AppConfig, models: dict[str, Any]) -> None:
             m.model = defaults.get(m.api_format, "")
     if cfg.member is not None and cfg.member.model == "":
         cfg.member.model = defaults.get(cfg.member.api_format, "")
+    if cfg.member_backup is not None and cfg.member_backup.model == "":
+        cfg.member_backup.model = (
+            cfg.member.model
+            if cfg.member is not None and cfg.member.model
+            else defaults.get(cfg.member_backup.api_format, "")
+        )
+    cfg._rebuild_members()
 
 
 _LEGACY_LIMIT_KEYS = ("total_memory_gb", "total_disk_gb", "per_agent_memory_gb")
+_LEGACY_RUNTIME_KEYS = (
+    "browser_event_limit",
+    "browser_console_limit",
+    "browser_error_limit",
+    "browser_response_preview_bytes",
+    "browser_allowed_origins",
+    "browser_artifact_max_bytes",
+    "zap_enabled",
+)
 
 LOCAL_SANDBOX_ENV = "IPC_ALLOW_LOCAL_SANDBOX"
 
@@ -244,6 +319,16 @@ def _strip_legacy_limits(limits: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in limits.items() if k not in _LEGACY_LIMIT_KEYS}
 
 
+def _strip_legacy_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+    """Drop settings retired with the browser MCP.
+
+    Older deployments still have these keys in config.yaml. RuntimeConfig
+    forbids extras, so silently dropping them keeps upgrades from failing at
+    startup while ensuring they are not saved back by the next write.
+    """
+    return {k: v for k, v in runtime.items() if k not in _LEGACY_RUNTIME_KEYS}
+
+
 def load_config(config_dir: Path | None = None) -> AppConfig:
     """Load and merge config.yaml + models.yaml + limits.yaml."""
     base = config_dir or CONFIG_DIR
@@ -257,7 +342,7 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     if isinstance(raw.get("limits"), dict):
         raw["limits"] = _strip_legacy_limits(raw["limits"])
     if isinstance(raw.get("runtime"), dict):
-        raw["runtime"].pop("zap_enabled", None)
+        raw["runtime"] = _strip_legacy_runtime(raw["runtime"])
 
     cfg = AppConfig.model_validate(raw)
     _apply_models_defaults(cfg, models)
@@ -266,6 +351,9 @@ def load_config(config_dir: Path | None = None) -> AppConfig:
     env_log = os.environ.get("IPC_LOG_ENABLED")
     if env_log is not None:
         cfg.log_enabled = env_log.strip().lower() in ("1", "true", "yes", "on")
+    env_wp = os.environ.get("IPC_WP_ENABLED")
+    if env_wp is not None:
+        cfg.wp_enabled = env_wp.strip().lower() in ("1", "true", "yes", "on")
     return cfg
 
 
@@ -274,8 +362,10 @@ def save_config(cfg: AppConfig, config_dir: Path | None = None) -> None:
     base.mkdir(parents=True, exist_ok=True)
     data = {
         "log_enabled": cfg.log_enabled,
+        "wp_enabled": cfg.wp_enabled,
         "diamond": cfg.diamond.model_dump(),
         "member": cfg.member.model_dump() if cfg.member is not None else None,
+        "member_backup": cfg.member_backup.model_dump() if cfg.member_backup is not None else None,
         "member_config_conflict": cfg.member_config_conflict,
         "members": [m.model_dump() for m in cfg.members] if cfg.member_config_conflict else [],
         "runtime": cfg.runtime.model_dump(exclude={"sandbox_backend_forced"}),

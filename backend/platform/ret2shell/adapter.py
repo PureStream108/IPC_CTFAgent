@@ -7,16 +7,19 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from typing_extensions import Self
 
 from backend.platform._common import PLATFORM_CATEGORIES, numbered_filename, safe_stem
 from backend.platform.adapter import PlatformAdapter
+from backend.platform.errors import (
+    PlatformError,
+    PlatformPreflightError,
+    PlatformRateLimitError,
+)
 from backend.platform.mapping import PlatformChallenge
-
-DEFAULT_BASE_URL = "https://ctf.xidian.edu.cn"
-DEFAULT_GAME_ID = 37
 
 SUBMIT_WINDOW_SECONDS = 300.0
 SUBMIT_LIMIT = 10
@@ -26,7 +29,7 @@ INSTANCE_WAIT_TIMEOUT = 60.0
 INSTANCE_WAIT_INTERVAL = 2.0
 
 
-class Ret2ShellError(RuntimeError):
+class Ret2ShellError(PlatformError):
     pass
 
 
@@ -34,11 +37,11 @@ class Ret2ShellAuthError(Ret2ShellError):
     pass
 
 
-class Ret2ShellPreflightError(Ret2ShellError):
+class Ret2ShellPreflightError(Ret2ShellError, PlatformPreflightError):
     """A submission was refused before it could consume a platform attempt."""
 
 
-class Ret2ShellRateLimitError(Ret2ShellError):
+class Ret2ShellRateLimitError(Ret2ShellError, PlatformRateLimitError):
     pass
 
 
@@ -112,12 +115,32 @@ class Ret2ShellClient:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.base_url = (base_url or os.getenv("IPC_R2S_BASE_URL", "") or DEFAULT_BASE_URL).rstrip("/")
+        resolved_base_url = (base_url or os.getenv("IPC_R2S_BASE_URL", "")).strip().rstrip("/")
+        if not resolved_base_url:
+            raise Ret2ShellError(
+                "ret2shell base URL is required; ask the operator for the platform "
+                "origin (or set IPC_R2S_BASE_URL)"
+            )
+        parsed = urlparse(resolved_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise Ret2ShellError(
+                f"ret2shell base URL must be an http(s) origin: {resolved_base_url!r}"
+            )
+        self.base_url = resolved_base_url
         raw_game_id = game_id if game_id is not None else os.getenv("IPC_R2S_GAME_ID", "")
+        if raw_game_id is None or not str(raw_game_id).strip():
+            raise Ret2ShellError(
+                "ret2shell game id is required; ask the operator for the numeric game "
+                "id (or set IPC_R2S_GAME_ID)"
+            )
         try:
-            self.game_id = int(raw_game_id) if str(raw_game_id).strip() else DEFAULT_GAME_ID
+            self.game_id = int(raw_game_id)
         except (TypeError, ValueError) as exc:
             raise Ret2ShellError(f"invalid IPC_R2S_GAME_ID: {raw_game_id!r}") from exc
+        if self.game_id < 1:
+            raise Ret2ShellError(
+                f"ret2shell game id must be a positive integer: {self.game_id}"
+            )
         self.username = username or os.getenv("IPC_R2S_USERNAME", "")
         self.password = password or os.getenv("IPC_R2S_PASSWORD", "")
         self.timeout = timeout
@@ -230,8 +253,10 @@ class Ret2ShellClient:
     def login(self) -> None:
         if not self.username or not self.password:
             raise Ret2ShellAuthError(
-                "ret2shell username/password are not configured; "
-                "set IPC_R2S_USERNAME/IPC_R2S_PASSWORD or IPC_R2S_TOKEN"
+                "ret2shell username/password are not configured; supply "
+                "ret2shell_token or ret2shell_username/ret2shell_password through the "
+                "workflow secret store, or set IPC_R2S_USERNAME/IPC_R2S_PASSWORD or "
+                "IPC_R2S_TOKEN"
             )
         body = {
             "account": self.username,
@@ -401,7 +426,13 @@ class Ret2ShellClient:
         timeout: float = INSTANCE_WAIT_TIMEOUT,
         interval: float = INSTANCE_WAIT_INTERVAL,
     ) -> dict[str, Any]:
-        """Poll until the challenge instance reports reachable exposed_ports."""
+        """Poll until the instance is reachable.
+
+        A direct exposed_ports list is enough, and so is the ret2shell
+        traffic ticket plus ports shape: the ticket is what a wsrx tunnel
+        needs, so waiting for exposed_ports alone would hang on every
+        proxied container.
+        """
 
         deadline = self._monotonic() + timeout
         last: dict[str, Any] | None = None
@@ -409,7 +440,9 @@ class Ret2ShellClient:
             instance = self.find_instance(challenge_id, game_id)
             if instance is not None:
                 last = instance
-                if instance.get("exposed_ports"):
+                if instance.get("exposed_ports") or (
+                    instance.get("traffic") and instance.get("ports")
+                ):
                     return instance
             if self._monotonic() >= deadline:
                 state = (last or {}).get("state", "unknown")
@@ -506,6 +539,29 @@ def normalize_category(raw: str) -> str:
     return lowered if lowered in PLATFORM_CATEGORIES else "misc"
 
 
+def instance_endpoints(instance: dict[str, Any]) -> list[str]:
+    """Direct host:port endpoints a Member can dial, if the platform gave any."""
+
+    exposed = instance.get("exposed_ports")
+    if isinstance(exposed, dict):
+        entries: list[Any] = list(exposed)
+    elif isinstance(exposed, list):
+        entries = exposed
+    else:
+        entries = []
+    endpoints: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, dict):
+            text = next((str(key).strip() for key in entry if str(key).strip()), "")
+        else:
+            text = ""
+        if text and not text.startswith(("ws://", "wss://")):
+            endpoints.append(text)
+    return endpoints
+
+
 class Ret2ShellAdapter(PlatformAdapter):
     """Import ret2shell challenges through the generic platform mechanism."""
 
@@ -516,11 +572,13 @@ class Ret2ShellAdapter(PlatformAdapter):
         game_id: int | None = None,
         category_map: dict[str, str] | None = None,
         max_attachment_bytes: int | None = None,
+        tunnel_manager: Any | None = None,
     ) -> None:
         self.client = client
         self.game_id = game_id or client.game_id
         self.category_map = category_map or {}
         self.max_attachment_bytes = max_attachment_bytes
+        self._tunnel_manager_override = tunnel_manager
 
     @property
     def identity(self) -> str:
@@ -535,9 +593,13 @@ class Ret2ShellAdapter(PlatformAdapter):
         return True
 
     def preflight(self) -> list[PlatformChallenge]:
+        # Preflight decides which challenges a CompetitionRun imports as
+        # remote and which are already solved, so it must enrich the list:
+        # a bare fetch would make every dynamic challenge look local and
+        # every solved challenge look open.
         self.client.get_profile()
         self.client.get_game(self.game_id)
-        return self.fetch_challenges()
+        return self._enrich(self.fetch_challenges())
 
     def fetch_challenges(self) -> list[PlatformChallenge]:
         challenges: list[PlatformChallenge] = []
@@ -563,8 +625,7 @@ class Ret2ShellAdapter(PlatformAdapter):
             )
         return challenges
 
-    def challenges(self) -> list[PlatformChallenge]:
-        challenges = self.fetch_challenges()
+    def _enrich(self, challenges: list[PlatformChallenge]) -> list[PlatformChallenge]:
         for challenge in challenges:
             challenge.remote = self.client.has_environment(
                 int(challenge.external_id), self.game_id
@@ -574,6 +635,9 @@ class Ret2ShellAdapter(PlatformAdapter):
             )
             challenge.solved = isinstance(status, dict) and status.get("solved") is True
         return challenges
+
+    def challenges(self) -> list[PlatformChallenge]:
+        return self._enrich(self.fetch_challenges())
 
     @staticmethod
     def _verdict(value: dict[str, Any]) -> dict[str, Any]:
@@ -600,22 +664,80 @@ class Ret2ShellAdapter(PlatformAdapter):
     def instances(self) -> list[dict[str, Any]]:
         return self.client.list_instances(self.game_id)
 
+    def _tunnel_manager(self) -> Any:
+        if self._tunnel_manager_override is not None:
+            return self._tunnel_manager_override
+        from backend.platform.ret2shell.mcp import default_tunnel_manager
+
+        return default_tunnel_manager()
+
+    def _ensure_tunnels(
+        self, challenge_id: int, instance: dict[str, Any]
+    ) -> list[str]:
+        """Open the wsrx tunnels an instance needs and return local endpoints."""
+
+        from backend.platform.ret2shell.mcp import wsrx_remotes
+
+        remotes = wsrx_remotes(instance, self.client)
+        if not remotes:
+            return []
+        return list(self._tunnel_manager().ensure(challenge_id, remotes)["endpoints"])
+
+    @staticmethod
+    def _instance_view(instance: dict[str, Any]) -> dict[str, Any]:
+        """Normalise an instance into the scheduler shape (state/entry/expiry)."""
+
+        view: dict[str, Any] = {"state": str(instance.get("state") or "unknown")}
+        for key in ("expires_at", "renew_after", "renew_before_seconds"):
+            if instance.get(key) is not None:
+                view[key] = instance[key]
+        entry = next(iter(instance_endpoints(instance)), "")
+        if entry:
+            view.update(entry=entry, url=entry)
+        return view
+
+    def _resolve_instance(
+        self, challenge_id: int, instance: dict[str, Any]
+    ) -> dict[str, Any]:
+        view = self._instance_view(instance)
+        endpoints = self._ensure_tunnels(challenge_id, instance)
+        if endpoints:
+            view.update(entry=endpoints[0], url=endpoints[0], endpoints=endpoints)
+        if view.get("entry"):
+            view["state"] = "ready"
+        return view
+
     def start_instance(self, external_id: str) -> dict[str, Any]:
         challenge_id = int(external_id)
         self.client.start_instance(challenge_id, self.game_id)
-        return self.client.wait_for_instance(challenge_id, self.game_id, timeout=60)
+        instance = self.client.wait_for_instance(
+            challenge_id, self.game_id, timeout=60
+        )
+        return self._resolve_instance(challenge_id, instance)
 
     def stop_instance(self, external_id: str) -> None:
-        self.client.destroy_instance(int(external_id), self.game_id)
+        challenge_id = int(external_id)
+        self._tunnel_manager().stop(challenge_id)
+        self.client.destroy_instance(challenge_id, self.game_id)
 
     def renew_instance(self, external_id: str) -> None:
-        self.client.renew_instance(int(external_id), self.game_id)
+        challenge_id = int(external_id)
+        self.client.renew_instance(challenge_id, self.game_id)
+        instance = self.client.find_instance(challenge_id, self.game_id)
+        if instance is not None:
+            # A renewal can rotate the traffic ticket, so re-evaluate the
+            # tunnel: ensure() only respawns what actually changed.
+            self._ensure_tunnels(challenge_id, instance)
 
     def rebuild_instance(self, external_id: str) -> dict[str, Any]:
         challenge_id = int(external_id)
+        self._tunnel_manager().stop(challenge_id)
         self.client.destroy_instance(challenge_id, self.game_id)
         self.client.start_instance(challenge_id, self.game_id)
-        return self.client.wait_for_instance(challenge_id, self.game_id, timeout=60)
+        instance = self.client.wait_for_instance(
+            challenge_id, self.game_id, timeout=60
+        )
+        return self._resolve_instance(challenge_id, instance)
 
     def download_attachments(
         self,

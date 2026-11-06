@@ -14,6 +14,16 @@ from backend.platform.tsecbench import (
     TSECBenchInstanceError,
     TSECBenchPreflightError,
 )
+from backend.platform.tsecbench.adapter import reset_challenge_cache
+
+
+@pytest.fixture(autouse=True)
+def _clear_challenge_cache():
+    """The read-through cache is process wide; no test may inherit another's."""
+
+    reset_challenge_cache()
+    yield
+    reset_challenge_cache()
 
 
 def test_multi_flag_correct_is_not_challenge_completion():
@@ -127,7 +137,7 @@ class _FakeClient:
         self.start_calls: list[str] = []
         self.submit_calls: list[tuple[str, str]] = []
 
-    def list_challenges(self):
+    def list_challenges(self, **_kwargs):
         return list(self.challenges_payload)
 
     def start_container(self, unique_code):
@@ -245,6 +255,77 @@ def test_adapter_normalises_challenges_and_derives_categories():
     assert challenges["g-05"].attachment_urls == []
 
 
+def test_unclassified_challenge_with_a_live_remote_target_is_web_plus_pwn():
+    raw = _challenge(
+        "remote-x",
+        "完全看不懂的东西",
+        container_status="available",
+        container_addr=["10.0.3.15:8080"],
+    )
+    adapter = TSECBenchAdapter(_FakeClient([]), _mapping())
+    assert adapter._category(raw) == "web+pwn"
+    assert adapter._normalise(raw).category == "web+pwn"
+
+    # A missing status field is not a dead container: the address still counts.
+    no_status = _challenge(
+        "remote-y",
+        "完全看不懂的东西",
+        container_addr=["10.0.3.15:8080"],
+    )
+    no_status.pop("container_status")
+    assert adapter._category(no_status) == "web+pwn"
+
+
+def test_unclassified_challenge_without_a_remote_target_stays_misc():
+    adapter = TSECBenchAdapter(_FakeClient([]), _mapping())
+    assert adapter._category(_challenge("offline-x", "完全看不懂的东西")) == "misc"
+
+
+@pytest.mark.parametrize("status", ["closed", "stopped", "expired"])
+def test_a_dead_container_is_not_a_live_remote_target(status):
+    raw = _challenge(
+        f"{status}-x",
+        "完全看不懂的东西",
+        container_status=status,
+        container_addr=["10.0.3.15:8080"],
+    )
+    adapter = TSECBenchAdapter(_FakeClient([]), _mapping())
+    assert adapter._category(raw) == "misc"
+
+
+def test_explicit_category_beats_the_remote_fallback():
+    raw = _challenge(
+        "mapped-x",
+        "完全看不懂的东西",
+        container_status="available",
+        container_addr=["10.0.3.15:8080"],
+    )
+    mapped = TSECBenchAdapter(_FakeClient([]), _mapping(category_map={"*": "reverse"}))
+    assert mapped._category(raw) == "reverse"
+
+    field_raw = _challenge(
+        "field-x",
+        "完全看不懂的东西",
+        container_status="available",
+        container_addr=["10.0.3.15:8080"],
+        kind="crypto",
+    )
+    field = TSECBenchAdapter(_FakeClient([]), _mapping(category_field="kind"))
+    assert field._category(field_raw) == "crypto"
+
+
+def test_multi_flag_remote_challenge_keeps_pentest_precedence():
+    raw = _challenge(
+        "multi-remote",
+        "完全看不懂的东西",
+        flag_count=3,
+        container_status="available",
+        container_addr=["10.0.3.15:8080"],
+    )
+    adapter = TSECBenchAdapter(_FakeClient([]), _mapping())
+    assert adapter._category(raw) == "pentest"
+
+
 def test_adapter_category_map_keywords_override_the_builtin_table():
     client = _FakeClient([_challenge("g-05", "RSA 加密脚本")])
     adapter = TSECBenchAdapter(client, _mapping(category_map={"rsa": "reverse"}))
@@ -278,6 +359,75 @@ def test_adapter_instance_lifecycle_start_reads_and_renews():
     renewed = adapter.renew_instance("g-01")
     assert renewed["state"] == "ready"
     assert renewed["addresses"] == ["10.0.0.8:8080"]
+
+
+def test_scheduler_instance_polling_reuses_one_challenge_read():
+    """One HTTP list per cache interval, not one per tick.
+
+    The competition scheduler builds a fresh adapter and asks for the live
+    container list on every 1 s tick; without the shared cache a six-hour
+    hosted task would issue more than twenty thousand challenge-list requests.
+    """
+
+    payload = [_challenge("g-01", container_status="available", container_addr=["10.0.0.8:8080"])]
+    session = _Session([_Response(payload), _Response(payload)])
+    first = TSECBenchAdapter(
+        TSECBenchClient("https://tsecbench.zc.tencent.com", "tok-1", session=session),
+        _mapping(),
+    )
+    second = TSECBenchAdapter(
+        TSECBenchClient("https://tsecbench.zc.tencent.com", "tok-1", session=session),
+        _mapping(),
+    )
+
+    assert [item["external_id"] for item in first.instances()] == ["g-01"]
+    assert [item["external_id"] for item in first.instances()] == ["g-01"]
+    assert [item["external_id"] for item in second.instances()] == ["g-01"]
+    assert len(session.calls) == 1
+
+
+def test_starting_and_closing_a_container_invalidates_the_shared_cache():
+    payload = [
+        _challenge("g-01", container_status="available", container_addr=["10.0.0.8:8080"]),
+        _challenge("g-02"),
+    ]
+    session = _Session([
+        _Response(payload),
+        _Response({"unique_code": "g-02", "container_addr": ["10.0.0.9:8080"]}),
+        _Response(payload),
+        _Response({"unique_code": "g-02", "closed": True}),
+        _Response(payload),
+    ])
+    adapter = TSECBenchAdapter(
+        TSECBenchClient("https://tsecbench.zc.tencent.com", "tok-1", session=session),
+        _mapping(),
+    )
+
+    adapter.instances()
+    assert len(session.calls) == 1
+
+    adapter.start_instance("g-02")
+    assert len(session.calls) == 2
+    adapter.instances()
+    assert len(session.calls) == 3
+
+    adapter.stop_instance("g-02")
+    assert len(session.calls) == 4
+    adapter.instances()
+    assert len(session.calls) == 5
+
+
+def test_preflight_reads_through_instead_of_trusting_the_cache():
+    payload = [_challenge("g-01")]
+    session = _Session([_Response(payload), _Response(payload)])
+    adapter = TSECBenchAdapter(
+        TSECBenchClient("https://tsecbench.zc.tencent.com", "tok-1", session=session),
+        _mapping(),
+    )
+    adapter.fetch_challenges()
+    assert len(session.calls) == 1
+    adapter.preflight()
+    assert len(session.calls) == 2
 
 
 def test_adapter_start_without_an_address_is_a_retryable_failure():
@@ -378,3 +528,26 @@ def test_tsecbench_workflow_preset_rejects_foreign_credentials():
         )
     with pytest.raises(ValueError):
         TSECBenchWorkflowInput(base_url="https://tsecbench.zc.tencent.com/openapi", secrets={})
+
+
+def test_max_active_instances_is_a_quota_retry_not_a_task_end():
+    """A full 3-container pool must not shut the whole run down (live 2026-10-29)."""
+    from backend.platform.tsecbench.adapter import _classify_error
+
+    class Response:
+        status_code = 409
+
+        def __init__(self, message):
+            self._message = message
+            self.headers = {}
+
+        def json(self):
+            return {"code": "invalid_state", "message": self._message}
+
+    quota = _classify_error(Response(
+        "max active challenge instances reached (3), please close an existing challenge before starting a new one"
+    ))
+    assert quota.reason == "quota"
+
+    ended = _classify_error(Response("task already finished"))
+    assert ended.reason == "ended"

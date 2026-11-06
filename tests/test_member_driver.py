@@ -8,7 +8,6 @@ from backend.blackboard.db import Database
 from backend.core.config import MemberConfig
 from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPRegistry
-from backend.mcp.shared import build_browser_mcp
 from backend.members import base_member
 from backend.members.adapters import MemberAction
 from backend.members.base_member import MemberDeps
@@ -26,7 +25,6 @@ def deps(tmp_path):
     reg = ToolRegistry().load()
     mcps = MCPRegistry()
     mcps.register(build_memory_mcp(mem))
-    mcps.register(build_browser_mcp())
     sb = LocalSandbox("test", tmp_path / "ws")
     sb.start()
     reports = []

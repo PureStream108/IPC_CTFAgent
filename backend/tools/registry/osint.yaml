@@ -18,3 +18,100 @@ tools:
     exec: exiftool
     tags: [metadata, osint]
     when_to_use: Geolocation/author hints from media metadata.
+
+  - name: masscan
+    description: Asynchronous TCP port scanner for wide but shallow sweeps.
+    path: /usr/bin/masscan
+    exec: masscan
+    tags: [recon, scan, port, network]
+    when_to_use: Sweep a large authorized range quickly, then hand open ports to nmap -sV. masscan needs --rate and -p; an unbounded rate floods the network and is indistinguishable from an attack.
+  - name: ncat
+    description: Nmap project netcat implementation for raw TCP/UDP interaction and listeners.
+    path: /usr/bin/ncat
+    exec: ncat
+    tags: [network, tcp, udp, listener, recon]
+    when_to_use: Manual protocol interaction, banner grabbing or a local listener. Prefer ncat over nc when you need --ssl or -e semantics.
+  - name: enum4linux
+    description: Enumerate SMB/NetBIOS information from Windows and Samba hosts.
+    path: /usr/local/bin/enum4linux
+    exec: enum4linux
+    tags: [smb, netbios, enumeration, active-directory]
+    when_to_use: First SMB enumeration pass - users, shares, password policy, OS version. Use -a only against an authorized host; it also triggers null-session authentication attempts.
+  - name: smbmap
+    description: List accessible SMB shares and per-share permissions.
+    path: /usr/bin/smbmap
+    exec: smbmap
+    tags: [smb, shares, enumeration, credentials]
+    when_to_use: After enum4linux, to test which shares a discovered account can read or write. Never write to an unknown share, because a write is a change to the target.
+  - name: onesixtyone
+    description: Fast SNMP community-string scanner.
+    path: /usr/bin/onesixtyone
+    exec: onesixtyone
+    tags: [snmp, udp, enumeration, credentials]
+    when_to_use: Find the SNMP community string before walking the tree with snmpwalk. Community guessing can trip network monitoring; keep the list small and the rate low.
+  - name: dnsmap
+    description: Subdomain brute-forcer using built-in wordlists.
+    path: /usr/bin/dnsmap
+    exec: dnsmap
+    tags: [dns, subdomain, enumeration]
+    when_to_use: Enumerate subdomains only for a domain that is inside the authorized scope. Use -d for a custom wordlist and -i to ignore wildcard results.
+  - name: dig
+    description: DNS query tool from BIND for records, zones and stub resolver checks.
+    path: /usr/bin/dig
+    exec: dig
+    tags: [dns, records, recon]
+    when_to_use: Read A/AAAA/MX/TXT/NS/SOA records, test a specific resolver with @server, and attempt AXFR against an authorized nameserver.
+  - name: ldapsearch
+    description: Query LDAP directories from the OpenLDAP client tools.
+    path: /usr/bin/ldapsearch
+    exec: ldapsearch
+    tags: [ldap, directory, enumeration]
+    when_to_use: Enumerate naming contexts, schema and entries once LDAP is exposed. Start anonymous with -x; an authenticated bind uses credentials you actually found.
+  - name: snmpwalk
+    description: Retrieve an SNMP OID tree from a network device.
+    path: /usr/bin/snmpwalk
+    exec: snmpwalk
+    tags: [snmp, enumeration, network]
+    when_to_use: After a community string is known, walk the tree and look for interface, process and sysDescr data. Use -v2c -c <community> and keep timeouts short.
+  - name: showmount
+    description: List NFS exports from a server.
+    path: /usr/sbin/showmount
+    exec: showmount
+    tags: [nfs, shares, enumeration]
+    when_to_use: Check for an exported NFS path, then mount it read-only inside the container when the export is inside the authorized scope.
+  - name: hydra
+    description: Parallel network login cracker for many service protocols.
+    path: /usr/bin/hydra
+    exec: hydra
+    tags: [credentials, brute-force, login, audit]
+    when_to_use: Only against accounts and services the task authorizes you to audit. Always pass -t 4 or lower and -W, because account lockout and rate limiting will both end the attempt and damage the target.
+  - name: medusa
+    description: Modular parallel login auditor.
+    path: /usr/bin/medusa
+    exec: medusa
+    tags: [credentials, brute-force, login, audit]
+    when_to_use: Module-based alternative to hydra when its protocol support is missing. Keep -t small and -n slow; a lockout is a failed audit, not a finding.
+  - name: ncrack
+    description: Nmap project network authentication cracker.
+    path: /usr/bin/ncrack
+    exec: ncrack
+    tags: [credentials, brute-force, login, audit]
+    when_to_use: Credential auditing when you already have a host/port inventory. Use -T 2 or lower and --connection-limit so the target is not flooded.
+  - name: john
+    description: John the Ripper offline password cracker.
+    path: /usr/bin/john
+    exec: john
+    tags: [credentials, hash, offline, cracking]
+    when_to_use: Crack hashes you already recovered from the challenge (shadow, kerberoast, zip/rar). It is offline, so there is no target-side risk; pick a wordlist and rules that fit the time budget.
+  - name: hashcat
+    description: GPU/CPU hash cracker with a large mode set.
+    path: /usr/bin/hashcat
+    exec: hashcat
+    tags: [credentials, hash, offline, cracking, gpu]
+    when_to_use: Offline cracking with explicit -m mode and -a attack mode. The container has no GPU; use -D 1 or --force with CPU-only OpenCL, and keep -w low so other Members keep their CPU share.
+  - name: sshpass
+    description: Supply an SSH password non-interactively for scripted checks.
+    path: /usr/bin/sshpass
+    exec: sshpass
+    tags: [ssh, credentials, automation]
+    when_to_use: Script a single authorized SSH login attempt with a known password. Do not loop it over a wordlist; that belongs in hydra/medusa where the rate can be bounded.

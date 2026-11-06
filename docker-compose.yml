@@ -21,8 +21,9 @@ services:
       context: .
       dockerfile: docker/member/Dockerfile
       args:
-        IPC_TASK_BASE: ${IPC_TASK_BASE:-ubuntu:22.04}
+        IPC_TASK_BASE: ${IPC_TASK_BASE:-kalilinux/kali-rolling:latest}
         GITHUB_MIRROR: ${IPC_GITHUB_MIRROR:-https://github.com}
+        GITHUB_RELEASE_PROXY: ${IPC_GITHUB_RELEASE_PROXY:-https://gh-proxy.com/}
         TEMURIN_JDK_URL: ${IPC_TEMURIN_JDK_URL:-https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jdk/hotspot/normal/eclipse}
     image: ipc-task:latest
     command: ["true"]
@@ -43,8 +44,9 @@ services:
       - IPC_ARTIFACT_ROOT=/app/data/artifacts
       - IPC_LOG_ENABLED=true
       - IPC_DATABASE_URL=${IPC_DATABASE_URL:-postgresql://ipc:ipc@ipc-postgres:5432/ipc}
-      # ret2shell platform credentials; when USERNAME (or TOKEN) is set the
-      # backend registers the ret2shell MCP for every Member.
+      # Optional ret2shell deployment defaults. The Member MCP is registered only
+      # when BASE_URL, GAME_ID and USERNAME (or TOKEN) are all set; an IPC
+      # ret2shell workflow supplies its own origin, game id and credentials.
       - IPC_R2S_BASE_URL=${IPC_R2S_BASE_URL:-}
       - IPC_R2S_GAME_ID=${IPC_R2S_GAME_ID:-}
       - IPC_R2S_USERNAME=${IPC_R2S_USERNAME:-}
@@ -71,7 +73,8 @@ services:
       ipc-task-image:
         condition: service_completed_successfully
 
-# Browser and reverse MCP servers run inside each task container.
+# Task containers run CLI tools on demand; IPC does not prestart a browser or
+# a separate reverse service.
 
 volumes:
   ipc_postgres_data:

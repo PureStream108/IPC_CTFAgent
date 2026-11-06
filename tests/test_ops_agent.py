@@ -246,6 +246,49 @@ def test_ops_workflow_proposal_is_an_explicit_tool_call(client, monkeypatch):
     assert result["proposals"][0]["status"] == "draft"
 
 
+def test_ops_gzctf_preset_tool_creates_a_native_draft(client, monkeypatch):
+    from backend.competition.conversation import ToolCall, Turn
+
+    service = _configure_openai(client)
+    adapter_class = _streaming_adapter(
+        [
+            Turn(
+                [{"role": "assistant", "tool_calls": [{"id": "gz-1"}]}],
+                [
+                    ToolCall(
+                        "gz-1",
+                        "gzctf_workflow",
+                        {
+                            "settings": {
+                                "base_url": "https://ctf.example",
+                                "game_id": 7,
+                                "name": "GZCTF fixture",
+                            }
+                        },
+                    )
+                ],
+                "",
+            ),
+            Turn(
+                [{"role": "assistant", "content": "GZCTF draft ready"}],
+                [],
+                "GZCTF draft ready",
+            ),
+        ]
+    )
+    monkeypatch.setattr("backend.ops.agent_bridge.ConversationAdapter", adapter_class)
+
+    result = service.chat(message="set up the GZCTF preset")
+
+    assert result["reply"] == "GZCTF draft ready"
+    assert len(result["proposals"]) == 1
+    proposal = result["proposals"][0]
+    assert proposal["status"] == "draft"
+    assert proposal["spec"]["template_id"] == "gzctf"
+    assert proposal["spec"]["competition_id"] == "7"
+    assert proposal["spec"]["challenges"]["list_url"] == "https://ctf.example"
+
+
 def test_ops_rejects_an_invalid_workflow_proposal_without_failing_the_turn(client, monkeypatch):
     from backend.competition.conversation import ToolCall, Turn
 

@@ -102,9 +102,11 @@ def test_each_tool_payload_builds_a_valid_member_action():
         "job_wait": {"job_id": "j1", "timeout": 1},
         "bash": {"command": "id"},
         "install": {"packages": ["jq"]},
-        "mcp_tool": {"server": "web", "tool": "fetch", "args": {"url": "http://x"}},
         "memory_search": {"query": "sqli"},
         "tool_search": {"query": "pyjail"},
+        "list_tools": {},
+        "get_tool": {"name": "nmap"},
+        "skill_read": {"name": "ctf-web"},
         "report": {"progress": "stuck", "difficulty": "high"},
         "declare_intent": {"description": "probe the admin panel"},
         "conclude": {"description": "confirmed LFI"},
@@ -134,7 +136,12 @@ def test_nested_arguments_are_still_unwrapped():
 
 
 def test_mcp_tool_keeps_its_own_args_object():
-    """``mcp_tool`` genuinely has an ``args`` field; unwrapping it would lose it."""
+    """``mcp_tool`` genuinely has an ``args`` field; unwrapping it would lose it.
+
+    The tool is no longer advertised to the provider (it is behind
+    IPC_ENABLE_MCP_TOOL), but the action mapping still has to round-trip so a
+    replayed legacy action keeps working.
+    """
     action = MemberAction.from_obj(
         action_payload("mcp_tool", {"server": "web", "tool": "fetch",
                                     "args": {"url": "http://x"}})
@@ -145,7 +152,7 @@ def test_mcp_tool_keeps_its_own_args_object():
 def test_side_effecting_tools_are_never_parallel_safe():
     for name in ("bash", "install", "mcp_tool", "job_start", "job_cancel"):
         assert is_parallel_safe(name) is False, name
-    for name in ("memory_search", "tool_search", "job_status", "job_logs"):
+    for name in ("memory_search", "tool_search", "job_status", "job_logs", "skill_read"):
         assert is_parallel_safe(name) is True, name
     for name in ("submit_flag", "conclude", "give_up"):
         assert is_terminal(name) is True, name

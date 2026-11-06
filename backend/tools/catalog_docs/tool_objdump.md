@@ -4,43 +4,43 @@
 
 ## 用途与适用场景
 
-先用 readelf/file 确认架构和段，再用 nm/objdump 定位符号与代码；除副本外不要对题目原件执行 strip。
+需要在打开 r2/gdb 之前确认架构、PIE、节表、符号和重定位，或快速反汇编指定函数时使用。
 
 ## 版本检查
 
 ```bash
-objdump --version
+objdump --version | head -1 && readelf --version | head -1 && nm --version | head -1
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`objdump`
+- 常用入口：`objdump / readelf / nm / strip`
 - 镜像路径：`/usr/bin/objdump、/usr/bin/readelf、/usr/bin/nm、/usr/bin/strip`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `objdump` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先 `readelf -hW`、`-lW`、`-SW` 看架构和段；`nm -an` 找符号；`objdump -d -M intel` 反汇编。strip 只对副本执行。
 
 ## 可执行示例
 
 ```bash
-readelf -hW challenge && nm -an challenge | head && objdump -d -M intel challenge | head -80
+readelf -hW /tmp/challenge && nm -an /tmp/challenge | head -40 && objdump -d -M intel --disassemble=main /tmp/challenge | head -80
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+确认 ELF 类型、入口、PIE、NX、动态依赖、符号地址和重定位；反汇编重点看比较、跳转和调用参数。
 
 ## 常见错误与限制
 
-版本和参数可能随镜像升级变化，执行前先查看 `--help`。
+strip 后符号缺失，需要用入口/字符串/xrefs 定位；objdump 不恢复高级语义，复杂逻辑配合 r2 和 gdb。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [elfutils](/memory/catalog/tool_elfutils/document)
+- [radare2](/memory/catalog/tool_radare2/document)
+- [checksec](/memory/catalog/tool_checksec/document)
 
 ## 官方参考
 
-- [https://sourceware.org/binutils/docs/](https://sourceware.org/binutils/docs/)
+- [https://sourceware.org/binutils/docs/binutils/](https://sourceware.org/binutils/docs/binutils/)

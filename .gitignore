@@ -12,7 +12,7 @@ data/
 /memory/
 projects/
 Wp/
-docs/
+
 exports/
 examples/
 log.txt
@@ -69,7 +69,9 @@ coverage.json
 *.py.cover
 .hypothesis/
 .pytest_cache/
-.pytest-tmp-*/
+.pytest-tmp-*/pytest-of-*/
+.dsh-vision-router/
+
 .tmp-pytest/
 .tmp-pytest-*/
 cover/
@@ -244,3 +246,9 @@ __marimo__/
 # Local evaluation artifacts and credentials
 .qa-artifacts/
 testconfigkey.txt
+
+# Local smoke, review and browser-test artifacts
+/work/
+/.codex-smoke/
+/playwright-report/
+/test-results/

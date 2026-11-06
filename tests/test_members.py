@@ -9,7 +9,6 @@ from backend.blackboard.db import Database
 from backend.core.config import LLMConfig, MemberConfig
 from backend.core.logging_util import IPCLogger
 from backend.mcp.mcp_client import MCPClient, MCPRegistry, MCPRegistrySession
-from backend.mcp.shared import build_browser_mcp
 from backend.members.adapters import MemberAction, _extract_json, make_adapter
 from backend.members.base_member import MemberDeps
 from backend.members.factory import create_member
@@ -58,7 +57,6 @@ def deps(tmp_path, request, monkeypatch):
     reg = ToolRegistry().load()
     mcps = MCPRegistry()
     mcps.register(build_memory_mcp(mem))
-    mcps.register(build_browser_mcp())
     sb = LocalSandbox("test", tmp_path / "ws")
     sb.start()
     reports = []
@@ -377,7 +375,7 @@ def test_scripted_member_tool_and_done(deps):
     db, d, _reports, _flags = deps
     pid, iid = _project(db)
     script = [
-        {"action": "tool", "server": "browser", "tool": "navigate", "args": {"url": "http://t"}},
+        {"action": "tool", "server": "tools", "tool": "get_tool", "args": {"name": "playwright-cli"}},
         {"action": "memory", "query": "web ssti"},
         {"action": "done", "reason": "stop"},
     ]
@@ -385,7 +383,7 @@ def test_scripted_member_tool_and_done(deps):
     member = create_member(cfg, d, script=script)
     result = member.solve(pid, iid, "web", is_initial=False)
     assert result.status == "done"
-    assert any("mcp:browser.navigate" in o for o in member.observations)
+    assert any("mcp:tools.get_tool" in o and "playwright-cli" in o for o in member.observations)
 
 
 def test_member_observes_shared_webui_proxy(tmp_path):
@@ -404,7 +402,6 @@ def test_member_observes_shared_webui_proxy(tmp_path):
     reg = ToolRegistry().load()
     mcps = MCPRegistry()
     mcps.register(build_memory_mcp(mem))
-    mcps.register(build_browser_mcp())
     sb = WebUISandbox("test", tmp_path / "ws")
     sb.start()
     deps = MemberDeps(
@@ -417,7 +414,7 @@ def test_member_observes_shared_webui_proxy(tmp_path):
     )
     pid, iid = _project(db)
     script = [
-        {"action": "bash", "command": "typhonbreaker webui --port 7860"},
+        {"action": "bash", "command": "python3 -m http.server 7860"},
         {"action": "done", "reason": "stop"},
     ]
     member = create_member(MemberConfig(name="jade", api_format="mock"), deps, script=script)
@@ -425,7 +422,7 @@ def test_member_observes_shared_webui_proxy(tmp_path):
     result = member.solve(pid, iid, "web", is_initial=False)
 
     assert result.status == "done"
-    assert any("Shared browser URL: http://127.0.0.1:41001/" in o for o in member.observations)
+    assert any("URL: http://127.0.0.1:41001/" in o and "playwright-cli" in o for o in member.observations)
 
 
 def test_member_stalls_after_repeated_invalid_bash(deps):
@@ -596,18 +593,18 @@ def test_scripted_member_category_tools_mcp(deps):
     with db.connect() as conn:
         graph_store.create_hint(conn, pid, "check /flag before deeper recon", "human")
     context = member._build_context(pid, iid, "web", 1, False, False)
-    assert "browser" in context["public_mcps"]
+    assert context["public_mcps"] == []
     assert "zap" not in context["public_mcps"]
     assert "zap" not in {tool["name"] for tool in context["exposed_tools"]}
     assert "python" in context["available_languages"]
     assert context["hints"][0]["content"] == "check /flag before deeper recon"
     assert "member_tool_inventory" in context
     assert "rg/ripgrep" in context["member_tool_inventory"]
-    assert "TyphonBreaker" in context["member_tool_inventory"]
-    assert "from Typhon import bypassREAD, bypassRCE" in context["member_tool_inventory"]
-    assert "TyphonBreaker" in (d.sandbox.read_file("tools.txt") or "")
-    assert "from Typhon import bypassREAD, bypassRCE" in (d.sandbox.read_file("tools.txt") or "")
-    assert "Runtime tool availability" in (d.sandbox.read_file("tools.txt") or "")
+    assert "playwright-cli" in context["member_tool_inventory"]
+    seeded_inventory = d.sandbox.read_file("tools.txt") or ""
+    assert "playwright-cli" in seeded_inventory
+    assert "TyphonBreaker" not in seeded_inventory
+    assert "Runtime tool availability" in seeded_inventory
     assert context["member_tool_inventory_source"]["workspace_path"] == "tools.txt"
     assert context["member_tool_inventory_source"]["docker_path"] == "/tools.txt"
     assert "runtime_cli_tools" in context
@@ -659,7 +656,13 @@ def test_member_context_includes_challenge_description_and_external_id(deps):
     assert context["challenge_description"] == origin
     assert "nc 10.0.0.1 9999" in context["challenge_description"]
     note = next((n for n in context["runtime_notes"] if "challenge_description" in n), "")
-    assert "ret2shell" in note and "external_id" in note
+    assert "external_id" in note
+    assert "ret2shell" not in note
+
+    d.mcps.register_target("ret2shell", d.mcps.get("memory"))
+    context = member._build_context(pid, intent.id, "pwn", 1, False, False)
+    note = next((n for n in context["runtime_notes"] if "challenge_description" in n), "")
+    assert "ret2shell MCP" in note
 
 
 def test_member_context_defaults_without_external_id(deps):
@@ -933,3 +936,92 @@ def test_persist_progress_skips_quietly_when_container_is_gone(deps):
     entries = d.logger.read_log("project", "proj_x", None)
     assert any(e["event"] == "member_progress_save_skipped" for e in entries)
     assert not any(e["event"] == "member_progress_save_failed" for e in entries)
+
+
+def test_tool_results_distinguish_timeout_missing_truncation_and_success(deps, tmp_path):
+    """S4: the model must be able to tell *why* a command did not do what it asked.
+
+    A refused command, a timeout, a missing binary and a truncated output each
+    call for a different next step, so they cannot all arrive as the same
+    human-readable blob. A clean command must stay byte-identical to before -
+    the structured line is only appended when there is something to act on.
+    """
+
+    class CodingSandbox(LocalSandbox):
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            if command.startswith("sleep"):
+                return ExecResult(124, "", "timeout: sending signal TERM\n", True)
+            if command.startswith("no-such-binary"):
+                return ExecResult(
+                    127, "", "bash: line 1: no-such-binary: command not found\n", False,
+                )
+            if command.startswith("big-output"):
+                return ExecResult(
+                    0, "head...[output truncated]...tail", "", False,
+                    {"stdout": {
+                        "path": "/workspace/shared/.ipc-output/abc.stdout",
+                        "bytes": 999_999,
+                        "sha256": "0" * 64,
+                    }},
+                    0.1,
+                )
+            return ExecResult(0, "ok\n", "", False)
+
+    db, d, _reports, _flags = deps
+    sandbox = CodingSandbox("codes", tmp_path / "codes")
+    sandbox.start()
+    d.sandbox = sandbox
+    d.max_actions_per_task = 8
+    pid, iid = _project(db)
+    script = [
+        {"action": "bash", "command": "sleep 5"},
+        {"action": "bash", "command": "no-such-binary --help"},
+        {"action": "bash", "command": "big-output"},
+        {"action": "bash", "command": "echo ok"},
+        {"action": "conclude", "description": "done"},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    member.solve(pid, iid, "web", is_initial=False)
+
+    joined = "\n".join(member.observations)
+    assert '"error_code": "TIMEOUT"' in joined
+    assert '"timed_out": true' in joined
+    assert '"error_code": "NOT_FOUND"' in joined
+    assert '"truncated": true' in joined
+    assert "artifact_read /workspace/shared/.ipc-output/abc.stdout" in joined
+    clean = [item for item in member.observations if item.startswith("$ echo ok")]
+    assert clean, "the successful command produced no observation"
+    assert "[tool_result]" not in clean[0]
+
+
+def test_a_refused_command_reports_denied_policy_without_running(deps, tmp_path):
+    """S4: a policy refusal is its own error class, not a failed command."""
+
+    class NoRunSandbox(LocalSandbox):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.commands: list[str] = []
+
+        def exec(self, command: str, timeout: int = 60) -> ExecResult:
+            self.commands.append(command)
+            return super().exec(command, timeout=timeout)
+
+    db, d, _reports, _flags = deps
+    sandbox = NoRunSandbox("denied", tmp_path / "denied")
+    sandbox.start()
+    d.sandbox = sandbox
+    pid, iid = _project(db)
+    forbidden = "cat D:/Desktop/IPC_CTFAgent/data/artifacts/writeups/flag.md"
+    script = [
+        {"action": "bash", "command": forbidden},
+        {"action": "conclude", "description": "refused"},
+    ]
+    member = create_member(MemberConfig(name="jade", api_format="mock"), d, script=script)
+
+    member.solve(pid, iid, "web", is_initial=False)
+
+    assert forbidden not in sandbox.commands
+    joined = "\n".join(member.observations)
+    assert '"error_code": "DENIED_POLICY"' in joined
+    assert "no command was executed" in joined

@@ -1,32 +1,68 @@
 category: reverse
 tools:
-  - name: ghidra
-    description: PyGhidra decompiler in the task container (reverse MCP decompile/decompile_all).
-    path: task-container
-    exec: mcp:reverse
-    tags: [decompile, disassemble, reverse]
-    when_to_use: Decompile binaries, analyze functions, rename/annotate.
   - name: radare2
-    description: Radare2 escape hatch exposed by the reverse MCP r2_cmd tool.
-    path: task-container
-    exec: mcp:reverse
-    tags: [disassemble, reverse, patch]
-    when_to_use: Quick disassembly, patching, scripting analysis.
+    description: Radare2 CLI for disassembly, function discovery, strings, cross-references, and binary patching.
+    path: system
+    exec: r2
+    tags: [disassemble, reverse, patch, radare2]
+    when_to_use: Quick static analysis with r2 -q -c "aaa; afl; pdf @ main" or scripted JSON output via r2pipe.
+  - name: gdb
+    description: GNU debugger for breakpoints, registers, memory, backtraces, and core files.
+    path: system
+    exec: gdb
+    tags: [debug, reverse, dynamic-analysis]
+    when_to_use: Confirm runtime control flow, inspect arguments/registers, or analyze a crash and core dump.
+  - name: gdbserver
+    description: Remote debugging stub for attaching gdb to a process inside the task container.
+    path: system
+    exec: gdbserver
+    tags: [debug, remote, gdb, reverse]
+    when_to_use: Launch a target under gdbserver and connect with gdb when direct terminal debugging is awkward.
   - name: objdump
-    description: Disassembler from binutils.
+    description: Binutils objdump, readelf, nm, and strip for ELF headers, symbols, relocations, and disassembly.
     path: system
     exec: objdump
-    tags: [disassemble, elf, reverse]
-    when_to_use: Static disassembly, section/symbol dumps.
+    tags: [binutils, objdump, readelf, nm, elf, reverse]
+    when_to_use: Static section/symbol triage before opening r2 or gdb.
+  - name: elfutils
+    description: eu-readelf, eu-objdump, eu-nm, and eu-stack from elfutils.
+    path: system
+    exec: eu-readelf
+    tags: [elf, elfutils, readelf, reverse]
+    when_to_use: Inspect malformed or stripped ELF files when binutils is too permissive, or cross-check section and DWARF data.
+  - name: strace
+    description: Trace system calls and signals made by a process.
+    path: system
+    exec: strace
+    tags: [syscall, dynamic-analysis, reverse, linux]
+    when_to_use: Observe file, network, process, and ptrace behavior when source is unavailable.
+  - name: file
+    description: Identify file types, architectures, and container formats.
+    path: system
+    exec: file
+    tags: [triage, file, reverse]
+    when_to_use: First command on an unknown attachment before choosing an analysis tool.
+  - name: strings
+    description: Extract printable strings from binaries and blobs with GNU strings.
+    path: system
+    exec: strings
+    tags: [strings, recon, reverse]
+    when_to_use: Quick look for flags, paths, format strings, and hardcoded data.
+  - name: xxd
+    description: Hex dump and reverse hex conversion for binary inspection.
+    path: system
+    exec: xxd
+    tags: [hex, binary, reverse]
+    when_to_use: Inspect magic bytes, patch small regions, or convert hex dumps back to bytes.
+  - name: upx
+    description: UPX 4.2.4 packer and unpacker for compressed executables.
+    path: system
+    exec: upx
+    tags: [packer, unpack, upx, reverse]
+    when_to_use: Detect and unpack UPX-packed binaries before static analysis; use "upx -d" on a copy.
   - name: angr
-    description: Binary analysis / symbolic execution framework.
+    description: Binary analysis and symbolic execution framework.
     path: system
     exec: python
     tags: [symbolic-execution, angr, reverse]
     when_to_use: Solve for inputs (license checks, branch constraints).
-  - name: strings
-    description: Extract Ghidra-defined strings with addresses through reverse MCP.
-    path: task-container
-    exec: mcp:reverse
-    tags: [recon, reverse]
-    when_to_use: Quick look for flags, hints, hardcoded data.

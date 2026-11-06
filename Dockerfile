@@ -27,8 +27,9 @@ COPY scripts /app/scripts
 
 RUN pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -e ".[docker]"
 
-# Pin skills at build time. Normal startup only reads/copies this package.
-RUN python -c "from pathlib import Path; from backend.skills.store import SkillStore, DEFAULT_REPOSITORY, DEFAULT_REVISION; SkillStore(Path('/opt/ipc-skills')).install(DEFAULT_REPOSITORY, DEFAULT_REVISION)"
+# Skills are not preinstalled: the store starts empty and an operator uploads or
+# installs a package through the Skills API. Startup therefore never needs the
+# network and a run never inherits techniques it did not ask for.
 
 # wsrx (WebSocket Reflector X CLI from XDSEC, static musl build) tunnels the
 # ret2shell platform's ws://-proxied challenge ports to local TCP ports so

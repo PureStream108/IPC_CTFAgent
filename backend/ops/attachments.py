@@ -10,6 +10,27 @@ UPLOAD_ID_RE = re.compile(r"^upload_[a-f0-9]{24}$")
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_CONTEXT_BYTES = 120_000
 _NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+_TEXTUAL_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/x-yaml",
+    "application/yaml",
+    "application/x-sh",
+}
+_BINARY_HINTS = (
+    "zip", "octet-stream", "pdf", "gzip", "image", "audio", "video",
+    "x-tar", "x-7z", "x-rar", "x-bzip2", "x-xz", "x-executable", "x-sharedlib",
+)
+
+
+def _is_binary(metadata: dict) -> bool:
+    """Treat a non-textual content type as binary even when it decodes cleanly."""
+
+    content_type = str(metadata.get("content_type") or "").lower()
+    if content_type.startswith("text/") or content_type in _TEXTUAL_TYPES:
+        return False
+    return any(hint in content_type for hint in _BINARY_HINTS)
 
 
 class OpsAttachmentStore:
@@ -90,15 +111,23 @@ class OpsAttachmentStore:
             path = Path(str(metadata["path"])).resolve()
             if self.root.resolve() not in path.parents or not path.is_file():
                 raise KeyError(upload_id)
-            header = f"\n\nATTACHED PLATFORM DOCUMENT: {metadata['filename']} ({metadata['size']} bytes)\n"
+            header = (
+                f"\n\nATTACHED DOCUMENT: {metadata['filename']} "
+                f"({metadata['size']} bytes, upload id {upload_id})\n"
+            )
             if remaining <= len(header):
                 break
-            try:
-                raw = path.read_bytes()[:remaining - len(header)]
-                text = raw.decode("utf-8")
-            except (UnicodeDecodeError, OSError):
+            text = ""
+            if not _is_binary(metadata):
+                try:
+                    text = path.read_bytes()[: remaining - len(header)].decode("utf-8")
+                except (UnicodeDecodeError, OSError):
+                    text = ""
+            if not text:
                 text = (
-                    f"[binary document stored at {path}; use IPC tools to inspect it]"
+                    "[binary document; the app stores it outside every task container. "
+                    f'Publish it with publish_upload(upload_id="{upload_id}", project_id="<project>") '
+                    "and read /workspace/attachments/<filename> inside that sandbox.]"
                 )
             chunks.append(header + text)
             remaining -= len(chunks[-1])

@@ -16,6 +16,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install lint dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,docker]"
+
+      - name: Run lint and deployment checks
+        run: |
+          python -m ruff check backend scripts tests
+          python -m compileall -q backend scripts tests
+          python -m alembic upgrade head --sql > /tmp/ipc-migration.sql
+          docker compose config --quiet
+          docker compose -f docker-compose.e2e.yml config --quiet
+          node tests/js/ops_chat_checks.mjs .
+          node tests/js/pentest_checks.mjs .
+          node tests/js/wp_viewer_checks.mjs .
+          python scripts/check_workflow_package.py
+          python scripts/check_toolchain_sync.py
+          python scripts/generate_catalog_docs.py --check
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -36,7 +73,6 @@ jobs:
     env:
       IPC_TEST_DATABASE_URL: postgresql://ipc:ipc@127.0.0.1:5432/ipc_test
       IPC_DATABASE_URL: postgresql://ipc:ipc@127.0.0.1:5432/ipc_test
-
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -50,34 +86,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,docker,browser]"
+          python -m pip install -e ".[dev,docker]"
 
-      - name: Set up Node for frontend behavior tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Install explicit integration dependencies
+      - name: Install native PostgreSQL tools
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql
 
-      - name: Resolve Playwright cache version
-        id: playwright
-        run: python -c "import importlib.metadata; print('version='+importlib.metadata.version('playwright'))" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
-
-      - name: Install Playwright browser and system dependencies
-        run: |
-          python -m playwright install --with-deps chromium
-
       - name: Run tests with branch coverage
-        run: python -m pytest -q --require-postgres --require-browser --cov=backend --cov-branch --cov-report=term-missing --cov-report=json --junitxml=data/exports/pytest-ci.xml
+        run: python -m pytest -q --require-postgres --cov=backend --cov-branch --cov-report=term-missing --cov-report=json --junitxml=data/exports/pytest-ci.xml
 
       - name: Enforce architectural coverage floors
         run: python scripts/check_coverage.py
@@ -88,16 +105,6 @@ jobs:
           test -x "$native_postgres_ctl"
           env -u IPC_TEST_DATABASE_URL -u IPC_DATABASE_URL IPC_TEST_POSTGRES_EXECUTABLE="$native_postgres_ctl" \
             python -m pytest -q --require-postgres tests/test_postgres_isolation.py tests/test_goal_intent_postgres.py tests/test_ops_stream.py tests/test_competition_monitor.py tests/test_competition_migration_smoke.py
-
-      - name: Full lint and deployment checks
-        run: |
-          python -m ruff check backend scripts tests
-          python -m compileall -q backend scripts tests
-          python -m alembic upgrade head --sql > /tmp/ipc-migration.sql
-          docker compose config --quiet
-          docker compose -f docker-compose.e2e.yml config --quiet
-          node tests/js/ops_chat_checks.mjs .
-          node tests/js/pentest_checks.mjs .
 
       - name: Upload test and coverage diagnostics
         if: always()
@@ -130,6 +137,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -140,21 +153,26 @@ jobs:
           file: docker/member/Dockerfile
           tags: ipc-task:ci
           load: true
+          build-args: |
+            GITHUB_MIRROR=https://github.com
           cache-from: type=gha,scope=task-image
           cache-to: type=gha,scope=task-image,mode=max
 
-      - name: Run CTF tool acceptance
-        run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci bash /acceptance/c5_task_acceptance.sh
-
-      - name: Verify Playwright-only browser policy
+      - name: Install test dependencies
         run: |
-          docker run --rm ipc-task:ci bash -ceu '
-            for browser in google-chrome google-chrome-stable chromium chromium-browser chrome; do
-              ! command -v "$browser"
-            done
-            test ! -d /ms-playwright
-            python3 -m pip show playwright >/dev/null
-          '
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,docker]"
+
+      - name: Run task-image acceptance
+        run: docker run --rm --network none -v "$PWD/scripts:/acceptance:ro" ipc-task:ci bash /acceptance/task_image_acceptance.sh
+
+      - name: Run task-image CLI E2E
+        run: docker run --rm --network none -v "$PWD/scripts:/acceptance:ro" ipc-task:ci bash /acceptance/task_image_e2e.sh
+
+      - name: Run Docker integration test
+        env:
+          IPC_TEST_TASK_IMAGE: ipc-task:ci
+        run: python -m pytest -q tests/test_task_image_e2e.py --require-docker
 
       - name: Run AI CPU smoke
         run: docker run --rm -v "$PWD/scripts:/acceptance:ro" ipc-task:ci python3 /acceptance/ai_smoke.py
@@ -173,7 +191,7 @@ jobs:
           docker compose build ipc-app
           docker compose -f docker-compose.e2e.yml up -d e2e-postgres e2e-platform e2e-app
 
-      - name: Run Playwright competition acceptance
+      - name: Run Playwright competition and WP acceptance
         run: docker compose -f docker-compose.e2e.yml run --rm e2e-runner
 
       - name: Collect E2E stack logs
@@ -185,8 +203,6 @@ jobs:
           docker compose -f docker-compose.e2e.yml logs --no-color > data/exports/e2e/compose.log
 
       - name: Upload E2E diagnostics
-        # All validation jobs must be required by the repository's branch rules;
-        # declaring a job here alone does not configure branch protection.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -199,7 +215,7 @@ jobs:
 
   required-checks:
     if: always()
-    needs: [test, package-smoke, task-image, e2e]
+    needs: [lint, test, package-smoke, task-image, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Require every validation job to succeed

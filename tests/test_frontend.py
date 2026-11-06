@@ -28,7 +28,8 @@ def test_index_served(client):
     assert r.status_code == 200
     body = r.text
     assert "ipcApp" in body
-    assert "CTF_Agent" in body
+    assert "CTF_Agent" not in body
+    assert ">IPC Agent<" in body
     assert "BROADCAST" in body
     assert "Logs" in body
     assert "WP" in body
@@ -59,6 +60,22 @@ def test_index_served(client):
     assert "DOMPurify.sanitize" in body
     assert "marked.min.js" in body
     assert "purify.min.js" in body
+    for token in (
+        "wpViewMode", "setWPView", "wpLiveStatus", "new EventSource",
+        "closeProjectWP", "applyProjectWPUpdate", "wpDisplayHTML",
+    ):
+        assert token in body
+    project_wp = body.split('x-show="showWP"', 1)[1].split('x-show="pentestDetailOpen"', 1)[0]
+    assert 'x-show="wpSource===\'project\'"' in project_wp
+    assert 'aria-label="Writeup 显示模式"' in project_wp
+    assert 'x-html="wpDisplayHTML()"' in project_wp
+    assert 'x-text="wpText"' in project_wp
+    assert 'wpSource===\'project\' ? closeProjectWP() : showWP=false' in project_wp
+    global_wp = body.split('x-show="showGlobalWP"', 1)[1].split('x-show="showWP"', 1)[0]
+    assert "wpViewMode" not in global_wp
+    assert "wpLiveStatus" not in global_wp
+    pentest_js = (REPO_ROOT / "frontend/pentest.js").read_text(encoding="utf-8")
+    assert 'this.wpSource = "pentest"' in pentest_js
     assert "opsNextCalls" in body
     assert "drainOpsNextCalls" in body
     assert "await this.interruptOpsRun();\r\n          return;" not in body
@@ -99,8 +116,21 @@ def test_index_served(client):
     assert "flex flex-col gap-1.5 pb-2 mb-2" in body
     assert "this.opsWorkflowId===workflowId ? null : workflowId" in body
     assert "built-in GZCTF workflow setup" in body
-    assert "New GZCTF" in body
+    assert "New GZCTF" not in body
+    assert "GZCTF via IPC" not in body
+    assert "startPresetWithIpc" in body
+    assert "loadWorkflowPresets" in body
+    assert "Platform presets" in body
+    assert "配置 GZCTF 预设" in body
+    assert "secret_name=gzctf_token" not in body
     assert "Search loaded logs" in body
+    # The log catalog is metadata-only; entry bodies load per selection.
+    assert 'include_entries:"false"' in body
+    assert "loadGlobalLogCatalog" in body
+    assert "loadSelectedLogEntries" in body
+    assert "selectLogKind" in body
+    assert "logCompetitionFilterId" in body
+    assert "/logs/projects?limit=500" not in body
     assert "workflow_id:this.opsWorkflowId" in body
     assert "skillSearchResults" in body
     assert "installSkillSpec" in body
@@ -115,7 +145,17 @@ def test_index_served(client):
     assert "openOpsAgent" in body
     assert '"/api/ops/chat"' in body
     assert "confirmOpsWorkflow" in body
-    assert "submitFoundFlags" in body
+    # CTF execution is run-owned: the bypass buttons are gone and the run view
+    # is the control surface instead.
+    assert "submitFoundFlags" not in body
+    assert "Import all" not in body
+    assert "Submit all found flags" not in body
+    assert "openRuns()" in body
+    assert "/api/runs" in body
+    assert "runControl(action)" in body
+    assert "current.ownership.ownership==='competition'" in body
+    assert "'run ' + (current.ownership.run_id||'').slice(0,8)" in body
+    assert "activeRun()" in body
     assert "addMember" not in body
     assert "API surface" in body
     assert "chat_completions" in body
@@ -129,7 +169,14 @@ def test_index_served(client):
     assert "打开 Markdown" in body
     assert "Add Hint" in body
     assert "cytoscape-dagre.js" in body
-    assert "name:'dagre'" in body
+    assert 'name:"dagre"' in body
+    assert 'data-testid="ctf-motion"' in body
+    assert 'data-testid="ctf-toolbar"' in body
+    assert "decorateCtfEdges" in body
+    assert "unbundled-bezier" in body
+    assert "rememberCtfNodePosition" in body
+    assert "restoreCtfManualPositions" in body
+    assert "autoungrabify:false" in body
     assert 'id:"origin_ipc",source:"fact:origin",target:"ipc"' in body
     assert "for(const a of d.agents)" in body
     assert "memberForIntent(intent)" in body
@@ -146,20 +193,27 @@ def test_index_served(client):
     assert "source,target,etype:kind" in body
     assert 'etype:"producer"' not in body
     assert 'etype:kind' in body
-    assert 'taxi-direction' not in body
-    assert '"/api/agent/sessions?kind=competition"' in body
-    assert '"/api/agent/events?kind=competition"' in body
-    assert "memberHealthDot(item)" in body
-    assert "memberActivity(item)" in body
-    assert "loadSessionHealth" in body
-    assert "connectSessionEvents" in body
-    assert "mergedEvents()" in body
-    assert "eventSourceFilter" in body
-    assert "health.running_jobs>0" in body
-    assert "formatQuietSeconds" in body
+    assert '"taxi-direction":"vertical"' in body
+    assert '"control-point-distances":"data(curveDistances)"' in body
+    # The standalone Competition console is gone; its per-contest view is a
+    # project filter in the sidebar instead.
+    assert 'x-show="showCompetition"' not in body
+    assert "openCompetition()" not in body
+    assert "loadCompetitionRuns" not in body
+    assert "memberHealthDot(item)" not in body
+    assert "mergedEvents()" not in body
+    assert "formatQuietSeconds" not in body
+    assert "/projects/competitions" in body
+    assert "competitionFilterId" in body
+    assert "competitionFilterOpen=!competitionFilterOpen" in body
+    assert "loadCompetitions" in body
+    assert "competitionProjects()" in body
     assert body.count("formatDuration(ms)") == 1
-    for kind in ("assignment.stalled", "session.handed_off", "session.diagnose"):
-        assert kind in body
+    # WP is a hot switch on the WP pages, mirroring the Logs "Enabled" toggle.
+    assert "wpEnabled" in body
+    assert "toggleWP()" in body
+    assert '"/wp/status"' in body
+    assert "热开关" in body
     for cat in ("pwn", "reverse", "crypto", "web", "misc", "ai", "osint"):
         assert cat in body
     assert "ATTACHMENT" in body
@@ -190,3 +244,29 @@ def test_ops_chat_helpers_behave():
     )
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip().endswith("ok")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_wp_viewer_helpers_behave():
+    result = subprocess.run(
+        ["node", str(REPO_ROOT / "tests/js/wp_viewer_checks.mjs"), str(REPO_ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip().endswith("ok")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_ctf_graph_helpers_behave():
+    result = subprocess.run(
+        ["node", str(REPO_ROOT / "tests/js/ctf_graph_checks.mjs"), str(REPO_ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout.strip().endswith("ctf graph checks passed")

@@ -83,7 +83,7 @@ class SecretHeader(BaseModel):
 class ChallengeMappingSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["http_json", "ret2shell", "gzctf", "tsecbench"] = "http_json"
+    platform: str = "http_json"
     game_id: int | None = None
     list_url: str = ""
     list_path: str = "data"
@@ -104,9 +104,20 @@ class ChallengeMappingSpec(BaseModel):
     max_pages: int = Field(default=100, ge=1, le=1000)
     max_challenges: int = Field(default=0, ge=0, le=1000)
     allow_hints: bool = False
+    attachments_only: bool = False
+    exclude: list[str] = Field(default_factory=list)
     category_map: dict[str, str] = Field(default_factory=dict)
     attachment_base_url: str = ""
     headers: list[SecretHeader] = Field(default_factory=list)
+
+    @field_validator("platform")
+    @classmethod
+    def validate_platform(cls, value: str) -> str:
+        from backend.platform.presets import is_known_platform
+
+        if not is_known_platform(value):
+            raise ValueError(f"unsupported platform: {value}")
+        return value
 
     @field_validator("list_url")
     @classmethod
@@ -117,10 +128,10 @@ class ChallengeMappingSpec(BaseModel):
     def require_list_url_for_http_json(self) -> ChallengeMappingSpec:
         if self.platform == "http_json" and not self.list_url.strip():
             raise ValueError("list_url is required for the http_json platform")
-        if self.platform == "gzctf" and self.game_id is None:
-            raise ValueError("game_id is required for the gzctf platform")
-        if self.platform == "tsecbench" and not self.list_url.strip():
-            raise ValueError("list_url is required for the tsecbench platform")
+        # Native platform identity rules live with the platform package.
+        from backend.platform.presets import validate_platform_mapping
+
+        validate_platform_mapping(self)
         return self
 
     @field_validator("attachment_base_url")
@@ -149,6 +160,22 @@ class ChallengeMappingSpec(BaseModel):
         if len(value) > 256:
             raise ValueError("JSON paths are limited to 256 characters")
         return value
+
+    @field_validator("exclude")
+    @classmethod
+    def validate_exclude(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for value in values:
+            entry = str(value or "").strip()
+            if not entry:
+                continue
+            if len(entry) > 256:
+                raise ValueError("excluded challenge names must be at most 256 characters")
+            if entry not in cleaned:
+                cleaned.append(entry)
+        if len(cleaned) > 100:
+            raise ValueError("at most 100 challenges can be excluded")
+        return cleaned
 
     @model_validator(mode="after")
     def unique_headers(self) -> ChallengeMappingSpec:
@@ -181,6 +208,8 @@ class ChallengeMappingSpec(BaseModel):
             max_challenges=self.max_challenges,
             category_map=self.category_map,
             allow_hints=self.allow_hints,
+            attachments_only=self.attachments_only,
+            exclude=self.exclude,
             headers=headers,
             attachment_base_url=self.attachment_base_url,
         )
@@ -247,17 +276,28 @@ class PlatformWorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120)
-    template_id: Literal["", "gzctf", "tsecbench"] = ""
+    template_id: str = ""
     template_version: int = Field(default=1, ge=1, le=1)
     competition_id: str = Field(default="", max_length=256)
     team_id: str = Field(default="", max_length=256)
     ends_at: str = ""
+    duration_minutes: int = Field(default=0, ge=0, le=1440)
     remote_concurrency: int = Field(default=0, ge=0, le=100)
     remote_instance_limit: int = Field(default=0, ge=0, le=100)
     challenges: ChallengeMappingSpec
     submit: FlagSubmitSpec | None = None
     allow_private_networks: bool = False
     max_attachment_bytes: int = Field(default=100 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024)
+
+    @field_validator("template_id")
+    @classmethod
+    def validate_template_id(cls, value: str) -> str:
+        if value:
+            from backend.platform.presets import is_preset_template
+
+            if not is_preset_template(value):
+                raise ValueError(f"unknown workflow template: {value}")
+        return value
 
     @field_validator("name")
     @classmethod
@@ -298,18 +338,10 @@ class PlatformWorkflowSpec(BaseModel):
         variables may already provide them.
         """
 
+        from backend.platform.presets import allowed_secret_names
+
         names = self.required_secret_names()
-        if self.challenges.platform == "gzctf":
-            names.update(
-                {
-                    "gzctf_token",
-                    "gzctf_username",
-                    "gzctf_password",
-                    "platform_token",
-                }
-            )
-        if self.challenges.platform == "tsecbench":
-            names.update({"benchmark_token", "platform_token"})
+        names.update(allowed_secret_names(self.challenges.platform))
         return names
 
 

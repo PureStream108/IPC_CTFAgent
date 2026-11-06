@@ -30,6 +30,8 @@ POSTGRES_TEST_MODULES = {
     "test_orchestration.py",
     "test_platform.py",
     "test_platform_verdict.py",
+    "test_ui_state.py",
+    "test_wp_live.py",
     "test_wp_writer.py",
 }
 
@@ -91,26 +93,24 @@ def allow_local_sandbox(monkeypatch):
     monkeypatch.delenv("IPC_ARTIFACT_ROOT", raising=False)
 
 
+def _docker_available() -> bool:
+    executable = shutil.which("docker")
+    if executable is None:
+        return False
+    try:
+        result = subprocess.run(
+            [executable, "info"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def pytest_addoption(parser):
     parser.addoption("--require-postgres", action="store_true", default=False,
                      help="fail collection instead of skipping unavailable PostgreSQL integration tests")
-    parser.addoption("--require-browser", action="store_true", default=False,
-                     help="require Playwright integration tests to execute without environment skips")
-
-
-def pytest_configure(config):
-    if config.getoption("--require-browser") and importlib.util.find_spec("playwright") is None:
-        raise pytest.UsageError("browser integration requires pip install -e '.[browser]' and playwright install chromium")
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    outcome = yield
-    report = outcome.get_result()
-    if (item.config.getoption("--require-browser") and item.get_closest_marker("browser")
-            and report.skipped):
-        report.outcome = "failed"
-        report.longrepr = "required browser integration was skipped: " + str(report.longrepr)
+    parser.addoption("--require-docker", action="store_true", default=False,
+                     help="run Docker integration tests and require a working Docker engine")
 
 
 def pytest_collection_modifyitems(config, items) -> None:
@@ -118,7 +118,15 @@ def pytest_collection_modifyitems(config, items) -> None:
         reason="install native PostgreSQL or set IPC_TEST_DATABASE_URL"
     )
     has_database = bool(os.environ.get("IPC_TEST_DATABASE_URL", "").strip()) or NATIVE_PG_CTL is not None
+    has_docker = config.getoption("--require-docker") and _docker_available()
+    docker_opt_in = pytest.mark.skip(reason="pass --require-docker to run Docker integration tests")
     for item in items:
+        if item.get_closest_marker("docker"):
+            if not config.getoption("--require-docker"):
+                item.add_marker(docker_opt_in)
+            elif not has_docker:
+                raise pytest.UsageError("Docker integration is required: start the Docker engine")
+            continue
         if (
             Path(str(item.fspath)).name not in POSTGRES_TEST_MODULES
             and item.get_closest_marker("postgres") is None

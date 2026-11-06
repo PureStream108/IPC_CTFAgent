@@ -1,46 +1,45 @@
-# Requests / Flask / PyJWT / Jinja2
+# Requests / Flask / PyJWT / jwcrypto / Jinja2
 
-用于 HTTP 请求、本地 Web 复现、JWT 分析和模板注入研究。
+用于 HTTP 请求、本地 Web 复现、JWT/JWS/JWE 分析和模板注入研究。
 
 ## 用途与适用场景
 
-先确认输入与目标，再使用 Requests / Flask / PyJWT / Jinja2 完成针对性分析。
+需要脚本化请求、搭建本地 Flask 复现环境、解析或伪造 JWT、验证 JWK/JWE，或测试 Jinja2 模板行为时使用。
 
 ## 版本检查
 
 ```bash
-python3 -c "import requests,flask,jwt,jinja2" --version
+python3 -c "import requests,flask,jwt,jwcrypto,jinja2; print(requests.__version__, flask.__version__, jwt.__version__)"
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`python3 -c "import requests,flask,jwt,jinja2"`
-- 镜像路径：`Python site-packages`
+- 常用入口：`python3`
+- 镜像路径：`Python site-packages（requests、flask、PyJWT、jwcrypto、jinja2）`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `python3 -c "import requests,flask,jwt,jinja2"` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先用 requests 固定 session、cookies 和 headers 复现请求；JWT 题目先 base64 解码 header/payload，再验证 alg、kid、JWK 与签名。jwcrypto 用于 JWS/JWE，PyJWT 用于常规 JWT 编解码。模板题在本地起 Flask 验证 payload，再发给目标。
 
 ## 可执行示例
 
 ```bash
-python3 -c "import requests; print(requests.get('http://target').status_code)"
+python3 -c "import jwt; t=jwt.encode({'sub':'alice'}, 'secret', algorithm='HS256'); print(t); print(jwt.decode(t, 'secret', algorithms=['HS256']))"
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+检查 HTTP 状态码、响应头、Set-Cookie、JWT header/payload 和签名校验异常；模板渲染结果要与本地复现一致。
 
 ## 常见错误与限制
 
-版本和参数可能随镜像升级变化，执行前先查看 `--help`。
+`jwt.decode` 默认要求显式 algorithms；不要关闭签名校验后把结果用于授权。jwcrypto 与 PyJWT 的 API 不同，先看版本与文档。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [PyJWT / jwcrypto](/memory/catalog/lib_jwt/document)
+- [flask-pin](/memory/catalog/tool_flask_pin/document)
 
 ## 官方参考
 
-- 使用镜像内 `--help`、语言内置帮助或工具上游仓库作为版本对应参考。
+- [https://pyjwt.readthedocs.io/](https://pyjwt.readthedocs.io/)

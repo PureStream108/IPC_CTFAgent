@@ -118,7 +118,7 @@ def test_platform_project_accepts_each_flag_of_a_multi_flag_challenge(state):
 
 def test_platform_verdict_accepts_correct_flag(state):
     client = FakeR2SClient([{"solved": True, "result": "correct"}])
-    state.ret2shell_client = client
+    state.platform_clients = {"ret2shell": client}
     pid = _make_r2s_project(state)
     _raise_candidate(state, pid, "flag{demo}")
 
@@ -145,7 +145,7 @@ def test_platform_verdict_rejects_wrong_flag_and_resumes(state):
         {"solved": False, "result": "wrong flag"},
         {"solved": True, "result": "correct"},
     ])
-    state.ret2shell_client = client
+    state.platform_clients = {"ret2shell": client}
     pid = _make_r2s_project(state)
     _raise_candidate(state, pid, "flag{wrong}")
 
@@ -184,7 +184,7 @@ def test_platform_verdict_unknown_is_retried_then_parked(state):
         Ret2ShellRateLimitError("quota exhausted"),
         Ret2ShellRateLimitError("quota exhausted"),
     ])
-    state.ret2shell_client = client
+    state.platform_clients = {"ret2shell": client}
     pid = _make_r2s_project(state)
     _raise_candidate(state, pid, "flag{demo}")
 
@@ -212,7 +212,7 @@ def test_platform_verdict_unknown_is_retried_then_parked(state):
 
 
 def test_verdict_is_deferred_without_platform_client(state):
-    state.ret2shell_client = None
+    state.platform_clients = {}
     pid = _make_r2s_project(state)
     _raise_candidate(state, pid, "flag{demo}")
 

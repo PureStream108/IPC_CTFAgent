@@ -1,46 +1,45 @@
-# GCC / G++ / Make / CMake
+# GCC / G++ / Make / Musl / CMake
 
-编译题目源码、利用程序和本地复现所需的原生辅助代码。
+编译题目源码、利用程序和本地复现所需的原生辅助代码，并用 musl-gcc 生成静态二进制。
 
 ## 用途与适用场景
 
-先确认输入与目标，再使用 GCC / G++ / Make / CMake 完成针对性分析。
+需要编译 C/C++ 题目、编写 pwntools 辅助程序、构建带调试符号的样本，或生成可移植静态 ELF 时使用。
 
 ## 版本检查
 
 ```bash
-gcc --version
+gcc --version | head -1 && g++ --version | head -1 && musl-gcc --version | head -1 && make --version | head -1
 ```
 
 ## 命令、导入与镜像路径
 
-- 常用入口：`gcc`
-- 镜像路径：`/usr/bin/gcc`
+- 常用入口：`gcc / g++ / make / musl-gcc / cmake`
+- 镜像路径：`/usr/bin/gcc、/usr/bin/g++、/usr/bin/make、/usr/bin/musl-gcc、/usr/bin/cmake`
 
 ## 常用工作流
 
-1. 在 Member 工作目录中确认附件、目标地址和授权范围。
-2. 按题目类型使用 `gcc` 进行最小化探测。
-3. 保存原始输出，再根据结果逐步增加参数，避免一开始执行破坏性操作。
+先看题目是否自带 Makefile/CMakeLists；调试样本用 `-O0 -g -fno-pie -no-pie`，需要跨容器搬运时用 `musl-gcc -static`。编译产物放 /tmp 或 Member 专属目录，避免覆盖附件。
 
 ## 可执行示例
 
 ```bash
-gcc -O0 -g -o sample sample.c
+gcc -O0 -g -fno-pie -no-pie -o /tmp/sample sample.c && musl-gcc -static -O2 -o /tmp/sample-static sample.c && file /tmp/sample-static
 ```
 
 ## 输出解释
 
-重点检查退出码、错误输出、命中项、地址/偏移和生成文件；将可复现结论记录到项目事实与 WP。
+检查编译退出码、架构、是否 PIE、动态依赖和符号；`file`、`readelf -h`、`ldd` 可确认产物是否符合预期。
 
 ## 常见错误与限制
 
-版本和参数可能随镜像升级变化，执行前先查看 `--help`。
+musl 与 glibc 行为存在差异，涉及线程、DNS 或 dlopen 的题目应优先用 glibc 编译。静态链接不等于免沙箱。
 
 ## 关联条目
 
-- 可通过 Memory 工具目录返回同级目录查看相关能力。
+- [objdump](/memory/catalog/tool_objdump/document)
+- [gdb](/memory/catalog/tool_gdb/document)
 
 ## 官方参考
 
-- 使用镜像内 `--help`、语言内置帮助或工具上游仓库作为版本对应参考。
+- [https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)

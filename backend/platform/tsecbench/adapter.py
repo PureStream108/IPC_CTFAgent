@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import socket
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,6 +16,21 @@ from backend.platform.adapter import PlatformAdapter
 from backend.platform.mapping import FieldMapping, PlatformChallenge
 
 _DEFAULT_TIMEOUT = 30
+
+# A container in one of these states has no live service to attack.  Any other
+# status (including a missing field) means the challenge has a remote target.
+_DEAD_CONTAINER_STATUSES = frozenset({"closed", "stopped", "expired"})
+
+CHALLENGE_CACHE_SECONDS = 30.0
+_CHALLENGE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CHALLENGE_CACHE_LOCK = threading.Lock()
+
+
+def reset_challenge_cache() -> None:
+    """Drop every cached challenge list (tests and explicit refreshes)."""
+
+    with _CHALLENGE_CACHE_LOCK:
+        _CHALLENGE_CACHE.clear()
 
 _CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("pwn", (
@@ -70,6 +88,19 @@ class TSECBenchInstanceError(TSECBenchError):
     """Container lifecycle failure with a scheduler-actionable reason."""
 
 
+_QUOTA_MARKERS = (
+    "max active", "active challenge", "too many active", "instance limit",
+    "上限", "limit", "quota", "活跃",
+)
+
+
+def _looks_like_quota(message: str) -> bool:
+    """A full instance pool is a retry, not the end of the benchmark task."""
+
+    lowered = str(message or "").casefold()
+    return any(marker in lowered for marker in _QUOTA_MARKERS)
+
+
 def _classify_error(response: Any) -> TSECBenchError:
     """Translate one HTTP failure into a classified error.
 
@@ -110,16 +141,15 @@ def _classify_error(response: Any) -> TSECBenchError:
     elif code in ("resource_unavailable", "internal_error"):
         reason = "transient"
     elif code == "invalid_state":
-        if any(marker in message for marker in ("上限", "limit", "quota", "活跃")):
-            reason = "quota"
-        else:
-            reason = "ended"
+        reason = "quota" if _looks_like_quota(message) else "ended"
     elif status >= 500:
         reason = "transient"
     elif status == 404:
         reason = "missing"
     elif status == 409:
-        reason = "ended"
+        # 409 invalid_state carries both "task ended" and "max active
+        # instances"; only the former is terminal for the run.
+        reason = "quota" if _looks_like_quota(message) else "ended"
     else:
         reason = "rejected"
     description = f"TSecBench request failed (HTTP {status or 'unknown'}"
@@ -198,24 +228,45 @@ class TSECBenchClient:
                 "TSecBench returned a non-JSON response", reason="transient"
             ) from exc
 
-    def list_challenges(self) -> list[dict[str, Any]]:
+    @property
+    def cache_key(self) -> str:
+        digest = hashlib.sha256(f"{self.base_url}|{self.token}".encode())
+        return digest.hexdigest()[:32]
+
+    def list_challenges(self, *, fresh: bool = False) -> list[dict[str, Any]]:
+        """Read the challenge list, reusing a recent read unless asked otherwise."""
+
+        if not fresh:
+            with _CHALLENGE_CACHE_LOCK:
+                hit = _CHALLENGE_CACHE.get(self.cache_key)
+            if hit is not None and time.monotonic() - hit[0] < CHALLENGE_CACHE_SECONDS:
+                return copy.deepcopy(hit[1])
         payload = self._request("GET", self.PATH_CHALLENGES)
         if not isinstance(payload, list):
             raise TSECBenchError(
                 "TSecBench challenge list was not a JSON array", reason="transient"
             )
-        return [item for item in payload if isinstance(item, dict)]
+        items = [item for item in payload if isinstance(item, dict)]
+        with _CHALLENGE_CACHE_LOCK:
+            _CHALLENGE_CACHE[self.cache_key] = (time.monotonic(), copy.deepcopy(items))
+        return items
+
+    def invalidate(self) -> None:
+        with _CHALLENGE_CACHE_LOCK:
+            _CHALLENGE_CACHE.pop(self.cache_key, None)
 
     def start_container(self, unique_code: str) -> dict[str, Any]:
         payload = self._request(
             "POST", self.PATH_START, params={"unique_code": unique_code}
         )
+        self.invalidate()
         return payload if isinstance(payload, dict) else {}
 
     def close_container(self, unique_code: str) -> dict[str, Any]:
         payload = self._request(
             "POST", self.PATH_CLOSE, params={"unique_code": unique_code}
         )
+        self.invalidate()
         return payload if isinstance(payload, dict) else {}
 
     def hint(self, unique_code: str) -> dict[str, Any]:
@@ -327,7 +378,20 @@ class TSECBenchAdapter(PlatformAdapter):
         for category, keywords in _CATEGORY_KEYWORDS:
             if any(keyword in haystack for keyword in keywords):
                 return category
-        return "misc"
+        return "web+pwn" if self._has_live_remote_target(raw) else "misc"
+
+    @staticmethod
+    def _has_live_remote_target(raw: dict[str, Any]) -> bool:
+        """Whether the raw challenge advertises a usable container endpoint.
+
+        An unclassified challenge with no remote address is a local artifact
+        task (``misc``); one with a running container is a web/pwn target even
+        when its description carries no category keyword.
+        """
+        if not any(item for item in raw.get("container_addr") or []):
+            return False
+        status = str(raw.get("container_status") or "").strip().lower()
+        return status not in _DEAD_CONTAINER_STATUSES
 
     def _normalise(self, raw: dict[str, Any]) -> PlatformChallenge | None:
         external = raw.get("unique_code") or raw.get(self.mapping.id_field)
@@ -352,7 +416,7 @@ class TSECBenchAdapter(PlatformAdapter):
             category=self._category(raw),
             description=str(raw.get("description") or ""),
             attachment_urls=[],
-            remote=bool(container_status) or bool(addresses),
+            remote=True,
             solved=bool(raw.get("is_completed")),
             hints=[],
             platform_data=platform_data,
@@ -387,7 +451,7 @@ class TSECBenchAdapter(PlatformAdapter):
         return [item.model_copy(deep=True) for item in self._by_id.values()]
 
     def preflight(self) -> list[PlatformChallenge]:
-        raw = self.client.list_challenges()
+        raw = self.client.list_challenges(fresh=True)
         if not raw:
             raise TSECBenchPreflightError(
                 "the benchmark task exposes no challenges; verify the benchmark token"
@@ -441,6 +505,9 @@ class TSECBenchAdapter(PlatformAdapter):
         The list endpoint carries the live ``container_status`` for every
         challenge, which is the only place TSecBench exposes an existing
         instance; the reconciliation reader uses it to retire orphans.
+
+        The underlying challenge read is cached inside the client, because the
+        scheduler polls this on every tick.
         """
         if not self.supports_instances:
             return []
@@ -532,7 +599,6 @@ class TSECBenchAdapter(PlatformAdapter):
             if exc.reason == "auth":
                 return {"verdict": "auth_required"}
             if exc.reason == "duplicate":
-                # Duplicate is per flag index, never a proof that the whole task is solved.
                 progress = next((item for item in self.fetch_challenges() if item.external_id == str(external_id)), None)
                 metadata = progress.platform_data if progress else {}
                 return {"verdict": "correct", "reason": "duplicate", "duplicate": True,
