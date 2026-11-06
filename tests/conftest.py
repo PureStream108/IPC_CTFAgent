@@ -110,7 +110,7 @@ def pytest_addoption(parser):
     parser.addoption("--require-postgres", action="store_true", default=False,
                      help="fail collection instead of skipping unavailable PostgreSQL integration tests")
     parser.addoption("--require-docker", action="store_true", default=False,
-                     help="fail collection instead of skipping Docker integration tests")
+                     help="run Docker integration tests and require a working Docker engine")
 
 
 def pytest_collection_modifyitems(config, items) -> None:
@@ -118,14 +118,14 @@ def pytest_collection_modifyitems(config, items) -> None:
         reason="install native PostgreSQL or set IPC_TEST_DATABASE_URL"
     )
     has_database = bool(os.environ.get("IPC_TEST_DATABASE_URL", "").strip()) or NATIVE_PG_CTL is not None
-    has_docker = _docker_available()
-    docker_unavailable = pytest.mark.skip(reason="Docker engine is not available")
+    has_docker = config.getoption("--require-docker") and _docker_available()
+    docker_opt_in = pytest.mark.skip(reason="pass --require-docker to run Docker integration tests")
     for item in items:
         if item.get_closest_marker("docker"):
-            if not has_docker:
-                if config.getoption("--require-docker"):
-                    raise pytest.UsageError("Docker integration is required: start the Docker engine")
-                item.add_marker(docker_unavailable)
+            if not config.getoption("--require-docker"):
+                item.add_marker(docker_opt_in)
+            elif not has_docker:
+                raise pytest.UsageError("Docker integration is required: start the Docker engine")
             continue
         if (
             Path(str(item.fspath)).name not in POSTGRES_TEST_MODULES
