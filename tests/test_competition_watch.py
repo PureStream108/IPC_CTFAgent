@@ -201,3 +201,58 @@ def test_snapshot_reports_the_watch_targets():
     assert snapshot["workflows"] == ["wf_watch"]
     assert snapshot["ticks"] == 1
     assert snapshot["enabled"] is False
+
+
+def test_lifecycle_supports_idempotent_start_wake_and_stop():
+    import time
+
+    service = FakeService([workflow()], FakePlatform([]))
+    watcher = PlatformWatcher(service, interval=10)
+    try:
+        watcher.start()
+        watcher.start()
+        watcher.wake()
+        for _ in range(100):
+            if watcher.snapshot()["ticks"]:
+                break
+            time.sleep(0.01)
+        assert watcher.snapshot()["ticks"] >= 1
+        assert watcher.snapshot()["enabled"] is True
+    finally:
+        watcher.stop()
+
+    assert watcher.snapshot()["enabled"] is False
+    assert service.started == []
+
+
+def test_busy_tick_leaves_discovery_to_the_active_pass():
+    service = FakeService([workflow()], FakePlatform([challenge()]))
+    watcher = PlatformWatcher(service, interval=60)
+    watcher._tick_lock.acquire()
+    try:
+        result = watcher.tick()
+    finally:
+        watcher._tick_lock.release()
+
+    assert result == {"ok": True, "action": "busy", "ticks": 0}
+    assert service.started == []
+    assert service.platform.calls == 0
+
+
+def test_refresh_conflict_is_a_nonfatal_coordinator_state():
+    from backend.competition.store import CompetitionConflict
+
+    class ConflictingService(FakeService):
+        def refresh(self, run_id):
+            raise CompetitionConflict("coordinator owns the run")
+
+    active = {"id": "run_live", "workflow_id": "wf_watch", "status": "running"}
+    service = ConflictingService([workflow()], FakePlatform([challenge()]), active=active)
+    watcher = PlatformWatcher(service, interval=60, workflow_ids=["wf_watch"])
+
+    result = watcher.tick()
+
+    assert result["ok"] is True
+    assert result["action"] == "run run_live is being refreshed"
+    assert watcher.snapshot()["refreshes"] == 0
+    assert watcher.snapshot()["last_error"] == ""
